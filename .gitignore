@@ -1,0 +1,20 @@
+# 环境变量与密钥 —— 绝不提交
+.env
+.env.*
+
+# Chroma 向量库本地数据（RAG）
+.chroma/
+
+# 本地工具会话状态（非项目代码）
+.mimosa/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.venv/
+venv/

@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "data_dog"
+version = "0.1.0"
+description = "机器狗及其他具身设备遥测的 Agentic 故障调查平台 —— 一个会自己调查、关联、裁决并输出结构化调查报告的 Agent。"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "data_dog" }]
+keywords = ["agent", "telemetry", "robotics", "anomaly-detection", "llm"]
+dependencies = [
+    "openai>=1.30.0",
+    "pydantic>=2.0.0",
+    "python-dotenv>=1.0.0",
+    "typer>=0.12.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+]
+
+[project.scripts]
+data-dog = "data_dog.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+data_dog = ["py.typed"]
