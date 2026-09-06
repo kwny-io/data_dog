@@ -161,8 +161,29 @@ class EvidenceStore:
     def query_vendor_knowledge(
         self, component_type: str, question: Optional[str] = None
     ) -> List[Dict[str, str]]:
+        # A7：DD_KB_CHROMA=1 → 走真 RAG（chroma-mcp 查询真实厂商语料）；
+        # 失败则降级到内置条目并标注 retriever，不冒充 RAG 结果。
+        import os
+        if os.environ.get("DD_KB_CHROMA") == "1":
+            try:
+                from ..knowledge import query_knowledge
+                hits = query_knowledge(question or component_type, n_results=3)
+                if hits:
+                    return [{
+                        "id": h["id"],
+                        "domain": "vendor-doc",
+                        "rule": h["text"],
+                        "source": h["source"],
+                        "distance": h["distance"],
+                        "retriever": "chroma-rag",
+                    } for h in hits]
+            except Exception:
+                pass  # 降级到内置条目
+        items = [{
+            **item, "retriever": "builtin_dict"
+        } for item in VENDOR_KNOWLEDGE.get(component_type, [])]
         # 简单按组件类型返回全部条目；生产会做语义检索
-        return VENDOR_KNOWLEDGE.get(component_type, [])
+        return items
 
     def query_neighbor_events(
         self, device_sn: str, component: str, window_start: str, window_end: str
