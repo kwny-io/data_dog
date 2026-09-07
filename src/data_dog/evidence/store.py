@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from ..errors import ToolErrorCode, err
+from .detectors import load_detector
 
 # 可查询的部件范围白名单（模拟权限控制）
 ALLOWED_COMPONENTS = {
@@ -135,6 +136,10 @@ RECENT_CHANGES: Dict[str, List[Dict[str, Any]]] = {
 class EvidenceStore:
     """只读的证据库，Agent 通过 Tool 访问。"""
 
+    def __init__(self, detector: Any = None):
+        # 桥接 A1：加载离线索生成的检测算子，供在线检测
+        self._detector = detector if detector is not None else load_detector()
+
     def query_telemetry(
         self, device_sn: str, component: str, window_start: str, window_end: str
     ) -> Optional[Dict[str, Any]]:
@@ -144,7 +149,8 @@ class EvidenceStore:
         metrics = TELEMETRY.get(component, {}).get(win)
         if metrics is None:
             return None
-        # 附上同部件"上一参照窗口"，帮助对比趋势
+        # 用生成的检测算子对这份遥测做在线检测，命中作为 Agent 证据
+        detection = self._detector.detect(component, metrics)
         base = None
         comps = TELEMETRY.get(component, {})
         keys = sorted(comps.keys())
@@ -156,6 +162,7 @@ class EvidenceStore:
             "window": win,
             "metrics": metrics,
             "reference_window_metrics": base,
+            "detection": detection,   # 新增：生成算子的判定证据
         }
 
     def query_vendor_knowledge(

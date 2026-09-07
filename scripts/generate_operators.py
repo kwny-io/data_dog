@@ -62,7 +62,7 @@ MOTOR_THRESHOLDS = [
 ]
 BATT_THRESHOLDS = [
     {"rule_id": "BATT_SOC_LOW", "field": "soc", "operator": "le",
-     "value": 20.0, "severity_hint": "warning",
+     "value": 0.2, "severity_hint": "warning",
      "message": "电量低于20%"},
 ]
 
