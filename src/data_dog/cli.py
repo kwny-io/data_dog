@@ -151,13 +151,21 @@ def test(
     history = []
     while True:
         choice = typer.prompt(
-            "\n挑选一个编号调查 [1-%d]，b=对比上一步，q=结束并汇总，i=导入自定义 JSON"
+            "\n挑选一个编号调查 [1-%d]，n=临时新建异常，b=对比上一步，q=结束并汇总，i=导入自定义 JSON"
             % len(TEST_CASES),
             default="1",
         ).strip().lower()
 
         if choice == "q":
             break
+        if choice == "n":
+            cand, label, source = _prompt_new_candidate(console)
+            if cand is None:
+                continue
+            _run_and_render(label, source, cand)
+            history.append(label)
+            added += 1
+            continue
         if choice == "i":
             path = typer.prompt("自定义候选 JSON 路径（输入回车取消）", default="").strip()
             if not path:
@@ -183,7 +191,7 @@ def test(
             idx = int(choice)
             case = TEST_CASES[idx - 1]
         except (ValueError, IndexError):
-            console.print(f"[yellow]无效输入，请输入 1~{len(TEST_CASES)} 或 q/i/b[/]")
+            console.print(f"[yellow]无效输入，请输入 1~{len(TEST_CASES)} 或 n/i/b/q[/]")
             continue
 
         cand = _make_candidate(case)
@@ -206,6 +214,54 @@ def _try_load_custom(path: str) -> CandidateEvent | None:
         return _load_candidate(p)
     except Exception:
         return None
+
+
+# 可选作为临时异常部件；白名单外会返回 denied（有意的权限演示）
+_ALLOWED = (
+    "joint_motor.front_left_hip",
+    "joint_motor.front_right_hip",
+    "joint_motor.front_left_knee",
+    "battery.main",
+    "controller.main",
+)
+
+
+def _prompt_new_candidate(console):
+    """问答式临时新建一个候选异常（n 进入），不用建文件。填完返回 (CandidateEvent, label, source)。"""
+    from rich.panel import Panel
+    console.print(Panel(
+        "问答式临时新建候选异常。部件可用白名单（其他会返回 denied 演示权限拦截）：\n  "
+        + "\n  ".join(_ALLOWED),
+        title="临时新建 (n)",
+        border_style="green",
+    ))
+    comp = typer.prompt("部件 (component_ref)", default="joint_motor.front_left_hip").strip()
+    if not comp:
+        console.print("[dim]已取消[/]")
+        return None, None, None
+    signal = typer.prompt("信号 (signal)", default="temperature_rising_under_normalized_load").strip() or "custom_signal"
+    ws = typer.prompt("窗口开始 (window_start)", default="09:55").strip() or "09:55"
+    we = typer.prompt("窗口结束 (window_end)", default="10:00").strip() or "10:00"
+    sev = typer.prompt("严重度 (warning/critical)", default="warning").strip() or "warning"
+    try:
+        score = float(typer.prompt("异常分 (anomaly_score, 0~1)", default="0.5").strip() or "0.5")
+    except ValueError:
+        score = 0.5
+
+    cand = CandidateEvent(
+        candidate_id="manual-" + comp.replace(".", "_")[-24:],
+        device_sn="device-abc123",
+        component_ref=comp,
+        signal=signal,
+        severity_hint=sev,
+        window_start=ws,
+        window_end=we,
+        sample_count=300,
+        rule_matches=["MANUAL"],
+        anomaly_score=score,
+        detector_provenance="manual-entry",
+    )
+    return cand, f"临时: {comp}", "临时填写"
 
 
 def _make_provider(offline: bool, vendor: str | None, model: str | None,
