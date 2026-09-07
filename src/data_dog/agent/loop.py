@@ -65,11 +65,20 @@ class AgentLoop:
         tools: InvestigationTools,
         max_steps: int = 8,
         model: str | None = None,
+        trace_cb=None,
     ):
         self.provider = provider
         self.tools = tools
         self.max_steps = max_steps
         self.model = model
+        self.trace_cb = trace_cb  # 每步工具调用的回调（供前端渲染 ReAct 轨迹）
+
+    def _trace(self, event: dict) -> None:
+        if self.trace_cb is not None:
+            try:
+                self.trace_cb(event)
+            except Exception:
+                pass  # 前端回调失败不影响调查主流程
 
     def investigate(self, candidate: CandidateEvent) -> InvestigationReport:
         # ---- A4：可信上下文（三选一，失败关闭）----
@@ -134,6 +143,14 @@ class AgentLoop:
                     args = {}
                 result = tools.call(name, args)
                 collected.append((tc["id"], result))
+                # ReAct 轨迹：把这一步"想调的"记下来
+                self._trace({
+                    "type": "tool_call",
+                    "step": steps,
+                    "name": name,
+                    "args": args,
+                    "result": result,
+                })
 
             # 协议要求：一条 assistant 消息（回显全部 tool_calls）+
             # 每条 tool_call 对应一条 tool 消息
