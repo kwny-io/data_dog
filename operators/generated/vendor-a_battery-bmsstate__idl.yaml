@@ -1,0 +1,59 @@
+component: battery.main
+fields:
+- name: version_high
+  optional: false
+  source: version_high
+  type: uint8
+  unit: null
+- name: version_low
+  optional: false
+  source: version_low
+  type: uint8
+  unit: null
+- name: status
+  optional: false
+  source: status
+  type: uint8
+  unit: null
+- name: soc
+  optional: false
+  source: soc
+  type: uint8
+  unit: percent
+- name: current
+  optional: false
+  source: current
+  type: int32
+  unit: ampere
+- name: cycle
+  optional: false
+  source: cycle
+  type: uint16
+  unit: null
+- name: bq_ntc
+  optional: false
+  source: bq_ntc
+  type: array
+  unit: null
+- name: mcu_ntc
+  optional: false
+  source: mcu_ntc
+  type: array
+  unit: null
+- name: cell_vol
+  optional: false
+  source: cell_vol
+  type: array
+  unit: null
+generator_provenance: scope:vendor_docs\unitree\cleaned\raw\unitree_sdk2__BmsState_.idl.txt
+input_schema: raw-log-envelope-v1
+operator_id: vendor-a.battery-bmsstate_.idl
+operator_type: parser
+output_schema: normalized-telemetry-v1
+rules:
+- field: soc
+  message: 电量低于20%
+  operator: le
+  rule_id: BATT_SOC_LOW
+  severity_hint: warning
+  value: 20.0

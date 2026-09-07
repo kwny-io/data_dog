@@ -1,0 +1,75 @@
+component: joint_motor.front_left_hip
+fields:
+- name: mode
+  optional: false
+  source: mode
+  type: uint8
+  unit: null
+- name: q
+  optional: false
+  source: q
+  type: float32
+  unit: radian
+- name: dq
+  optional: false
+  source: dq
+  type: float32
+  unit: rad/s
+- name: ddq
+  optional: false
+  source: ddq
+  type: float32
+  unit: rad/s2
+- name: tau_est
+  optional: false
+  source: tau_est
+  type: float32
+  unit: null
+- name: q_raw
+  optional: false
+  source: q_raw
+  type: float32
+  unit: null
+- name: dq_raw
+  optional: false
+  source: dq_raw
+  type: float32
+  unit: null
+- name: ddq_raw
+  optional: false
+  source: ddq_raw
+  type: float32
+  unit: null
+- name: temperature
+  optional: false
+  source: temperature
+  type: uint8
+  unit: celsius
+- name: lost
+  optional: false
+  source: lost
+  type: uint32
+  unit: null
+- name: reserve
+  optional: false
+  source: reserve
+  type: array
+  unit: null
+generator_provenance: scope:vendor_docs\unitree\cleaned\raw\unitree_sdk2__MotorState_.idl.txt
+input_schema: raw-log-envelope-v1
+operator_id: vendor-a.joint_motor-motorstate_.idl
+operator_type: parser+detector
+output_schema: normalized-telemetry-v1
+rules:
+- field: temperature
+  message: 连续窗口温度达到75°C，判定热退化风险（KD-01）
+  operator: ge
+  rule_id: MOTOR_TEMP_TREND
+  severity_hint: warning
+  value: 75.0
+- field: temperature
+  message: 温度达90°C，触发硬件过温保护并停机（KD-02）
+  operator: ge
+  rule_id: MOTOR_TEMP_OVERPROTECT
+  severity_hint: critical
+  value: 90.0

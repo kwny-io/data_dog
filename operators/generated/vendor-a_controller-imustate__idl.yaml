@@ -1,0 +1,33 @@
+component: controller.main
+fields:
+- name: quaternion
+  optional: false
+  source: quaternion
+  type: array
+  unit: null
+- name: gyroscope
+  optional: false
+  source: gyroscope
+  type: array
+  unit: null
+- name: accelerometer
+  optional: false
+  source: accelerometer
+  type: array
+  unit: null
+- name: rpy
+  optional: false
+  source: rpy
+  type: array
+  unit: null
+- name: temperature
+  optional: false
+  source: temperature
+  type: uint8
+  unit: celsius
+generator_provenance: scope:vendor_docs\unitree\cleaned\raw\unitree_sdk2__IMUState_.idl.txt
+input_schema: raw-log-envelope-v1
+operator_id: vendor-a.controller-imustate_.idl
+operator_type: parser
+output_schema: normalized-telemetry-v1
+rules: []

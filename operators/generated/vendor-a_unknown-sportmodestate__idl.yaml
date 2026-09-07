@@ -1,0 +1,78 @@
+component: unknown
+fields:
+- name: error_code
+  optional: false
+  source: error_code
+  type: uint32
+  unit: null
+- name: mode
+  optional: false
+  source: mode
+  type: uint8
+  unit: null
+- name: progress
+  optional: false
+  source: progress
+  type: float32
+  unit: null
+- name: gait_type
+  optional: false
+  source: gait_type
+  type: uint8
+  unit: null
+- name: foot_raise_height
+  optional: false
+  source: foot_raise_height
+  type: float32
+  unit: null
+- name: position
+  optional: false
+  source: position
+  type: array
+  unit: null
+- name: body_height
+  optional: false
+  source: body_height
+  type: float32
+  unit: null
+- name: velocity
+  optional: false
+  source: velocity
+  type: array
+  unit: null
+- name: yaw_speed
+  optional: false
+  source: yaw_speed
+  type: float32
+  unit: null
+- name: range_obstacle
+  optional: false
+  source: range_obstacle
+  type: array
+  unit: null
+- name: foot_force
+  optional: false
+  source: foot_force
+  type: array
+  unit: null
+- name: foot_position_body
+  optional: false
+  source: foot_position_body
+  type: array
+  unit: null
+- name: foot_speed_body
+  optional: false
+  source: foot_speed_body
+  type: array
+  unit: null
+- name: path_point
+  optional: false
+  source: path_point
+  type: array
+  unit: null
+generator_provenance: scope:vendor_docs\unitree\cleaned\raw\unitree_sdk2__SportModeState_.idl.txt
+input_schema: raw-log-envelope-v1
+operator_id: vendor-a.unknown-sportmodestate_.idl
+operator_type: parser
+output_schema: normalized-telemetry-v1
+rules: []

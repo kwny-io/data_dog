@@ -1,0 +1,18 @@
+component: unknown
+fields:
+- name: source
+  optional: false
+  source: source
+  type: uint32
+  unit: null
+- name: state
+  optional: false
+  source: state
+  type: uint32
+  unit: null
+generator_provenance: scope:vendor_docs\unitree\cleaned\raw\unitree_sdk2__Error_.idl.txt
+input_schema: raw-log-envelope-v1
+operator_id: vendor-a.unknown-error_.idl
+operator_type: parser
+output_schema: normalized-telemetry-v1
+rules: []
