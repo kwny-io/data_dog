@@ -43,6 +43,42 @@ def make_trace_cb() -> (List[dict], Callable[[dict], None]):
     return steps, _on_step
 
 
+def _summarize_result(name: str, result) -> str:
+    """按工具类型精排返回值，避免泼一屏 JSON。
+
+    遥测：显示温度/电流/转速 + 检测命中；
+    变更：显示固件/算子变更要点；
+    其他：只显示最关键的 few 个键。
+    """
+    if not isinstance(result, dict):
+        return str(result)
+    if result.get("ok") is False:
+        return f"[red]错误: {result.get('error')}[/]"
+    if name == "query_candidate_evidence":
+        metrics = result.get("metrics", {})
+        ref = result.get("reference_window_metrics", {})
+        parts = []
+        for k, v in metrics.items():
+            rv = f" (参照{ref.get(k)})" if k in ref else ""
+            parts.append(f"{k}={v}{rv}")
+        # 检测命中
+        det = result.get("detection", [])
+        det_txt = ""
+        if det:
+            det_txt = "  ⚠️ " + ", ".join(
+                f"{d['rule_id']}:{d.get('observed')}{'>=' if d.get('operator') in ('ge','gt') else '<='}{d.get('threshold')}"
+                for d in det)
+        return " | ".join(parts) + det_txt
+    if name == "query_recent_changes":
+        return "".join(
+            f"\n    · {c.get('what')} ({c.get('applied_at')})" for c in result.get("changes", []))
+    if name == "query_vendor_knowledge":
+        return f"{len(result.get('items', []))} 条厂商知识"
+    if name == "query_neighbor_events":
+        return f"{len(result.get('events', []))} 个邻居事件"
+    return json.dumps(result, ensure_ascii=False)[:200]
+
+
 def _render_step(step: dict) -> None:
     name = step.get("name", "?")
     icon, color = _TOOL_STYLE.get(name, ("🔧 ", "white"))
@@ -52,17 +88,13 @@ def _render_step(step: dict) -> None:
     # 参数
     args = json.dumps(step.get("args", {}), ensure_ascii=False)[:130]
     result = step.get("result", {})
-    # 若 result 里有 detection，额外标出来更直观
-    det = result.get("detection") if isinstance(result, dict) else None
-    det_txt = ""
-    if det:
-        det_txt = "  ⚠️ " + ", ".join(f"{d['rule_id']}({d['severity_hint']})" for d in det)
     grid.add_row(
         f"[bold]第{step.get('step', '?')}步[/]",
-        f"{icon}[bold {color}]{name}[/bold {color}]({args}){det_txt}",
+        f"{icon}[bold {color}]{name}[/bold {color}]({args})",
     )
-    # 返回值摘要
-    grid.add_row("", Text.from_markup(f"← {json.dumps(result, ensure_ascii=False)[:300]}"))
+    # 精排后的返回值
+    summary = _summarize_result(name, result)
+    grid.add_row("", Text.from_markup(f"← {summary}"))
     console.print(grid)
 
 
