@@ -25,7 +25,11 @@ ALLOWED_COMPONENTS = {
 # 结构：component -> window_key -> metrics dict
 TELEMETRY: Dict[str, Dict[str, Dict[str, float]]] = {
     "joint_motor.front_left_hip": {
-        # 更早的窗口：唯一一个"似乎正常"的窗口，用于对比
+        # 一整段真实的升温过程（现场感）：09:40 起温度/电流随负载逐步爬升，
+        # 到 09:50 已达 58°C（稳态偏热），09:55~10:00 突破 75°C 告警阈。
+        # 保留 09:50-09:55 = 58.0 作为 09:55 主窗口的"上一窗参照"（不回退基线）。
+        "09:40-09:45": {"temperature_c": 52.0, "current_a": 6.3, "velocity_rpm": 1265},
+        "09:45-09:50": {"temperature_c": 55.0, "current_a": 6.1, "velocity_rpm": 1270},
         "09:50-09:55": {"temperature_c": 58.0, "current_a": 6.0, "velocity_rpm": 1280},
         # 主窗口：温度一路爬升到 78.2，电流也涨到 9.7 —— 异常信号
         "09:55-10:00": {

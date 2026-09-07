@@ -1,0 +1,11 @@
+# data_dog 运行依赖（`pip install -r requirements.txt` 一键装全）
+# 若用 `pip install -e .` 则自动装，无需手动装这里。
+openai>=1.30.0
+pydantic>=2.0.0
+python-dotenv>=1.0.0
+typer>=0.12.0
+PyYAML>=6.0
+rich>=13.0.0
+
+# Web 界面（可选）：python -m streamlit run ui/app.py
+streamlit>=1.30.0
