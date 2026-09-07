@@ -89,19 +89,23 @@ def run(
     ),
     vendor: str | None = typer.Option(None, help="指定供应商，覆盖配置"),
     model: str | None = typer.Option(None, help="指定模型，覆盖配置"),
+    offline: bool = typer.Option(False, help="离线演示（用 fake provider，无需 key）"),
 ):
-    """用已配置的模型调查一个候选异常，输出 InvestigationReport。"""
-    cfg = load_config()
-    vid = vendor or cfg["vendor_id"]
-    key = cfg["api_key"]
-    mdl = model or cfg["model"] or None
-
-    if not key:
-        typer.echo("尚未配置 API Key，请先运行: data-dog init", err=True)
-        raise typer.Exit(1)
-
+    """调查一个候选异常，输出 InvestigationReport（rich 精美输出）。"""
+    # reusable provider
     from .providers.client import Provider
-    provider = Provider.from_config(vid, key)
+
+    if offline:
+        provider = _FakeProvider()
+    else:
+        cfg = load_config()
+        vid = vendor or cfg["vendor_id"]
+        key = cfg["api_key"]
+        mdl = model or cfg["model"] or None
+        if not key:
+            typer.echo("尚未配置 API Key。加 --offline 用离线条模型演示，或先 data-dog init", err=True)
+            raise typer.Exit(1)
+        provider = Provider.from_config(vid, key)
 
     from .evidence.store import EvidenceStore
     from .tools.investigation import InvestigationTools
@@ -109,13 +113,66 @@ def run(
 
     candidate = _load_candidate(fixture)
     tools = InvestigationTools(EvidenceStore())
-    agent = AgentLoop(provider, tools, model=mdl)
+    trace_steps, trace_cb = _make_trace_cb()
+    agent = AgentLoop(provider, tools, model=model, trace_cb=trace_cb)
 
-    typer.echo(f"调查候选异常: {candidate.candidate_id} ({candidate.signal})")
+    from rich.console import Console
+    console = Console()
+    console.print(f"[bold]调查候选[/]: [cyan]{candidate.candidate_id}[/] ({candidate.signal})")
     report = agent.investigate(candidate)
+    _render_report(report)
 
-    typer.echo("\n===== InvestigationReport =====")
-    typer.echo(json.dumps(report.to_dict(), ensure_ascii=False, indent=2))
+
+def _ui_module(name: str):
+    """从 ui/ 目录按路径加载模块（ui 不在包内，用路径导入）。"""
+    import importlib.util
+    from pathlib import Path
+    here = Path(__file__).resolve()
+    ui_path = here.parents[2] / "ui" / f"{name}.py"
+    spec = importlib.util.spec_from_file_location(name, ui_path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _make_trace_cb():
+    return _ui_module("rich_run").make_trace_cb()
+
+
+def _render_report(report):
+    _ui_module("rich_run").render_report(report)
+
+
+class _FakeProvider:
+    """无 key 离线演示用。"""
+    def __init__(self):
+        self.n = 0
+
+    def chat(self, messages, tools=None, **kw):
+        import json as _json
+        self.n += 1
+        if self.n == 1:
+            return {"kind": "tool_calls", "tool_calls": [{
+                "id": "m1", "name": "query_candidate_evidence",
+                "arguments": _json.dumps({"device_sn": "device-abc123",
+                                          "component": "joint_motor.front_left_hip",
+                                          "window_start": "09:55", "window_end": "10:00"}),
+                "content": ""}], "__raw_tool_calls": []}
+        if self.n == 2:
+            return {"kind": "tool_calls", "tool_calls": [{
+                "id": "m2", "name": "query_recent_changes",
+                "arguments": _json.dumps({"device_sn": "device-abc123",
+                                          "component": "joint_motor.front_left_hip",
+                                          "since": "2026-08-10"}),
+                "content": ""}], "__raw_tool_calls": []}
+        return {"kind": "text", "content": _json.dumps({
+            "disposition": "needs_human_review", "severity": "warning", "confidence": 0.6,
+            "summary": "温度78.2°C超过75°C阈值且电流上升，但固件3.2.1(8/12)变更冷却参数，需人工区分固件效应与真实退化。",
+            "hypotheses": [{"cause": "固件3.2.1冷却变更导致", "status": "supported"},
+                           {"cause": "轴承摩擦增大", "status": "supported"}],
+            "missing_evidence": ["升级前基线"],
+            "recommended_actions": ["复核固件基线", "检查轴承"],
+        }, ensure_ascii=False)}
 
 
 def _load_candidate(path: Path) -> CandidateEvent:
