@@ -1,0 +1,7 @@
+[来源: raw\unitree_sdk2__IMUState_.idl.txt] [structured: True] [kind: schema_field]
+raw\unitree_sdk2__IMUState_.idl.txt 定义的结构体字段：
+- quaternion: type=array
+- gyroscope: type=array
+- accelerometer: type=array
+- rpy: type=array
+- temperature: type=uint8

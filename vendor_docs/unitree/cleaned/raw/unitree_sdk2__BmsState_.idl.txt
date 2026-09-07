@@ -1,0 +1,11 @@
+[来源: raw\unitree_sdk2__BmsState_.idl.txt] [structured: True] [kind: schema_field]
+raw\unitree_sdk2__BmsState_.idl.txt 定义的结构体字段：
+- version_high: type=uint8
+- version_low: type=uint8
+- status: type=uint8
+- soc: type=uint8
+- current: type=int32
+- cycle: type=uint16
+- bq_ntc: type=array
+- mcu_ntc: type=array
+- cell_vol: type=array

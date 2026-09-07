@@ -1,0 +1,16 @@
+[来源: raw\unitree_sdk2__SportModeState_.idl.txt] [structured: True] [kind: schema_field]
+raw\unitree_sdk2__SportModeState_.idl.txt 定义的结构体字段：
+- error_code: type=uint32
+- mode: type=uint8
+- progress: type=float32
+- gait_type: type=uint8
+- foot_raise_height: type=float32
+- position: type=array
+- body_height: type=float32
+- velocity: type=array
+- yaw_speed: type=float32
+- range_obstacle: type=array
+- foot_force: type=array
+- foot_position_body: type=array
+- foot_speed_body: type=array
+- path_point: type=array

@@ -1,0 +1,4 @@
+[来源: raw\unitree_sdk2__Error_.idl.txt] [structured: True] [kind: schema_field]
+raw\unitree_sdk2__Error_.idl.txt 定义的结构体字段：
+- source: type=uint32
+- state: type=uint32

@@ -16,14 +16,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from chroma_rag_smoke import CHROMA_EXE, McpClient, text_of  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
-CORPUS_DIR = ROOT / "vendor_docs" / "unitree"
+CORPUS_DIR = ROOT / "vendor_docs" / "unitree" / "cleaned"  # 清洗+结构化后的语料
 COLLECTION = "unitree_go2"
 DATA_DIR = ROOT / ".chroma"
 MAX_CHUNK = 700
 
 
 def iter_corpus_files():
-    for pattern in ("*.md", "*.idl.txt"):
+    for pattern in ("*.md", "*.txt"):
         yield from sorted(CORPUS_DIR.rglob(pattern))
 
 
@@ -45,12 +45,13 @@ def chunk_text(text: str, source: str):
 
 
 def main() -> int:
+    reset = "--reset" in sys.argv
     docs, ids = [], []
     for f in iter_corpus_files():
         rel = str(f.relative_to(CORPUS_DIR))
         text = f.read_text(encoding="utf-8", errors="replace")
         for i, c in enumerate(chunk_text(text, rel)):
-            ids.append(f"{rel}#{i}")
+            ids.append(f"c:{rel}#{i}")
             docs.append(c)
     print(f"语料: {len(set(i.split('#')[0] for i in ids))} 个文件 → {len(docs)} 个 chunk", flush=True)
     if not docs:
@@ -67,6 +68,12 @@ def main() -> int:
                                  "capabilities": {},
                                  "clientInfo": {"name": "ingest", "version": "0"}})
         c.request("notifications/initialized", notify=True)
+
+        if reset:
+            # 确保无锁进程后再删旧集合，重灌干净语料
+            r = c.request("tools/call", {"name": "chroma_delete_collection",
+                                         "arguments": {"collection_name": COLLECTION}})
+            print("[delete]", text_of(r)[:80])
 
         r = c.request("tools/call", {"name": "chroma_create_collection",
                                      "arguments": {"collection_name": COLLECTION}})

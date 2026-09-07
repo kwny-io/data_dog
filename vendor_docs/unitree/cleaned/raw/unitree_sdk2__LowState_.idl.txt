@@ -1,0 +1,22 @@
+[来源: raw\unitree_sdk2__LowState_.idl.txt] [structured: True] [kind: schema_field]
+raw\unitree_sdk2__LowState_.idl.txt 定义的结构体字段：
+- head: type=array
+- level_flag: type=uint8
+- frame_reserve: type=uint8
+- sn: type=array
+- version: type=array
+- bandwidth: type=uint16
+- motor_state: type=array
+- foot_force: type=array
+- foot_force_est: type=array
+- tick: type=uint32
+- wireless_remote: type=array
+- bit_flag: type=uint8
+- adc_reel: type=float32
+- temperature_ntc1: type=uint8
+- temperature_ntc2: type=uint8
+- power_v: type=float32
+- power_a: type=float32
+- fan_frequency: type=array
+- reserve: type=uint32
+- crc: type=uint32

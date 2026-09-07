@@ -1,0 +1,13 @@
+[来源: raw\unitree_sdk2__MotorState_.idl.txt] [structured: True] [kind: schema_field]
+raw\unitree_sdk2__MotorState_.idl.txt 定义的结构体字段：
+- mode: type=uint8
+- q: type=float32
+- dq: type=float32
+- ddq: type=float32
+- tau_est: type=float32
+- q_raw: type=float32
+- dq_raw: type=float32
+- ddq_raw: type=float32
+- temperature: type=uint8
+- lost: type=uint32
+- reserve: type=array
