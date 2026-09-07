@@ -126,14 +126,35 @@ def render_report(report) -> None:
             for h in hyps)
         console.print(Panel(hyps_panel, title="假设", border_style="blue", expand=False))
 
-    # 缺失证据、风险窗口、建议
-    if d.get("missing_evidence"):
-        console.print("[bold]缺失证据:[/] " + "、".join(d["missing_evidence"]))
-    if d.get("risk_window"):
-        console.print(f"[bold]风险窗口:[/] {d['risk_window']}")
+    # 缺失证据、风险窗口、建议（用 Panel 包裹，避免裸蜕文本）
     acts = d.get("recommended_actions", [])
-    if acts:
-        console.print("[bold]建议动作:[/]")
-        for a in acts:
-            console.print(f"  · {a}")
+    if d.get("missing_evidence") or d.get("risk_window") or acts:
+        body = []
+        if d.get("missing_evidence"):
+            body.append("[bold]缺失证据:[/] " + "、".join(d["missing_evidence"]))
+        if d.get("risk_window"):
+            body.append(f"[bold]风险窗口:[/] {d['risk_window']}")
+        if acts:
+            body.append("[bold]建议动作:[/]")
+            for a in acts:
+                body.append(f"  · {a}")
+        console.print(Panel("\n".join(body), title="待办 / 缺失", border_style="magenta", expand=False))
     console.rule()
+
+
+def render_compare(results) -> None:
+    """把一轮 test 会话里多次调查的结论排成对比表，突出不同候选 → 不同结论。"""
+    t = Table(title="候选对比", box=None)
+    t.add_column("候选")
+    t.add_column("裁决", justify="center")
+    t.add_column("置信度", justify="right")
+    for label, source, report in results:
+        d = report.to_dict()
+        disp = d.get("disposition", "?")
+        color = _DISPOSITION_STYLE.get(disp, "white")
+        t.add_row(
+            label,
+            f"[{color}]{disp.upper()}[/{color}]",
+            f"{d.get('confidence', 0.0):.2f}",
+        )
+    console.print(t)

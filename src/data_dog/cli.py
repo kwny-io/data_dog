@@ -3,7 +3,8 @@
 
 用法：
   data-dog init   交互式选择供应商并接入你的 API key（小白式）
-  data-dog run   用已配置的模型跑一次候选异常调查，输出 InvestigationReport
+  data-dog run    用已配置的模型跑一次候选异常调查，输出 InvestigationReport
+  data-dog test   交互窗：从候选清单挑一个调查（或导入自定义 JSON），可在一次会话里对比多个结论
 """
 from __future__ import annotations
 
@@ -92,35 +93,154 @@ def run(
     offline: bool = typer.Option(False, help="离线演示（用 fake provider，无需 key）"),
 ):
     """调查一个候选异常，输出 InvestigationReport（rich 精美输出）。"""
-    # reusable provider
-    from .providers.client import Provider
-
-    if offline:
-        provider = _FakeProvider()
-    else:
-        cfg = load_config()
-        vid = vendor or cfg["vendor_id"]
-        key = cfg["api_key"]
-        mdl = model or cfg["model"] or None
-        if not key:
-            typer.echo("尚未配置 API Key。加 --offline 用离线条模型演示，或先 data-dog init", err=True)
-            raise typer.Exit(1)
-        provider = Provider.from_config(vid, key)
-
-    from .evidence.store import EvidenceStore
-    from .tools.investigation import InvestigationTools
-    from .agent.loop import AgentLoop
-
-    candidate = _load_candidate(fixture)
-    tools = InvestigationTools(EvidenceStore())
-    trace_steps, trace_cb = _make_trace_cb()
-    agent = AgentLoop(provider, tools, model=model, trace_cb=trace_cb)
+    provider = _make_provider(offline, vendor, model)
+    cand = _load_candidate(fixture)
 
     from rich.console import Console
     console = Console()
-    console.print(f"[bold]调查候选[/]: [cyan]{candidate.candidate_id}[/] ({candidate.signal})")
-    report = agent.investigate(candidate)
+    console.print(f"[bold]调查候选[/]: [cyan]{cand.candidate_id}[/] ({cand.signal})")
+    console.print(f"[dim]来源[/]: {fixture}")
+
+    evidence, tools, agent = _build_agent(provider, model)
+    report = agent.investigate(cand)
     _render_report(report)
+
+
+@app.command()
+def test(
+    vendor: str | None = typer.Option(None, help="指定供应商，覆盖配置"),
+    model: str | None = typer.Option(None, help="指定模型，覆盖配置"),
+    offline: bool = typer.Option(False, help="离线演示（用 fake provider，无需 key）"),
+):
+    """交互窗：从候选清单挑一个调查，也可导入自定义 JSON；一轮可对比多个结论。"""
+    from .candidates import BY_KEY, TEST_CASES
+    from rich.console import Console
+    from rich.panel import Panel
+    from rich.table import Table
+
+    console = Console()
+    provider = _make_provider(offline, vendor, model, interactive=True)
+
+    results = []  # [(label, source, report)]
+
+    def _run_and_render(label: str, source: str, cand: CandidateEvent) -> None:
+        console.rule(f"[bold]{label}[/]")
+        console.print(Panel(
+            f"[cyan]{cand.candidate_id}[/]  {cand.signal}\n"
+            f"[dim]部件[/] {cand.component_ref}  [dim]窗口[/] {cand.window_start}~{cand.window_end}\n"
+            f"[dim]来源[/] {source}",
+            title="候选",
+            border_style="cyan",
+        ))
+        _, tools, agent = _build_agent(provider, model)
+        if isinstance(provider, _FakeProvider):
+            provider.reset()
+        report = agent.investigate(cand)
+        results.append((label, source, report))
+        _render_report(report)
+
+    # 第一次：列出候选清单
+    list_t = Table(title="候选异常清单", box=None)
+    list_t.add_column("#", justify="right")
+    list_t.add_column("名称")
+    for i, c in enumerate(TEST_CASES, 1):
+        list_t.add_row(str(i), c.label)
+    console.print(list_t)
+
+    added = 0
+    history = []
+    while True:
+        choice = typer.prompt(
+            "\n挑选一个编号调查 [1-%d]，b=对比上一步，q=结束并汇总，i=导入自定义 JSON"
+            % len(TEST_CASES),
+            default="1",
+        ).strip().lower()
+
+        if choice == "q":
+            break
+        if choice == "i":
+            path = typer.prompt("自定义候选 JSON 路径（输入回车取消）", default="").strip()
+            if not path:
+                console.print("[dim]已取消导入[/]")
+                continue
+            cand = _try_load_custom(path)
+            if cand is None:
+                console.print(f"[red]无法加载 {path}[/]")
+                continue
+            label = f"自定义: {cand.candidate_id}"
+            _run_and_render(label, str(path), cand)
+            history.append(label)
+            added += 1
+            continue
+        if choice == "b":
+            if history:
+                console.print("[dim]最近的调查如上（可回看报告）[/]")
+            else:
+                console.print("[dim]还没有上一步调查[/]")
+            continue
+
+        try:
+            idx = int(choice)
+            case = TEST_CASES[idx - 1]
+        except (ValueError, IndexError):
+            console.print(f"[yellow]无效输入，请输入 1~{len(TEST_CASES)} 或 q/i/b[/]")
+            continue
+
+        cand = _make_candidate(case)
+        _run_and_render(case.label, "候选清单", cand)
+        history.append(case.label)
+        added += 1
+
+    console.rule("[bold]本轮对比汇总[/]")
+    if results:
+        _ui_module("rich_run").render_compare(results)
+    else:
+        console.print("[dim]本轮未做任何调查。[/]")
+
+
+def _try_load_custom(path: str) -> CandidateEvent | None:
+    p = Path(path)
+    if not p.exists():
+        return None
+    try:
+        return _load_candidate(p)
+    except Exception:
+        return None
+
+
+def _make_provider(offline: bool, vendor: str | None, model: str | None,
+                   interactive: bool = False):
+    """按 offline / 配置构造 provider；未配置 key 时给提示。"""
+    from .providers.client import Provider
+
+    if offline:
+        return _FakeProvider()
+    cfg = load_config()
+    vid = vendor or cfg["vendor_id"]
+    key = cfg["api_key"]
+    mdl = model or cfg["model"] or None
+    if not key:
+        hint = "交互窗里选个候选回车前，先 data-dog init 接入 key；或加 --offline 用离线条模型演示。" if interactive else "加 --offline 用离线条模型演示，或先 data-dog init"
+        typer.echo(f"尚未配置 API Key。{hint}", err=True)
+        raise typer.Exit(1)
+    return Provider.from_config(vid, key)
+
+
+def _build_agent(provider, model):
+    from .evidence.store import EvidenceStore
+    from .tools.investigation import InvestigationTools
+    from .agent.loop import AgentLoop
+    evidence = EvidenceStore()
+    tools = InvestigationTools(evidence)
+    trace_steps, trace_cb = _make_trace_cb()
+    agent = AgentLoop(provider, tools, model=model, trace_cb=trace_cb)
+    return evidence, tools, agent
+
+
+def _make_candidate(case):
+    """把 candidates.TestCase 转成 CandidateEvent（复用 candidates.make_candidate）。"""
+    from .candidates import make_candidate
+    return make_candidate(case)
 
 
 def _ui_module(name: str):
@@ -144,35 +264,97 @@ def _render_report(report):
 
 
 class _FakeProvider:
-    """无 key 离线演示用。"""
+    """无 key 离线演示用：按候选部件挑剧本，保证不同候选结论有对比。
+
+    剧本：
+    - 左髋电机（温度爬升）→ 查证据 + 查近期变更 → needs_human_review（疑固件基线偏移）
+    - 右髋电机 / 电池（数据正常）→ 只查证据 → rejected（排除误报，SOC/温度在界内）
+    """
     def __init__(self):
         self.n = 0
 
+    def reset(self):
+        self.n = 0
+
+    @staticmethod
+    def _candidate(messages):
+        """从 user 消息里抽出候选 JSON（兼容 dict 或 LLMChatMessage）。"""
+        for m in messages:
+            if isinstance(m, dict):
+                role = m.get("role")
+                content = m.get("content", "")
+            else:  # LLMChatMessage dataclass
+                role = getattr(m, "role", None)
+                content = getattr(m, "content", "") or ""
+            if role == "user":
+                idx = content.find("{")
+                if idx >= 0:
+                    try:
+                        return json.loads(content[idx:])
+                    except Exception:
+                        return {}
+        return {}
+
     def chat(self, messages, tools=None, **kw):
-        import json as _json
+        cand = self._candidate(messages)
+        comp = cand.get("component_ref", "joint_motor.front_left_hip")
+        ws = cand.get("window_start", "09:55")
+        we = cand.get("window_end", "10:00")
+        sn = cand.get("device_sn", "device-abc123")
         self.n += 1
         if self.n == 1:
-            return {"kind": "tool_calls", "tool_calls": [{
-                "id": "m1", "name": "query_candidate_evidence",
-                "arguments": _json.dumps({"device_sn": "device-abc123",
-                                          "component": "joint_motor.front_left_hip",
-                                          "window_start": "09:55", "window_end": "10:00"}),
-                "content": ""}], "__raw_tool_calls": []}
+            return self._tool("m1", "query_candidate_evidence", {
+                "device_sn": sn, "component": comp,
+                "window_start": ws, "window_end": we,
+            })
+        # 正常剧本（右髋 / 电池）：只查一次证据就下结论，排除
+        if comp in ("joint_motor.front_right_hip", "battery.main"):
+            return {"kind": "text", "content": json.dumps(
+                self._conclusion(comp), ensure_ascii=False)}
+        # 故障剧本（左髋温度）：再查近期变更，再下"需人工"结论
         if self.n == 2:
-            return {"kind": "tool_calls", "tool_calls": [{
-                "id": "m2", "name": "query_recent_changes",
-                "arguments": _json.dumps({"device_sn": "device-abc123",
-                                          "component": "joint_motor.front_left_hip",
-                                          "since": "2026-08-10"}),
-                "content": ""}], "__raw_tool_calls": []}
-        return {"kind": "text", "content": _json.dumps({
-            "disposition": "needs_human_review", "severity": "warning", "confidence": 0.6,
-            "summary": "温度78.2°C超过75°C阈值且电流上升，但固件3.2.1(8/12)变更冷却参数，需人工区分固件效应与真实退化。",
-            "hypotheses": [{"cause": "固件3.2.1冷却变更导致", "status": "supported"},
-                           {"cause": "轴承摩擦增大", "status": "supported"}],
-            "missing_evidence": ["升级前基线"],
-            "recommended_actions": ["复核固件基线", "检查轴承"],
-        }, ensure_ascii=False)}
+            return self._tool("m2", "query_recent_changes", {
+                "device_sn": sn, "component": comp, "since": "2026-08-10",
+            })
+        return {"kind": "text", "content": json.dumps(
+            self._conclusion(comp), ensure_ascii=False)}
+
+    @staticmethod
+    def _tool(_id, name, args):
+        return {
+            "kind": "tool_calls",
+            "tool_calls": [{"id": _id, "name": name,
+                            "arguments": json.dumps(args, ensure_ascii=False),
+                            "content": ""}],
+            "__raw_tool_calls": [],
+        }
+
+    @staticmethod
+    def _conclusion(comp: str):
+        if comp == "joint_motor.front_left_hip":
+            return {
+                "disposition": "needs_human_review", "severity": "warning",
+                "confidence": 0.6,
+                "summary": "温度78.2°C超过75°C阈值且电流上升，但固件3.2.1(8/12)变更冷却参数，需人工区分固件效应与真实退化。",
+                "hypotheses": [{"cause": "固件3.2.1冷却变更导致", "status": "supported"},
+                               {"cause": "轴承摩擦增大", "status": "supported"}],
+                "missing_evidence": ["升级前基线"],
+                "recommended_actions": ["复核固件基线", "检查轴承"],
+            }
+        if comp == "battery.main":
+            return {
+                "disposition": "rejected", "severity": "info", "confidence": 0.8,
+                "summary": "BMS 检查：SOC 0.72 远高于低压告警阈值 0.2（BATT_SOC_LOW），电压平台正常，判定非异常。",
+                "hypotheses": [], "missing_evidence": [],
+                "recommended_actions": ["继续例行巡检"],
+            }
+        # 右髋电机（正常数据）
+        return {
+            "disposition": "rejected", "severity": "info", "confidence": 0.85,
+            "summary": "温度61°C / 电流6.2A 均在正常基线内，未触发任何告警规则，判定为误报并排除。",
+            "hypotheses": [], "missing_evidence": [],
+            "recommended_actions": ["无需处理"],
+        }
 
 
 def _load_candidate(path: Path) -> CandidateEvent:

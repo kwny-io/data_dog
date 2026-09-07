@@ -1,0 +1,17 @@
+{
+  "candidate_id": "case-battery",
+  "device_sn": "device-abc123",
+  "component_ref": "battery.main",
+  "signal": "battery_state_check",
+  "severity_hint": "warning",
+  "window_start": "09:55",
+  "window_end": "10:00",
+  "sample_count": 300,
+  "rule_matches": ["BATT_SOC_LOW"],
+  "anomaly_score": 0.2,
+  "detector_provenance": "test-harness",
+  "evidence": [
+    {"key": "state_of_charge", "from_value": 0.72, "to_value": 0.72, "baseline": 0.72, "unit": "percent"},
+    {"key": "voltage_v", "from_value": 51.2, "to_value": 51.2, "baseline": 51.2, "unit": "volt"}
+  ]
+}

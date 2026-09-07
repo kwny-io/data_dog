@@ -56,4 +56,4 @@ rules:
   operator: le
   rule_id: BATT_SOC_LOW
   severity_hint: warning
-  value: 20.0
+  value: 0.2

@@ -1,0 +1,17 @@
+{
+  "candidate_id": "case-normal-right-hip",
+  "device_sn": "device-abc123",
+  "component_ref": "joint_motor.front_right_hip",
+  "signal": "spurious_alarm_check",
+  "severity_hint": "warning",
+  "window_start": "09:55",
+  "window_end": "10:00",
+  "sample_count": 300,
+  "rule_matches": ["SPURIOUS_CHECK"],
+  "anomaly_score": 0.3,
+  "detector_provenance": "test-harness",
+  "evidence": [
+    {"key": "temperature_c", "from_value": 61.0, "to_value": 61.0, "baseline": 61.0, "unit": "celsius"},
+    {"key": "current_a", "from_value": 6.2, "to_value": 6.2, "baseline": 6.2, "unit": "ampere"}
+  ]
+}

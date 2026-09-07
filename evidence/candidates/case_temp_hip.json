@@ -1,0 +1,17 @@
+{
+  "candidate_id": "case-left-hip-temp",
+  "device_sn": "device-abc123",
+  "component_ref": "joint_motor.front_left_hip",
+  "signal": "temperature_rising_under_normalized_load",
+  "severity_hint": "warning",
+  "window_start": "09:55",
+  "window_end": "10:00",
+  "sample_count": 300,
+  "rule_matches": ["MOTOR_TEMP_TREND_V2"],
+  "anomaly_score": 0.91,
+  "detector_provenance": "test-harness",
+  "evidence": [
+    {"key": "temperature_c", "from_value": 61.0, "to_value": 78.2, "baseline": 60.0, "unit": "celsius"},
+    {"key": "current_a", "from_value": 6.1, "to_value": 9.7, "baseline": 6.2, "unit": "ampere"}
+  ]
+}
