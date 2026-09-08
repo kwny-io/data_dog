@@ -124,3 +124,28 @@ class Correlator:
                 and o.power_domain == g.power_domain
             ]
         return groups
+
+
+# ---- Agent 核心第 4 步：解释 / 合并（把一组关联报告合成一句可读的"事件说明"）----
+
+def explain_episode(reports, group: dict) -> str:
+    """把一个关联组里的若干份 InvestigationReport 合成一句解释性事件说明。
+
+    纯确定性文本拼装（不调 LLM）：给出这一集"是什么、涉及哪些部件、汇总裁决"，
+    供上层展示 / 讲稿使用。架构 6.2 里 Agent 的"解释"能力的最小落地。
+    """
+    comps = group.get("component_refs", [])
+    fam = group.get("family", "unknown")
+    disposition_counts: dict = {}
+    for r in reports:
+        disposition_counts[r.disposition] = disposition_counts.get(r.disposition, 0) + 1
+    verdicts = "、".join(f"{k}×{v}" for k, v in disposition_counts.items()) or "无结论"
+    return (
+        f"该组发现 {len(reports)} 个相关候选，涉及部件 {_join_chs(comps)}，"
+        f"信号族 {fam}；汇总裁决：{verdicts}。"
+        "它们同设备、同窗口且结构相关，建议按同一故障事件一并处置。"
+    )
+
+
+def _join_chs(items) -> str:
+    return "、" .join(items) if items else "未知"

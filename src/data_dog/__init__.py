@@ -7,7 +7,7 @@ from .schemas import CandidateEvent, InvestigationReport
 from .agent.loop import AgentLoop
 from .evidence.store import EvidenceStore
 from .tools.investigation import InvestigationTools
-from .correlation import Correlator
+from .correlation import Correlator, explain_episode
 from .errors import ToolErrorCode
 
 __all__ = [
@@ -19,5 +19,6 @@ __all__ = [
     "EvidenceStore",
     "InvestigationTools",
     "Correlator",
+    "explain_episode",
     "ToolErrorCode",
 ]

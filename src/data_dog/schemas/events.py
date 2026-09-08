@@ -66,6 +66,9 @@ class InvestigationReport:
     risk_window: Optional[str] = None
     recommended_actions: List[str] = field(default_factory=list)
     model_provenance: Dict[str, Any] = field(default_factory=dict)
+    # ---- 多事件关联（A2/14.1）：单条报告可标记它属于哪个关联组、关联了哪些候选 ----
+    correlation_group_id: Optional[str] = None
+    linked_candidate_refs: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         d = asdict(self)

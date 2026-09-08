@@ -193,6 +193,38 @@ class AgentLoop:
             model_provenance={"fail_closed": True},
         )
 
+    def investigate_batch(
+        self, candidates: List[CandidateEvent]
+    ) -> tuple[List[InvestigationReport], List[dict]]:
+        """一次调查多个候选：逐条复核 → 自动关联 → 把关联信息回填进报告。
+
+        对应架构 6.2 里 Agent 的「复核候选 + 多事件关联 + 解释」：
+        - 先逐条跑 investigate() 得到单候选报告；
+        - 再用 Correlator 对整批候选做确定性关联（14.1 结构化关联键）；
+        - 每个报告打上它所属的关联组（correlation_group_id）和同组关联到的
+          其他候选（linked_candidate_refs），让上层的「关联+解释」能据此合并。
+
+        返回 (reports, groups)；groups 是 CorrelationGroup.to_dict() 列表，供展示解释。
+        """
+        from ..correlation import Correlator
+
+        reports = [self.investigate(c) for c in candidates]
+        groups = Correlator().correlate(candidates)
+        report_by_cid = {}
+        for r, c in zip(reports, candidates):
+            report_by_cid.setdefault(c.candidate_id, r)
+
+        # 把关联信息回填：一份报告知道它被分到哪个组、同组还有谁
+        for g in groups:
+            for cid in g.candidate_ids:
+                r = report_by_cid.get(cid)
+                if r is not None:
+                    r.correlation_group_id = g.group_id
+                    r.linked_candidate_refs = [
+                        o for o in g.candidate_ids if o != cid
+                    ]
+        return reports, [g.to_dict() for g in groups]
+
     def _parse_report(
         self, text: str, candidate: CandidateEvent
     ) -> InvestigationReport:
