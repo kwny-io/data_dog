@@ -66,12 +66,14 @@ class AgentLoop:
         max_steps: int = 8,
         model: str | None = None,
         trace_cb=None,
+        propose_outbox=None,
     ):
         self.provider = provider
         self.tools = tools
         self.max_steps = max_steps
         self.model = model
         self.trace_cb = trace_cb  # 每步工具调用的回调（供前端渲染 ReAct 轨迹）
+        self.propose_outbox = propose_outbox  # A3：可注入本地 outbox（默认全局单例）
 
     def _trace(self, event: dict) -> None:
         if self.trace_cb is not None:
@@ -131,7 +133,8 @@ class AgentLoop:
 
             if resp["kind"] == "text":
                 # 模型直接给结论（通常发生在它已经拿到足够证据时）
-                return self._parse_report(resp["content"], candidate)
+                report = self._parse_report(resp["content"], candidate)
+                return self._attach_report_receipt(report)
 
             # 模型想调用工具 → 先执行所有工具、收集结果
             collected = []
@@ -224,6 +227,28 @@ class AgentLoop:
                         o for o in g.candidate_ids if o != cid
                     ]
         return reports, [g.to_dict() for g in groups]
+
+    def _attach_report_receipt(
+        self, report: InvestigationReport
+    ) -> InvestigationReport:
+        """A3：调查出结论后，把需要上报的报告"提出上报意图"并附上 Receipt。
+
+        只对值得上报的裁决（confirmed / needs_human_review）触发；rejected（误报）
+        不上报。Receipt 写进 model_provenance.report_receipt，可在报告里看到
+        "这次调查想上报什么、拿到什么回执"，证明闭环走到"提出上报意图"这一步。
+        """
+        if report.disposition in ("confirmed", "needs_human_review"):
+            from ..reporter import propose_alert_report
+            inv_ref = report.investigation_id or ""
+            rc = propose_alert_report(
+                investigation_ref=inv_ref,
+                summary=report.summary,
+                severity=report.severity or "warning",
+                outbox=self.propose_outbox,
+            )
+            if rc.get("ok"):
+                report.model_provenance["report_receipt"] = rc
+        return report
 
     def _parse_report(
         self, text: str, candidate: CandidateEvent

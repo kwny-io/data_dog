@@ -9,6 +9,13 @@ from .evidence.store import EvidenceStore
 from .tools.investigation import InvestigationTools
 from .correlation import Correlator, explain_episode
 from .errors import ToolErrorCode
+from .reporter import (
+    ProposeOutbox,
+    get_outbox,
+    propose_alert_report,
+    propose_operator_release,
+    propose_operator_rollback,
+)
 
 __all__ = [
     "__version__",
@@ -21,4 +28,9 @@ __all__ = [
     "Correlator",
     "explain_episode",
     "ToolErrorCode",
+    "ProposeOutbox",
+    "get_outbox",
+    "propose_alert_report",
+    "propose_operator_release",
+    "propose_operator_rollback",
 ]
