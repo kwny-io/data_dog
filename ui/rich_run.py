@@ -108,6 +108,18 @@ def render_report(report) -> None:
     header.append("裁决: ", style="bold")
     header.append(disp.upper(), style=f"bold {disp_color}")
     header.append(f"    置信度: {d.get('confidence', 0.0):.2f}", style="dim")
+    # 可观测性：token / 耗时 / 成本 统计行（仅当真记录了用量才展示，避免离线 fake 显示无意义 0）
+    usage = d.get("model_provenance", {}).get("usage")
+    if usage and usage.get("total_tokens"):
+        from data_dog.observability import fmt_cost
+        header.append(
+            f"\n  ⏱ {usage.get('call_count', 0)} 次调用 · "
+            f"{usage.get('total_tokens', 0)} tokens "
+            f"(in {usage.get('prompt_tokens', 0)} / out {usage.get('completion_tokens', 0)}) · "
+            f"{usage.get('duration_ms', 0)/1000:.2f}s · "
+            f"成本 {fmt_cost(usage.get('cost_usd', 0))}",
+            style="dim",
+        )
     console.print(header)
 
     # 摘要

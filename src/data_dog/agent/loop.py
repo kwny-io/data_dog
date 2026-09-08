@@ -74,6 +74,7 @@ class AgentLoop:
         self.model = model
         self.trace_cb = trace_cb  # 每步工具调用的回调（供前端渲染 ReAct 轨迹）
         self.propose_outbox = propose_outbox  # A3：可注入本地 outbox（默认全局单例）
+        self._current_tracker = None   # 可观测性：正在进行的调查的用量累计器
 
     def _trace(self, event: dict) -> None:
         if self.trace_cb is not None:
@@ -83,6 +84,11 @@ class AgentLoop:
                 pass  # 前端回调失败不影响调查主流程
 
     def investigate(self, candidate: CandidateEvent) -> InvestigationReport:
+        # ---- 可观测性：本次调查的用量/耗时/成本累计器 ----
+        from ..observability import UsageTracker
+        tracker = UsageTracker()
+        self._current_tracker = tracker
+
         # ---- A4：可信上下文（三选一，失败关闭）----
         # 1) DD_CTX_MCP=1 → 从 context-injector MCP 获取（拿不到=失败关闭）
         # 2) 候选设备与可信上下文设备不一致 → 失败关闭（不信任候选自报身份）
@@ -125,16 +131,24 @@ class AgentLoop:
         ]
 
         steps = 0
+        # 兼容性：有的 provider（测试 fake）不接受 usage_tracker 参数 → 检测签名
+        _chat_accepts_usage = _accepts_kwarg(self.provider, "usage_tracker")
         while steps < self.max_steps:
             steps += 1
-            resp = self.provider.chat(
-                messages, tools=tool_params, model=self.model
-            )
+            if _chat_accepts_usage:
+                resp = self.provider.chat(
+                    messages, tools=tool_params, model=self.model,
+                    usage_tracker=tracker,
+                )
+            else:
+                resp = self.provider.chat(
+                    messages, tools=tool_params, model=self.model,
+                )
 
             if resp["kind"] == "text":
                 # 模型直接给结论（通常发生在它已经拿到足够证据时）
                 report = self._parse_report(resp["content"], candidate)
-                return self._attach_report_receipt(report)
+                return self._finish_report(report)
 
             # 模型想调用工具 → 先执行所有工具、收集结果
             collected = []
@@ -174,7 +188,7 @@ class AgentLoop:
                 )
 
         # 达到最大步数仍未给出结论
-        return InvestigationReport(
+        report = InvestigationReport(
             investigation_id=f"inv_{candidate.candidate_id}",
             candidate_refs=[candidate.candidate_id],
             disposition="needs_human_review",
@@ -182,6 +196,7 @@ class AgentLoop:
             summary="调查达到最大步数仍未得出确定结论，需要人工复核。",
             missing_evidence=["未能收集到足够证据"],
         )
+        return self._finish_report(report)
 
     def _fail_closed(
         self, candidate: CandidateEvent, reason: str
@@ -227,6 +242,17 @@ class AgentLoop:
                         o for o in g.candidate_ids if o != cid
                     ]
         return reports, [g.to_dict() for g in groups]
+
+    def _finish_report(
+        self, report: InvestigationReport
+    ) -> InvestigationReport:
+        """调查收尾：附上 A3 上报 Receipt + 本次调查的可观测性统计（token/耗时/成本）。"""
+        report = self._attach_report_receipt(report)
+        # 可观测性：把本次调查的用量累计写进报告（供 CLI/前端展示）
+        tracker = getattr(self, "_current_tracker", None)
+        if tracker is not None:
+            report.model_provenance["usage"] = tracker.summary()
+        return report
 
     def _attach_report_receipt(
         self, report: InvestigationReport
@@ -293,3 +319,19 @@ def _extract_json(text: str) -> str:
     if s != -1 and e != -1 and e > s:
         return text[s : e + 1]
     return text
+
+
+def _accepts_kwarg(provider, name: str) -> bool:
+    """判断 provider.chat 是否接受某个关键字参数（用于兼容测试 fake / 真 Provider）。"""
+    import inspect
+    chat = getattr(provider, "chat", None)
+    if chat is None:
+        return False
+    try:
+        sig = inspect.signature(chat)
+    except (TypeError, ValueError):
+        return True  # 无法检查（如内置）就假定支持
+    params = sig.parameters
+    return name in params or any(
+        p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
+    )

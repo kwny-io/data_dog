@@ -47,6 +47,16 @@ python -m data_dog.synth.synth_eval --real     # 用真实 LLM 调查合成遥�
 python -m data_dog.synth.synth_eval --json     # 只输出 {accuracy} JSON，便于脚本/简历取数
 ```
 
+### 可观测性：token 消耗 / 耗时 / 成本
+
+用真实模型跑调查时会自动统计**每次调用的 token 用量、耗时**并按供应商价格表**估算成本**：
+- 后端在 `Provider.chat` 采集（openai `usage` + 计时），`AgentLoop` 聚合成每次调查的统计，写进报告 `model_provenance.usage`。
+- 前端（rich 命令行）在报告头部显示一行：`次调用 · tokens (in/out) · 耗时 · 成本`。
+- 离线 fake provider 无 token 统计，故离线演示不显示这行（避免无意义 0）。
+
+实现：`data_dog/observability.py`（`UsageTracker` + 价格表）。真实输出示例：
+`⏱ 2 次调用 · 150 tokens (in 100 / out 50) · 0.12s · 成本 $0.000082`
+
 ### 跑测试
 
 ```bash
@@ -106,6 +116,7 @@ src/data_dog/
   correlation/  多事件关联
   reporter/     提出上报意图（A3，本地 outbox + 幂等 + Receipt）
   synth/        合成遥测生成器（Go2 物理参数 + 故障注入 + ground truth）+ 评估
+  observability.py  可观测性（token 消耗 / 每步耗时 / 成本统计）
 ui/             Streamlit 网页版
 evals/          Agent 评估框架（5 case）
 scripts/        数据清洗 / 算子生成 / RAG 落地脚本

@@ -25,6 +25,7 @@ from .synth import (
     DEFAULT_PARAMS,
     FAULT_DEFS,
 )
+from .observability import UsageTracker, CallStat, lookup_price, fmt_cost
 
 __all__ = [
     "__version__",
@@ -49,4 +50,8 @@ __all__ = [
     "synthesize_batch",
     "DEFAULT_PARAMS",
     "FAULT_DEFS",
+    "UsageTracker",
+    "CallStat",
+    "lookup_price",
+    "fmt_cost",
 ]
