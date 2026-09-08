@@ -16,6 +16,15 @@ from .reporter import (
     propose_operator_release,
     propose_operator_rollback,
 )
+from .synth import (
+    Go2MotorModel,
+    SynthGenConfig,
+    SynthSample,
+    generate_sample,
+    synthesize_batch,
+    DEFAULT_PARAMS,
+    FAULT_DEFS,
+)
 
 __all__ = [
     "__version__",
@@ -33,4 +42,11 @@ __all__ = [
     "propose_alert_report",
     "propose_operator_release",
     "propose_operator_rollback",
+    "Go2MotorModel",
+    "SynthGenConfig",
+    "SynthSample",
+    "generate_sample",
+    "synthesize_batch",
+    "DEFAULT_PARAMS",
+    "FAULT_DEFS",
 ]

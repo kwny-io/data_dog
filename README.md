@@ -36,6 +36,17 @@ python -m evals.run_evals --mode mock    # 离线确定性评估，5 case
 python -m evals.run_evals --mode real    # 用真实模型评估（需先 data-dog init）
 ```
 
+### 跑合成数据 ground truth 评估（可选，出新数字）
+
+自建合成数据生成器（基于 Go2 公开动力学/电机热参数 + 高斯噪声 + 5 类故障注入），
+每条带 ground truth 标签，Agent 调查后与真值对比算准确率：
+
+```bash
+python -m data_dog.synth.synth_eval            # 离线（确定性 provider）→ 得到 X/N 准确率
+python -m data_dog.synth.synth_eval --real     # 用真实 LLM 调查合成遥测（需先 data-dog init）
+python -m data_dog.synth.synth_eval --json     # 只输出 {accuracy} JSON，便于脚本/简历取数
+```
+
 ### 跑测试
 
 ```bash
@@ -64,6 +75,8 @@ pytest tests/ -q
 - **电池 BMS**：SOC 0.72，远超低压告警阈 —— **正常巡检**剧本。
 - 附带厂商知识库（阈值/原因/安全上限）、邻居事件、近期变更（固件/算子升级）。
 
+> **另一种数据源：合成遥测（`data_dog/synth/`）**。基于 Go2 公开物理参数（关节扭矩/电机热模型）用 NumPy 生成物理自洽的时间序列，加高斯噪声 + **5 类故障注入**（堵转/热退化/通信丢包/电流偏置/负载骤增），每条样本带 **ground truth 标签**。Agent 调查后与真值对比算准确率（`python -m data_dog.synth.synth_eval`）。MuJoCo 跑通后这是**无 MuJoCo 依赖的降级方案**——同样只替换数据源，Agent / 工具逻辑不变。
+
 生产环境接真实设备时，`EvidenceStore` 换成真实时间序库 / 厂商知识库 / 事件流的实现即可，Agent / Tool 逻辑不用改。
 
 ---
@@ -91,6 +104,8 @@ src/data_dog/
   agent/        AgentLoop（调查主循环）
   schemas/      CandidateEvent / InvestigationReport
   correlation/  多事件关联
+  reporter/     提出上报意图（A3，本地 outbox + 幂等 + Receipt）
+  synth/        合成遥测生成器（Go2 物理参数 + 故障注入 + ground truth）+ 评估
 ui/             Streamlit 网页版
 evals/          Agent 评估框架（5 case）
 scripts/        数据清洗 / 算子生成 / RAG 落地脚本
