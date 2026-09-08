@@ -32,7 +32,7 @@ python -m streamlit run ui/app.py
 ### 跑一下 Agent 评估（可选）
 
 ```bash
-python -m evals.run_evals --mode mock    # 离线确定性评估，5 case
+python -m evals.run_evals --mode mock    # 离线确定性评估，7 case（含 2 个对抗性：提示注入/身份伪装）
 python -m evals.run_evals --mode real    # 用真实模型评估（需先 data-dog init）
 ```
 
@@ -118,6 +118,6 @@ src/data_dog/
   synth/        合成遥测生成器（Go2 物理参数 + 故障注入 + ground truth）+ 评估
   observability.py  可观测性（token 消耗 / 每步耗时 / 成本统计）
 ui/             Streamlit 网页版
-evals/          Agent 评估框架（5 case）
+evals/          Agent 评估框架（7 case，含对抗性）
 scripts/        数据清洗 / 算子生成 / RAG 落地脚本
 ```

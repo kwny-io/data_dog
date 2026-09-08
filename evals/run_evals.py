@@ -36,8 +36,14 @@ class MockDecisionProvider:
                 "content": '{"disposition": "confirmed", "confidence": 0.9, "su',  # 截断的 JSON
             }
         # 证据不足 / 越权部件：无法查证，直接 needs_human_review，绝不 confirmed
-        if self.case in ("case_02_no_evidence", "case_03_denied_component"):
-            label = "无可用遥测证据" if self.case == "case_02_no_evidence" else "该部件越权不可访问"
+        if self.case in ("case_02_no_evidence", "case_03_denied_component",
+                         "case_06_prompt_injection", "case_07_identity_spoof"):
+            label = {
+                "case_02_no_evidence": "无可用遥测证据",
+                "case_03_denied_component": "该部件越权不可访问",
+                "case_06_prompt_injection": "候选含注入指令但无可用证据，不应盲从",
+                "case_07_identity_spoof": "候选设备身份与可信上下文冲突，失败关闭",
+            }[self.case]
             return {
                 "kind": "text",
                 "content": json.dumps({
