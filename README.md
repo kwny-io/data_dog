@@ -26,7 +26,8 @@ data-dog test
 
 ```bash
 pip install -e ".[ui]"          # 装上 streamlit
-python -m streamlit run ui/app.py
+python -m streamlit run ui/app.py           # 调查台：选候选 → ReAct 轨迹 → 报告
+python -m streamlit run ui/mujoco_page.py   # MuJoCo 演示页：点按钮跑仿真 → 遥测 → Agent 调查 → 准确率
 ```
 
 ### 跑一下 Agent 评估（可选）
@@ -85,7 +86,17 @@ pytest tests/ -q
 - **电池 BMS**：SOC 0.72，远超低压告警阈 —— **正常巡检**剧本。
 - 附带厂商知识库（阈值/原因/安全上限）、邻居事件、近期变更（固件/算子升级）。
 
-> **另一种数据源：合成遥测（`data_dog/synth/`）**。基于 Go2 公开物理参数（关节扭矩/电机热模型）用 NumPy 生成物理自洽的时间序列，加高斯噪声 + **5 类故障注入**（堵转/热退化/通信丢包/电流偏置/负载骤增），每条样本带 **ground truth 标签**。Agent 调查后与真值对比算准确率（`python -m data_dog.synth.synth_eval`）。MuJoCo 跑通后这是**无 MuJoCo 依赖的降级方案**——同样只替换数据源，Agent / 工具逻辑不变。
+> **数据源一：仿真遥测（`data_dog/mujoco_sim/`）**。用 **MuJoCo** 加载 Go2 真实四足模型
+> （`third_party/mujoco_menagerie/unitree_go2/scene.xml`）跑仿真，做受控小摆动，导出物理自洽的
+> 关节力矩 / 电流，再叠加第 `simulate.MOTOR_PARAMS` 的一阶热模型得到电机温度。可注入 **5 类故障**
+> （堵转 / 热退化 / 通信丢包 / 电流偏置 / 负载骤增），每条样本带 **ground truth**。Agent 调查后与真值
+> 对比算准确率：`python -m data_dog.mujoco_sim.mujoco_eval`（当前 n=6，accuracy 1.0）。
+>
+> **数据源二：纯 NumPy 合成遥测（`data_dog/synth/`，无 MuJoCo 依赖的降级方案）**。基于 Go2 公开
+> 物理参数用 NumPy 生成物理自洽的时间序列，同样带 5 类故障注入 + ground truth
+> （`python -m data_dog.synth.synth_eval`）。
+>
+> 两个数据源都实现与 `EvidenceStore` 相同的查询接口 —— **换数据源只需替换合成层，Agent / 工具逻辑完全不用改**。
 
 生产环境接真实设备时，`EvidenceStore` 换成真实时间序库 / 厂商知识库 / 事件流的实现即可，Agent / Tool 逻辑不用改。
 
@@ -116,6 +127,7 @@ src/data_dog/
   correlation/  多事件关联
   reporter/     提出上报意图（A3，本地 outbox + 幂等 + Receipt）
   synth/        合成遥测生成器（Go2 物理参数 + 故障注入 + ground truth）+ 评估
+  mujoco_sim/   MuJoCo 仿真数据源（simulate 跑 Go2 + to_sample 转样本 + mujoco_eval 评估）
   observability.py  可观测性（token 消耗 / 每步耗时 / 成本统计）
 ui/             Streamlit 网页版
 evals/          Agent 评估框架（7 case，含对抗性）
