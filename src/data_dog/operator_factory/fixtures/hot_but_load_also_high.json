@@ -1,0 +1,37 @@
+{
+  "fixture_id": "hot_but_load_also_high",
+  "component": "joint_motor.front_left_hip",
+  "event": {
+    "temperature": 80,
+    "current": 9.5,
+    "dq": 1.2,
+    "mode": 0
+  },
+  "window": {
+    "series": {
+      "temperature": [
+        76,
+        77,
+        79,
+        80
+      ],
+      "current": [
+        9.0,
+        9.2,
+        9.4,
+        9.5
+      ]
+    },
+    "baseline": {
+      "current": 6.0
+    }
+  },
+  "expect_hit": [
+    "FIELD_SANITY_TEMP_NONNEG"
+  ],
+  "expect_miss": [
+    "MOTOR_TEMP_RISE_UNDER_LOAD",
+    "MOTOR_MODE_FLAG_SET",
+    "MOTOR_TEMP_PROTECT"
+  ]
+}

@@ -100,10 +100,19 @@ def main() -> int:
         # 用文件名匹配双后缀：.idl.txt 的 Path.suffix 只是 .txt
         is_idl = f.name.endswith(".idl.txt")
         is_md = f.name.endswith(".md")
-        if not (is_idl or is_md):
+        is_h = f.name.endswith(".h")            # 协议头（含权威温度/错误码注释）
+        if not (is_idl or is_md or is_h):
             continue
         is_idl = is_idl and not is_md  # idl.txt 优先
         raw = f.read_text(encoding="utf-8", errors="replace")
+        if is_h:
+            # 协议头注释本就干净：原样落到 cleaned/，供知识抽取读原始注释
+            out_file = OUT / rel
+            out_file.parent.mkdir(parents=True, exist_ok=True)
+            out_file.write_text(raw, encoding="utf-8")
+            print(f"  {rel}: 协议头原样传递")
+            total_entries += 1
+            continue
         clean = clean_text(raw, is_idl=is_idl)
         entries = build_schema_entries(rel, clean) if is_idl else build_doc_entries(rel, clean)
         if not entries:
