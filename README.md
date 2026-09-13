@@ -128,6 +128,7 @@ src/data_dog/
   reporter/     提出上报意图（A3，本地 outbox + 幂等 + Receipt）
   synth/        合成遥测生成器（Go2 物理参数 + 故障注入 + ground truth）+ 评估
   mujoco_sim/   MuJoCo 仿真数据源（simulate 跑 Go2 + to_sample 转样本 + mujoco_eval 评估）
+  operator_factory/  离线算子工厂（文档 revision + 诚实知识抽取 + 受限 DSL + Fixture 回放）
   observability.py  可观测性（token 消耗 / 每步耗时 / 成本统计）
 ui/             Streamlit 网页版
 evals/          Agent 评估框架（7 case，含对抗性）
@@ -148,3 +149,18 @@ docs/           设计文档（MuJoCo 仿真与输出解读、SLO 量化目标�
 | `schemas/README.md` | **版本演进策略**（兼容性定义 + 破环式变更升主版本）+ 与现有 dataclass 的字段映射 | — |
 | `docs/slo.md` | 首期**量化目标**（吞吐/延迟/算子资源/质量/保留），全部为设计预算值，附推导与待校准项 | — |
 | `docs/dsl_spec.md` | **受限 DSL v0.1** 规范：词法/表达式/白名单函数/窗口聚合/受限状态机/能力边界/升级判据 | — |
+
+---
+
+## P1 离线算子工厂（文档 → 算子，可跑可测）
+
+```bash
+python -m data_dog.operator_factory.p1_demo          # 人读输出
+python -m data_dog.operator_factory.p1_demo --json   # 机器可读
+pytest tests/test_operator_factory.py tests/test_operator_verification.py -q   # 27 项
+```
+
+**厂商文档 → 结构化知识（带 revision/来源/定位）→ 检测算子（声明式 + 受限 DSL）→ Fixture 黄金回放**。
+实测：知识包 12 revisions / 61 字段 / 14 条数值规格 / 6 个错误码；回放 5/5 accuracy 1.0。
+
+关键点（对齐架构 §8.2）：**只抽文档真有的规格，并区分"能证实 / 待确认"**——官方开源协议头（`unitree_actuator_sdk`，BSD-3）明写电机 **90°C 触发温度保护**，故标 `verified`；而 **75°C warning 阈无出处**，标 `unconfirmed` / `PROJECT ASSUMPTION`，**不冒充厂商事实**。受限 DSL 是自建的 词法→AST 解释器（无动态执行原语，函数闭集白名单，编译期类型检查）。来源与许可见 `vendor_docs/unitree/SOURCES.md`，详见 `docs/operator_factory.md`。
