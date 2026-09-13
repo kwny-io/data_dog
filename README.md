@@ -132,4 +132,19 @@ src/data_dog/
 ui/             Streamlit 网页版
 evals/          Agent 评估框架（7 case，含对抗性）
 scripts/        数据清洗 / 算子生成 / RAG 落地脚本
+schemas/        标准事件正式 Schema（JSON Schema，5 份）+ 版本演进策略 + 校验工具
+docs/           设计文档（MuJoCo 仿真与输出解读、SLO 量化目标、受限 DSL 规范）
 ```
+
+---
+
+## 设计契约与规范（P0 设计底座）
+
+对齐架构蓝图里"Agent 之外的层"所需的地基（详见仓库 `schemas/README.md`、`docs/slo.md`、`docs/dsl_spec.md`）：
+
+| 产物 | 是什么 | 校验 |
+|---|---|---|
+| `schemas/*.json` | 5 类标准事件（RawLogEnvelope / NormalizedTelemetry / CandidateEvent / InvestigationReport / SaaS AlertEvent）的**正式 JSON Schema** | `python schemas/tools/validate_examples.py` |
+| `schemas/README.md` | **版本演进策略**（兼容性定义 + 破环式变更升主版本）+ 与现有 dataclass 的字段映射 | — |
+| `docs/slo.md` | 首期**量化目标**（吞吐/延迟/算子资源/质量/保留），全部为设计预算值，附推导与待校准项 | — |
+| `docs/dsl_spec.md` | **受限 DSL v0.1** 规范：词法/表达式/白名单函数/窗口聚合/受限状态机/能力边界/升级判据 | — |
