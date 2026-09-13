@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://data-agent.local/schemas/investigation-report-v1.json",
+  "title": "InvestigationReport",
+  "description": "Agent 复核后输出的结构化调查结论（架构 §12.4）。disposition 是四类裁决；hypotheses 区分支持/不支持；缺证据与反证都要显式记录。",
+  "type": "object",
+  "required": ["investigation_id", "disposition"],
+  "additionalProperties": false,
+  "properties": {
+    "investigation_id": {"type": "string", "minLength": 1},
+    "candidate_refs": {"type": "array", "items": {"type": "string"}},
+    "disposition": {
+      "enum": ["confirmed", "rejected", "inconclusive", "needs_human_review"],
+      "description": "四类裁决：确认 / 排除（误报）/ 不确定 / 需人工复核。"
+    },
+    "event_type": {"type": ["string", "null"], "description": "语义事件类型，如 joint_motor_thermal_degradation。"},
+    "severity": {"enum": ["info", "warning", "critical", null]},
+    "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+    "summary": {"type": "string"},
+    "hypotheses": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["cause", "status"],
+        "additionalProperties": false,
+        "properties": {
+          "cause": {"type": "string", "minLength": 1},
+          "status": {"enum": ["supported", "unsupported", "unverified"]},
+          "evidence_refs": {"type": "array", "items": {"type": "string"}},
+          "counter_evidence_refs": {"type": "array", "items": {"type": "string"}}
+        }
+      }
+    },
+    "counter_evidence_refs": {"type": "array", "items": {"type": "string"}, "description": "与结论矛盾的反证引用。"},
+    "missing_evidence": {"type": "array", "items": {"type": "string"}, "description": "未能获得、但可能影响结论的证据。"},
+    "risk_window": {"type": ["string", "null"], "description": "建议处理时间窗，如 'inspect within 24 hours'。"},
+    "recommended_actions": {"type": "array", "items": {"type": "string"}},
+    "model_provenance": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "workflow_version": {"type": "string"},
+        "model_ref": {"type": "string"}
+      }
+    },
+    "correlation_group_id": {"type": ["string", "null"], "description": "多事件关联组 ID（实现扩展，对齐 §14.1）。"},
+    "linked_candidate_refs": {"type": "array", "items": {"type": "string"}, "description": "同组关联的其它候选（实现扩展）。"}
+  }
+}

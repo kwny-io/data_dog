@@ -1,0 +1,11 @@
+{
+  "event_id": "alert_01J0002",
+  "event_revision": 0,
+  "device_ref": "device-go2-0001",
+  "component_ref": "joint_motor.front_left_hip",
+  "event_type": "joint_motor_thermal_degradation",
+  "state": "pending",
+  "severity": "warning",
+  "detected_at": "2026-08-13T10:00:00Z",
+  "evidence_receipt": "rawlog://not-a-receipt"
+}

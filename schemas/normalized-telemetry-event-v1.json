@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://data-agent.local/schemas/normalized-telemetry-event-v1.json",
+  "title": "NormalizedTelemetryEvent",
+  "description": "解析与标准化后的遥测事件（架构 §12.2）。由 Parser/Normalizer 算子产出，是后续 Window/Detector 的输入。provenance 记录产生它的算子版本与兼容绑定，保证可追溯。",
+  "type": "object",
+  "required": [
+    "event_id",
+    "tenant_id",
+    "device_sn",
+    "occurred_at",
+    "component",
+    "metrics",
+    "quality",
+    "provenance"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "event_id": {"type": "string", "minLength": 1},
+    "tenant_id": {"type": "string", "minLength": 1},
+    "device_sn": {"type": "string", "minLength": 1},
+    "occurred_at": {"type": "string", "format": "date-time"},
+    "component": {
+      "type": "object",
+      "required": ["type", "instance"],
+      "additionalProperties": false,
+      "properties": {
+        "type": {"type": "string", "minLength": 1, "description": "组件类型，如 joint_motor / battery / controller。"},
+        "instance": {"type": "string", "minLength": 1, "description": "组件实例，如 front_left_hip / main。"},
+        "vendor": {"type": "string"},
+        "model": {"type": "string"},
+        "firmware": {"type": "string"}
+      }
+    },
+    "metrics": {
+      "type": "object",
+      "description": "规范化的指标键值（键名与单位由算子/知识包定义，如 temperature_c / current_a）。",
+      "minProperties": 1,
+      "additionalProperties": {"type": ["number", "integer", "boolean", "string", "null"]}
+    },
+    "status_codes": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "规范化后的状态码/告警码集合（已统一枚举）。"
+    },
+    "operating_condition": {
+      "type": "string",
+      "description": "运行工况，如 idle / climbing。用于同工况基线比较。"
+    },
+    "quality": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "parse_confidence": {"type": "number", "minimum": 0, "maximum": 1},
+        "missing_fields": {"type": "array", "items": {"type": "string"}},
+        "clock_skew_ms": {"type": "integer", "description": "接收时间与设备时间的偏差（毫秒）。"}
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "required": ["operator_id", "operator_version"],
+      "additionalProperties": false,
+      "properties": {
+        "binding_revision": {"type": "string", "description": "兼容绑定的不可变 revision。"},
+        "operator_id": {"type": "string", "minLength": 1},
+        "operator_version": {"type": "string", "minLength": 1},
+        "raw_log_ref": {"type": "string", "pattern": "^rawlog://"}
+      }
+    }
+  }
+}

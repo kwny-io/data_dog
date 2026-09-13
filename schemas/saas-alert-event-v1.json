@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://data-agent.local/schemas/saas-alert-event-v1.json",
+  "title": "SaaS AlertEvent",
+  "description": "通过策略门、进入 SaaS 生命周期的正式异常事件（架构 §12.5）。只含业务所需摘要与受控证据 Receipt；不含沙箱路径、堆栈、密钥、原始厂商载荷或模型内部推理。",
+  "type": "object",
+  "required": [
+    "event_id",
+    "event_revision",
+    "idempotency_key",
+    "device_ref",
+    "component_ref",
+    "event_type",
+    "state",
+    "severity",
+    "detected_at"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "event_id": {"type": "string", "minLength": 1, "description": "事件 ID；同一 Episode 的更新沿用同一 event_id。"},
+    "event_revision": {"type": "integer", "minimum": 1, "description": "事件版本，更新时递增，避免 SaaS 收到大量无关新事件。"},
+    "idempotency_key": {
+      "type": "string",
+      "minLength": 1,
+      "description": "业务幂等键。同一逻辑事件的重复投递必须得到同一个键（§4.8 / §16.1）。"
+    },
+    "device_ref": {"type": "string", "minLength": 1, "description": "受控设备引用（opaque），非明文 SN。"},
+    "component_ref": {"type": "string", "minLength": 1},
+    "event_type": {"type": "string", "minLength": 1},
+    "state": {
+      "enum": ["detected", "confirmed", "escalated", "recovering", "resolved", "closed", "suppressed", "rejected"],
+      "description": "Alert 生命周期状态（架构 §14.3）。"
+    },
+    "severity": {"enum": ["info", "warning", "critical"]},
+    "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+    "detected_at": {"type": "string", "format": "date-time"},
+    "summary": {"type": "string", "description": "面向人的一句话摘要。"},
+    "recommended_actions": {"type": "array", "items": {"type": "string"}},
+    "evidence_receipt": {
+      "type": "string",
+      "pattern": "^evidence-receipt://",
+      "description": "受控证据回执引用（opaque），SaaS 不接收原始证据内容。"
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "investigation_id": {"type": "string"},
+        "policy_version": {"type": "string", "description": "产生该上报决策的策略版本。"}
+      }
+    }
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "event_id": "alert_01J0001",
+  "event_revision": 1,
+  "idempotency_key": "device-go2-0001:joint_motor_thermal_degradation:episode-start",
+  "device_ref": "device-opaque",
+  "component_ref": "joint_motor.front_left_hip",
+  "event_type": "joint_motor_thermal_degradation",
+  "state": "detected",
+  "severity": "warning",
+  "confidence": 0.87,
+  "detected_at": "2026-08-13T10:00:00Z",
+  "summary": "左前髋关节电机在相同工况下温升和电流持续偏高。",
+  "recommended_actions": ["降低持续负载并安排检查"],
+  "evidence_receipt": "evidence-receipt://opaque-ref-0001",
+  "source": {
+    "investigation_id": "inv_01J0001",
+    "policy_version": "report-policy-v1"
+  }
+}

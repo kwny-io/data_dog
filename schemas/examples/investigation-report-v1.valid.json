@@ -1,0 +1,26 @@
+{
+  "investigation_id": "inv_01J0001",
+  "candidate_refs": ["cand_01J0001"],
+  "disposition": "confirmed",
+  "event_type": "joint_motor_thermal_degradation",
+  "severity": "warning",
+  "confidence": 0.87,
+  "summary": "左前髋关节电机在相同工况下温升与电流持续偏高。",
+  "hypotheses": [
+    {
+      "cause": "bearing_friction_or_cooling_degradation",
+      "status": "supported",
+      "evidence_refs": ["metricwin://opaque-ref-0001", "vendordoc://opaque-ref-0001"]
+    }
+  ],
+  "counter_evidence_refs": [],
+  "missing_evidence": ["ambient_temperature"],
+  "risk_window": "inspect within 24 hours",
+  "recommended_actions": ["reduce sustained load", "inspect cooling path and bearing"],
+  "model_provenance": {
+    "workflow_version": "device-health-review-v1",
+    "model_ref": "approved-model-alias"
+  },
+  "correlation_group_id": "corr_01J0001",
+  "linked_candidate_refs": ["cand_01J0002"]
+}

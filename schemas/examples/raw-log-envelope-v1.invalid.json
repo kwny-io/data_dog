@@ -1,0 +1,14 @@
+{
+  "event_id": "01JXYZRAW0000000000000002",
+  "tenant_id": "tenant-opaque",
+  "device_sn": "device-go2-0001",
+  "occurred_at": "2026-08-13T10:00:00.123Z",
+  "received_at": "2026-08-13T10:00:00.381Z",
+  "sequence": 938822,
+  "vendor": "vendor-a",
+  "model": "motor-x2",
+  "firmware": "3.2.1",
+  "encoding": "utf-8",
+  "payload_ref": "http://not-an-opaque-ref",
+  "payload_digest": "sha256:short"
+}

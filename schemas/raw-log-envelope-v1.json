@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://data-agent.local/schemas/raw-log-envelope-v1.json",
+  "title": "RawLogEnvelope",
+  "description": "网关接入的原始日志信封（架构 §12.1）。身份字段（tenant_id/device_sn）由网关从认证上下文注入，日志正文中的同名字段不被信任。大体积原文经 payload_ref 受控引用，不默认在总线复制全文。",
+  "type": "object",
+  "required": [
+    "event_id",
+    "tenant_id",
+    "device_sn",
+    "occurred_at",
+    "received_at",
+    "sequence",
+    "vendor",
+    "model",
+    "firmware",
+    "encoding",
+    "payload_ref",
+    "payload_digest"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "event_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "稳定事件 ID（建议 ULID）。同一条原始日志重投时必须保持不变。"
+    },
+    "tenant_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "租户 ID。**仅由网关注入**，不读日志正文。"
+    },
+    "device_sn": {
+      "type": "string",
+      "minLength": 1,
+      "description": "设备 SN。**仅由网关注入**。"
+    },
+    "component_hint": {
+      "type": "string",
+      "description": "组件提示（可选，非权威）。最终组件由 Parser/兼容绑定确定。"
+    },
+    "occurred_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "设备发生时间（事件时间，RFC 3339/ISO 8601 UTC）。"
+    },
+    "received_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "网关接收时间（处理时间）。"
+    },
+    "sequence": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "设备侧单调序列号，用于去重与排序。"
+    },
+    "vendor": {"type": "string", "minLength": 1},
+    "model": {"type": "string", "minLength": 1},
+    "firmware": {"type": "string", "minLength": 1},
+    "protocol_version": {
+      "type": "string",
+      "description": "日志协议版本，参与算子兼容绑定。"
+    },
+    "encoding": {
+      "type": "string",
+      "description": "载荷编码，如 utf-8 / hex / base64。"
+    },
+    "payload_ref": {
+      "type": "string",
+      "pattern": "^rawlog://",
+      "description": "受控引用（opaque ref），指向原始载荷。"
+    },
+    "payload_digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "description": "原始载荷内容哈希，用于完整性与去重。"
+    }
+  }
+}

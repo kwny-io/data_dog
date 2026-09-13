@@ -1,0 +1,16 @@
+{
+  "candidate_id": "cand_01J0002",
+  "candidate_version": 0,
+  "device_sn": "device-go2-0001",
+  "component_ref": "front left hip",
+  "signal": "temperature_rising_under_normalized_load",
+  "severity_hint": "urgent",
+  "window": {
+    "start": "2026-08-13T09:55:00Z",
+    "end": "2026-08-13T10:00:00Z",
+    "sample_count": -1
+  },
+  "detector_provenance": {
+    "operator_id": "motor-health-detector"
+  }
+}

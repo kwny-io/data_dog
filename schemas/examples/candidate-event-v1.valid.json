@@ -1,0 +1,26 @@
+{
+  "candidate_id": "cand_01J0001",
+  "candidate_version": 1,
+  "tenant_id": "tenant-opaque",
+  "device_sn": "device-go2-0001",
+  "component_ref": "joint_motor.front_left_hip",
+  "signal": "temperature_rising_under_normalized_load",
+  "severity_hint": "warning",
+  "window": {
+    "start": "2026-08-13T09:55:00Z",
+    "end": "2026-08-13T10:00:00Z",
+    "sample_count": 420
+  },
+  "evidence_summary": {
+    "temperature_c": {"from": 61.0, "to": 78.2},
+    "current_a": {"baseline": 6.1, "observed": 9.7},
+    "rule_matches": ["MOTOR_TEMP_TREND_V2"],
+    "anomaly_score": 0.91
+  },
+  "evidence_refs": ["metricwin://opaque-ref-0001", "rawlog://opaque-ref-0001"],
+  "detector_provenance": {
+    "operator_id": "motor-health-detector",
+    "operator_version": "0.4.0",
+    "state_generation": "gen_18"
+  }
+}

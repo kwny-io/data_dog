@@ -1,0 +1,31 @@
+{
+  "event_id": "01JXYZNORM000000000000001",
+  "tenant_id": "tenant-opaque",
+  "device_sn": "device-go2-0001",
+  "occurred_at": "2026-08-13T10:00:00.123Z",
+  "component": {
+    "type": "joint_motor",
+    "instance": "front_left_hip",
+    "vendor": "vendor-a",
+    "model": "motor-x2",
+    "firmware": "3.2.1"
+  },
+  "metrics": {
+    "temperature_c": 78.2,
+    "current_a": 9.7,
+    "velocity_rpm": 1320
+  },
+  "status_codes": ["W_TEMP_RISING"],
+  "operating_condition": "climbing",
+  "quality": {
+    "parse_confidence": 1.0,
+    "missing_fields": [],
+    "clock_skew_ms": 31
+  },
+  "provenance": {
+    "binding_revision": "bindrev_01J0001",
+    "operator_id": "vendor-a.motor-parser",
+    "operator_version": "1.3.0",
+    "raw_log_ref": "rawlog://opaque-ref-0001"
+  }
+}

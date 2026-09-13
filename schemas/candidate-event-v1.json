@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://data-agent.local/schemas/candidate-event-v1.json",
+  "title": "CandidateEvent",
+  "description": "检测算子产出、尚未完成 Agent 复核的候选异常（架构 §12.3）。字段命名与嵌套结构以架构蓝图为权威；与现有 dataclass 实现的映射见 schemas/README.md。",
+  "type": "object",
+  "required": [
+    "candidate_id",
+    "candidate_version",
+    "device_sn",
+    "component_ref",
+    "signal",
+    "severity_hint",
+    "window",
+    "detector_provenance"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "candidate_id": {"type": "string", "minLength": 1},
+    "candidate_version": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "候选事件自身的版本号，单调递增；同一候选语义更新时 +1。"
+    },
+    "tenant_id": {"type": "string"},
+    "device_sn": {"type": "string", "minLength": 1},
+    "component_ref": {
+      "type": "string",
+      "pattern": "^[a-z_]+\\.[a-z0-9_]+$",
+      "description": "组件引用，如 joint_motor.front_left_hip。"
+    },
+    "signal": {
+      "type": "string",
+      "minLength": 1,
+      "description": "异常信号名，如 temperature_rising_under_normalized_load。"
+    },
+    "severity_hint": {
+      "enum": ["info", "warning", "critical"],
+      "description": "检测阶段给出的严重度提示（非最终严重度；最终由策略门决定）。"
+    },
+    "window": {
+      "type": "object",
+      "required": ["start", "end", "sample_count"],
+      "additionalProperties": false,
+      "properties": {
+        "start": {"type": "string", "format": "date-time"},
+        "end": {"type": "string", "format": "date-time"},
+        "sample_count": {"type": "integer", "minimum": 0}
+      }
+    },
+    "evidence_summary": {
+      "type": "object",
+      "description": "证据摘要。既有按指标的 from/to/baseline/observed，也有规则命中与异常分。",
+      "additionalProperties": true,
+      "properties": {
+        "rule_matches": {"type": "array", "items": {"type": "string"}},
+        "anomaly_score": {"type": "number", "minimum": 0, "maximum": 1}
+      }
+    },
+    "evidence_refs": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "受控证据引用（opaque refs），如 metricwin:// / rawlog://。"
+    },
+    "detector_provenance": {
+      "type": "object",
+      "required": ["operator_id", "operator_version"],
+      "additionalProperties": false,
+      "properties": {
+        "operator_id": {"type": "string", "minLength": 1},
+        "operator_version": {"type": "string", "minLength": 1},
+        "state_generation": {"type": "string", "description": "有状态算子的状态代次，保证确定性。"}
+      }
+    }
+  }
+}

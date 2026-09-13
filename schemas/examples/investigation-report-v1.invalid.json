@@ -1,0 +1,11 @@
+{
+  "investigation_id": "inv_01J0002",
+  "disposition": "fixed",
+  "confidence": 1.7,
+  "hypotheses": [
+    {
+      "cause": "unknown bearing wear",
+      "status": "maybe"
+    }
+  ]
+}
