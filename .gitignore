@@ -5,6 +5,12 @@
 # Chroma 向量库本地数据（RAG）
 .chroma/
 
+# 本地数据库（SQLite）——运行时生成，不提交
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+
 # 本地工具会话状态（非项目代码）
 .mimosa/
 

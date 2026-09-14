@@ -19,6 +19,7 @@ dependencies = [
     "PyYAML>=6.0",
     "rich>=13.0.0",
     "numpy>=1.24.0",
+    "SQLAlchemy>=2.0",
 ]
 
 [project.optional-dependencies]
@@ -30,6 +31,10 @@ ui = [
 ]
 rag = [
     "chromadb>=0.4.0",
+]
+# 生产数据库驱动（本地 SQLite 无需安装；连 PostgreSQL 时装）
+postgres = [
+    "psycopg[binary]>=3.1",
 ]
 
 [project.scripts]

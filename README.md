@@ -132,6 +132,7 @@ src/data_dog/
   data_plane/   在线数据面（网关/兼容绑定/解析链/候选构建 + SSRF 安全引用）
   alerting/     上报闭环（确定性策略门 + Alert 生命周期 + 幂等 Outbox + 测试 SaaS）
   e2e/          整链回放（厂商文档→算子→候选→Agent→策略门→SaaS，一条命令）
+  storage/      持久化（SQLAlchemy：本地 SQLite / 生产 PostgreSQL）+ 仓储层
   observability.py  可观测性（token 消耗 / 每步耗时 / 成本统计）
 ui/             Streamlit 网页版
 evals/          Agent 评估框架（7 case，含对抗性）
@@ -213,3 +214,19 @@ pytest tests/test_e2e.py -q                 # 5 项
 **厂商文档 →[P1]→ 算子 →[P2]→ 候选 →[Agent]→ 报告 →[P3]→ 策略门 → SaaS → 反馈**，全程离线确定性可复现。
 实测：98°C 过温日志 → critical 候选 → Agent confirmed(0.9) → 上报 critical → SaaS 接收。
 详见 `docs/e2e.md`（含回放中发现并修复的"跨模块硬编码常量"真实 bug）。
+
+---
+
+## 持久化（SQLAlchemy：本地 SQLite ↔ 生产 PostgreSQL）
+
+```bash
+pytest tests/test_storage.py -q     # 10 项
+```
+
+核心对象（遥测事件 / 候选 / 调查报告 / Alert / Outbox / 反馈）**落库，重启不丢**。
+**同一份代码，本地默认 SQLite（零安装），生产设 `DD_DATABASE_URL` 切 PostgreSQL，代码不改。**
+```bash
+export DD_DATABASE_URL="postgresql+psycopg://user:pw@host:5432/data_dog"   # 生产
+```
+安全：全部走 ORM 绑定参数，无字符串拼接 SQL；`alert_outbox` 用 `(幂等键, revision)` 复合主键强制去重。
+详见 `docs/storage.md`。
