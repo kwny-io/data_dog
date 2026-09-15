@@ -16,13 +16,17 @@ import json
 import sys
 from pathlib import Path
 
+from ..paths import vendor_docs_dir
 from .dsl import DSLError
 from .knowledge import build_knowledge_package, flag_unconfirmed
 from .pipeline import DeclarativeRule, Fixture, Operator, replay_all
 
-ROOT = Path(__file__).resolve().parents[3]          # 仓库根
-CLEANED = ROOT / "vendor_docs" / "unitree" / "cleaned"
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
+
+
+def cleaned_dir() -> Path:
+    """厂商清洗后文档目录（运行时解析，尊重 DD_VENDOR_DOCS 覆盖）。"""
+    return vendor_docs_dir() / "unitree" / "cleaned"
 
 
 def build_motor_operator(pkg) -> Operator:
@@ -110,7 +114,7 @@ def main() -> int:
     ap.add_argument("--json", action="store_true", help="机器可读输出")
     args = ap.parse_args()
 
-    pkg = build_knowledge_package(CLEANED)
+    pkg = build_knowledge_package(cleaned_dir())
     # 诚实登记：90°C 保护阈已有官方出处（verified）；仅剩 75°C warning 无出处
     if not any(s.key == "motor_temp_protect_c" for s in pkg.numeric_specs):
         flag_unconfirmed(pkg, ["motor_temp_protect_c"])

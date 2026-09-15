@@ -18,12 +18,10 @@ from ..evidence.store import ALLOWED_COMPONENTS
 from ..mujoco_sim.mujoco_eval import MujocoDeterministicProvider
 from ..operator_factory.knowledge import build_knowledge_package
 from ..operator_factory.p1_demo import build_motor_operator
+from ..paths import vendor_docs_dir
 from ..schemas.operator_config import DetectorConfig, FieldSpec, ThresholdRule
 from ..tools.investigation import InvestigationTools
 from .bridge import CandidateEvidenceBridge
-
-ROOT = Path(__file__).resolve().parents[3]
-CLEANED = ROOT / "vendor_docs" / "unitree" / "cleaned"
 
 
 @dataclass
@@ -54,7 +52,7 @@ class E2EResult:
 
 
 def _detector_config() -> DetectorConfig:
-    pkg = build_knowledge_package(CLEANED)
+    pkg = build_knowledge_package(vendor_docs_dir() / "unitree" / "cleaned")
     op = build_motor_operator(pkg)
     return DetectorConfig(
         operator_id=op.operator_id, operator_type="parser+detector",

@@ -1,0 +1,16 @@
+# Caddy 反向代理配置（自动申请/续期 Let's Encrypt 证书，即 TLS 由它终止）
+#
+# 变量（由 compose 注入）：
+#   DD_DOMAIN   你的域名，如 dog.example.com（必须已解析到本机公网 IP）
+#   ACME_EMAIL  证书到期通知邮箱（可留空）
+{
+	email {$ACME_EMAIL}
+}
+
+{$DD_DOMAIN} {
+	encode gzip
+
+	# Caddy 反代到容器网络内的 app:8000。
+	# 应用容器不直接对外暴露端口——只允许经这里进入。
+	reverse_proxy app:8000
+}

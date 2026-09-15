@@ -14,8 +14,12 @@ from typing import Any, Dict, List, Optional
 
 import yaml
 
-ROOT = Path(__file__).resolve().parents[3]
-OPERATORS_DIR = ROOT / "operators" / "generated"
+from ..paths import operators_dir
+
+
+def _default_operators_dir() -> Path:
+    """算子产物目录（运行时解析，尊重 DD_OPERATORS_DIR 覆盖）。"""
+    return operators_dir() / "generated"
 
 # 规则字段名 → 遥测里可能的标准名（归一化查找）
 _FIELD_ALIASES = {
@@ -48,9 +52,9 @@ def _match(operator, actual, threshold):
 class GeneratedRuleDetector:
     """从 operators/generated/ 加载声明式算子，提供按部件的检测。"""
 
-    def __init__(self, operators_dir: Path = OPERATORS_DIR):
+    def __init__(self, operators_dir: Optional[Path] = None):
         self.by_component: Dict[str, dict] = {}
-        self._load(operators_dir)
+        self._load(operators_dir or _default_operators_dir())
 
     def _load(self, d: Path) -> None:
         if not d.exists():

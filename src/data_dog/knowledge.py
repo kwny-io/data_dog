@@ -188,16 +188,17 @@ def query_knowledge(question: str, n_results: int = 3) -> List[Dict[str, Any]]:
     """查一次 RAG 知识库；常驻复用，坏了自动重建重试一次。"""
     global _PERSISTENT
     client = _PERSISTENT
-    data_dir = Path(__file__).resolve().parents[2] / ".chroma"
+    from .paths import data_dir as _data_dir
+    chroma_dir = _data_dir() / ".chroma"
     try:
         if client is None:
-            client = ChromaKnowledgeClient(_chroma_exe(), data_dir)
+            client = ChromaKnowledgeClient(_chroma_exe(), chroma_dir)
         return client.query(question, n_results)
     except Exception:
         # 失败路径必须关掉旧进程（否则泄漏僵尸 server，锁库引发间歇性故障）
         if client is not None:
             client.close()
-        client = ChromaKnowledgeClient(_chroma_exe(), data_dir)
+        client = ChromaKnowledgeClient(_chroma_exe(), chroma_dir)
         try:
             return client.query(question, n_results)
         finally:

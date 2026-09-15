@@ -230,3 +230,55 @@ export DD_DATABASE_URL="postgresql+psycopg://user:pw@host:5432/data_dog"   # 生
 ```
 安全：全部走 ORM 绑定参数，无字符串拼接 SQL；`alert_outbox` 用 `(幂等键, revision)` 复合主键强制去重。
 详见 `docs/storage.md`。
+
+---
+
+## 落地交付：在线服务（HTTP + Docker）
+
+把 P2 数据面跑成**可长期运行、可探活、可被外部接入**的服务。
+
+```bash
+# 本机跑（默认本地 SQLite，零安装）
+pip install -e ".[dev,postgres]"
+python -m data_dog.service                 # 起在 0.0.0.0:8000
+
+# 或一条命令起整套（应用 + PostgreSQL）
+docker compose up -d --build
+docker compose ps
+```
+
+端点：
+
+| 端点 | 方法 | 作用 |
+|---|---|---|
+| `/healthz` | GET | 存活探针（进程活着即 200，不查依赖） |
+| `/readyz` | GET | 就绪探针（数据库不通 → 503，摘流量不重启） |
+| `/metrics` | GET | 进程内指标 |
+| `/v1/telemetry` | POST | 接入原始日志 → 候选异常 → 落库 |
+| `/v1/candidates` `/v1/alerts` `/v1/outbox` | GET | 查询 |
+
+```bash
+curl http://127.0.0.1:8000/healthz
+curl http://127.0.0.1:8000/readyz
+```
+身份**只认请求头** `X-Tenant-Id` / `X-Device-Sn`，正文里的身份字段一律被忽略（与 P2 网关失败语义一致）。
+`make probe` / `make ingest` 封装了这些命令。
+
+```bash
+pytest tests/test_service.py -q     # 14 项
+```
+
+**给别人用**：先设 `DD_API_KEY`（不然端口开放=任何人可读写）。
+
+- **同一局域网**：把 `http://<你的局域网IP>:8000` 给对方，调用带请求头 `X-API-Key`。
+- **不在局域网**：临时演示用隧道（cloudflared/ngrok/cpolar）；正式对外部署到云主机：
+
+```bash
+cp .env.example .env && vi .env      # 填 DD_DOMAIN / ACME_EMAIL / DD_API_KEY / POSTGRES_PASSWORD
+make up-prod                         # = compose.prod.yaml：Caddy 自动申请 HTTPS，只开 80/443
+```
+
+`compose.prod.yaml` 里应用与数据库都**不对外发布端口**，只经 Caddy 进入。
+
+详见 `docs/delivery.md`（含存活/就绪为何分开、每请求新建 DataPlane 的取舍、
+不在局域网的三条路、以及还不是生产级的项）。

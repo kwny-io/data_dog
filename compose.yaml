@@ -1,0 +1,56 @@
+# data_dog 一键起服务：应用 + PostgreSQL
+#
+#   docker compose up -d --build     # 起（后台），首次会构建镜像
+#   docker compose ps                # 看状态/健康
+#   docker compose logs -f app       # 看服务日志
+#   docker compose down              # 停（保留数据卷）
+#   docker compose down -v           # 停并删数据卷（清库，慎用）
+#
+# 本文件里的口令是**本地开发默认值**，可用环境变量覆盖（见 .env.example）。
+# 生产请勿沿用默认口令，应通过密钥管理注入。
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-data_dog}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-data_dog_dev_pw}
+      POSTGRES_DB: ${POSTGRES_DB:-data_dog}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # 探数据库是否可接受连接；app 会等它健康后才启动
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-data_dog} -d ${POSTGRES_DB:-data_dog}"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+    # 仅本机调试需要看库时才放开（默认不对外暴露 5432）
+    # ports:
+    #   - "5432:5432"
+    restart: unless-stopped
+
+  app:
+    build: .
+    image: data-dog:0.1.0
+    environment:
+      # 应用连库：容器网络内用服务名 db（不是 localhost）
+      DD_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-data_dog}:${POSTGRES_PASSWORD:-data_dog_dev_pw}@db:5432/${POSTGRES_DB:-data_dog}
+      DD_SERVICE_NAME: data-dog
+      DD_SERVICE_PORT: "8000"
+      # 对外提供访问时**必须**设置；留空则不校验（仅适合本机开发）
+      DD_API_KEY: ${DD_API_KEY:-}
+    ports:
+      - "${APP_PORT:-8000}:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys,urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=2).status==200 else 1)"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
+
+volumes:
+  pgdata:

@@ -1,0 +1,32 @@
+# 构建上下文瘦身 + 绝不把本地机密/状态打进镜像
+.git
+.gitignore
+.venv
+venv
+env
+__pycache__
+*.py[cod]
+*.egg-info
+build
+dist
+.pytest_cache
+.mimosa
+
+# 机密与本地状态
+.env
+.env.*
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+.chroma/
+
+# 测试与文档不需要进运行镜像
+tests
+docs
+evals
+evidence
+mcp_servers
+scripts
+ui
+third_party

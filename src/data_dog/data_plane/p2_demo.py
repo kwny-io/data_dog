@@ -21,16 +21,23 @@ from pathlib import Path
 
 from ..operator_factory.knowledge import build_knowledge_package
 from ..operator_factory.p1_demo import build_motor_operator
+from ..paths import vendor_docs_dir
 from ..schemas.operator_config import DetectorConfig, FieldSpec, ThresholdRule
 from .fetch import validate_url
 from .pipeline import DataPlane, build_demo_resolver
 
-ROOT = Path(__file__).resolve().parents[3]
-CLEANED = ROOT / "vendor_docs" / "unitree" / "cleaned"
+
+def cleaned_dir() -> Path:
+    """厂商清洗后文档目录。
+
+    运行时解析（而非模块导入时固定），以便尊重 DD_VENDOR_DOCS 覆盖——
+    这是"装进 site-packages 后找不到文档"那个 bug 的修复点。
+    """
+    return vendor_docs_dir() / "unitree" / "cleaned"
 
 
 def _detector_config() -> DetectorConfig:
-    pkg = build_knowledge_package(CLEANED)
+    pkg = build_knowledge_package(cleaned_dir())
     op = build_motor_operator(pkg)
     return DetectorConfig(
         operator_id=op.operator_id, operator_type="parser+detector",

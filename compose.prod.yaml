@@ -1,0 +1,76 @@
+# data_dog 对外部署（正式）：Caddy(自动 HTTPS) + 应用 + PostgreSQL
+#
+# 与 compose.yaml 的区别：
+#   - 多了 caddy 反向代理，自动申请并续期 TLS 证书（对外只开 80/443）
+#   - 应用容器**不再对外发布端口**（只允许经 caddy 进入）
+#   - 数据库口令、接入密钥一律从 .env 读，缺失即启动失败（fail fast）
+#
+# 用法（在云主机上）：
+#   1) 域名 A 记录解析到本机公网 IP
+#   2) cp .env.example .env && vi .env    # 填 DD_DOMAIN / ACME_EMAIL / DD_API_KEY / POSTGRES_PASSWORD
+#   3) docker compose -f compose.prod.yaml up -d --build
+#
+# 依赖：本机 80/443 端口对公网开放（安全组/防火墙都要放行）。
+services:
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      DD_DOMAIN: ${DD_DOMAIN:?必须设置 DD_DOMAIN（如 dog.example.com）}
+      ACME_EMAIL: ${ACME_EMAIL:-}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      app:
+        condition: service_healthy
+    restart: unless-stopped
+
+  app:
+    build: .
+    image: data-dog:0.1.0
+    environment:
+      DD_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-data_dog}:${POSTGRES_PASSWORD:?必须设置 POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-data_dog}
+      DD_SERVICE_NAME: data-dog
+      DD_SERVICE_PORT: "8000"
+      # 对外部署**必须**设密钥，否则等于公开数据面
+      DD_API_KEY: ${DD_API_KEY:?对外部署必须设置 DD_API_KEY}
+    # 注意：这里**不发布 8000**，只有 caddy 能访问它
+    expose:
+      - "8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys,urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=2).status==200 else 1)"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-data_dog}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?必须设置 POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-data_dog}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-data_dog} -d ${POSTGRES_DB:-data_dog}"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+    # 数据库只在内网，绝不对外发布端口
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  caddy_data:
+  caddy_config:
