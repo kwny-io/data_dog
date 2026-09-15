@@ -12,7 +12,7 @@
 ```bash
 python -m data_dog.data_plane.p2_demo          # 人读输出
 python -m data_dog.data_plane.p2_demo --json   # 机器可读
-pytest tests/test_data_plane.py -q             # 15 项
+pytest tests/test_data_plane.py -q             # 18 项
 ```
 
 实测输出（节选）：

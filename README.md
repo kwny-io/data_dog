@@ -26,8 +26,24 @@ data-dog test
 
 ```bash
 pip install -e ".[ui]"          # 装上 streamlit
-python -m streamlit run ui/app.py           # 调查台：选候选 → ReAct 轨迹 → 报告
+python -m streamlit run ui/app.py           # 调查台：数据面产出候选 → 调查 → ReAct 轨迹 → 报告
 python -m streamlit run ui/mujoco_page.py   # MuJoCo 演示页：点按钮跑仿真 → 遥测 → Agent 调查 → 准确率
+```
+
+`ui/app.py` 按**检测异常 → 诊断异常 → 待人工审核**三步走：
+
+1. **描述问题**：输入关键词 → 检索出相关日志场景（像搜索建议）→ 选一个；
+2. **检测**：把该场景的**原始日志**送进在线数据面（网关校验 → 兼容绑定 →
+   解析归一 → 检测 → 候选合并）→ 产出候选，或**明确说明为什么没有候选**；
+3. **诊断**：对候选跑 Agent 受控调查（ReAct 轨迹 + 结构化报告）；
+4. **待人工审核**：报告是**建议**，最终由确定性策略门与人工确认。
+
+**候选不是手写清单，而是真跑 P2 数据面产出的**；且候选与 Agent 查到的证据
+**来自同一批原始日志**（单一事实源）。页面底部展开明细可看到全部场景的真实处理结果，
+包括**产出 0 条候选**的情形（低于阈值不误报、厂商无阈值则不编规则、固件不匹配则失败关闭）。
+
+```bash
+pytest tests/test_scenarios.py -q   # 14 项：锁定候选来源、证据对齐、问题检索
 ```
 
 ### 跑一下 Agent 评估（可选）
@@ -161,11 +177,11 @@ docs/           设计文档（MuJoCo 仿真与输出解读、SLO 量化目标�
 ```bash
 python -m data_dog.operator_factory.p1_demo          # 人读输出
 python -m data_dog.operator_factory.p1_demo --json   # 机器可读
-pytest tests/test_operator_factory.py tests/test_operator_verification.py -q   # 27 项
+pytest tests/test_operator_factory.py tests/test_operator_verification.py -q   # 28 项
 ```
 
 **厂商文档 → 结构化知识（带 revision/来源/定位）→ 检测算子（声明式 + 受限 DSL）→ Fixture 黄金回放**。
-实测：知识包 11 revisions / 61 字段 / 9 条数值规格 / 6 个错误码；回放 5/5 accuracy 1.0。
+实测：知识包 11 revisions / 61 字段 / 9 条数值规格 / 6 个错误码；回放 6/6 accuracy 1.0。
 
 关键点（对齐架构 §8.2）：**只抽文档真有的规格，并区分"能证实 / 待确认"**——官方开源协议头（`unitree_actuator_sdk`，BSD-3）明写电机 **90°C 触发温度保护**，故标 `verified`；而 **75°C warning 阈无出处**，标 `unconfirmed` / `PROJECT ASSUMPTION`，**不冒充厂商事实**。受限 DSL 是自建的 词法→AST 解释器（无动态执行原语，函数闭集白名单，编译期类型检查）。来源与许可见 `vendor_docs/unitree/SOURCES.md`，详见 `docs/operator_factory.md`。
 
@@ -176,7 +192,7 @@ pytest tests/test_operator_factory.py tests/test_operator_verification.py -q   #
 ```bash
 python -m data_dog.data_plane.p2_demo          # 人读输出
 python -m data_dog.data_plane.p2_demo --json   # 机器可读
-pytest tests/test_data_plane.py -q             # 15 项
+pytest tests/test_data_plane.py -q             # 18 项
 ```
 
 **原始日志 → 网关(注入身份/校验/限流) → 兼容绑定(失败关闭) → Parser→Normalizer→Enricher→Window→Detector → 候选异常**。

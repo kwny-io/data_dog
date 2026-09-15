@@ -48,3 +48,9 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 data_dog = ["py.typed"]
+
+[tool.pytest.ini_options]
+# 屏蔽已知的第三方库弃用提示（来自 starlette，与项目代码无关），保持测试输出干净。
+filterwarnings = [
+    "ignore:The anyio.abc.BlockingPortal alias is deprecated:DeprecationWarning",
+]
