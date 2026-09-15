@@ -26,12 +26,11 @@
       "current": 6.0
     }
   },
-  "expect_hit": [
-    "FIELD_SANITY_TEMP_NONNEG"
-  ],
+  "expect_hit": [],
   "expect_miss": [
     "MOTOR_TEMP_RISE_UNDER_LOAD",
     "MOTOR_MODE_FLAG_SET",
-    "MOTOR_TEMP_PROTECT"
+    "MOTOR_TEMP_PROTECT",
+    "FIELD_SANITY_TEMP_INVALID"
   ]
 }

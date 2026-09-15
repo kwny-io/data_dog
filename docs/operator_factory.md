@@ -13,7 +13,7 @@
 ```bash
 python -m data_dog.operator_factory.p1_demo          # 人读输出
 python -m data_dog.operator_factory.p1_demo --json   # 机器可读
-pytest tests/test_operator_factory.py tests/test_operator_verification.py -q   # 27 项
+pytest tests/test_operator_factory.py tests/test_operator_verification.py -q   # 28 项
 ```
 
 实测输出：
@@ -23,7 +23,7 @@ pytest tests/test_operator_factory.py tests/test_operator_verification.py -q   #
   待确认（无出处，不冒充厂商事实）：['motor_temp_warning_c']
 算子  ：local.joint_motor-motorstate-detector
   7 字段 / 2 声明式规则 / 2 DSL 规则（编译通过 2）
-回放结果：5/5  准确率 1.0
+回放结果：6/6  准确率 1.0
 ```
 
 ---
@@ -96,7 +96,24 @@ uint8_t  MError :3;  // 0.正常 1.过热 2.过流 3.过压 4.编码器故障 5-
 
 ## 6. Fixture 回放与验证（§8.4）
 
-`fixtures/*.json` 每个用例声明 `expect_hit` / `expect_miss`；`replay()` 要求**正例命中且反例不命中**——防"永远为真"的假算子。当前 5 个用例，**5/5**。
+`fixtures/*.json` 每个用例声明 `expect_hit` / `expect_miss`；`replay()` 要求**正例命中且反例不命中**——防"永远为真"的假算子。当前 6 个用例，**6/6**。
+
+### 6.1 一处已修复的规则语义错误（值得记下来）
+
+健全性规则原写作 `FIELD_SANITY_TEMP_NONNEG`：`temperature >= 0`，severity `info`。
+它的**本意**是"解析健全性检查"（见原注释），但它对**每一条正常读数**都命中——
+而在线数据面里每次命中都会进候选，于是**所有正常流量都变成了"候选异常"**，
+真正的异常被淹没。
+
+更糟的是这个错误语义被写进了黄金 Fixture：连 `normal_operation`（正常运行）
+都期望命中该规则，等于**把 bug 固化成了"正确行为"**。
+
+**修复**：改为 `FIELD_SANITY_TEMP_INVALID`，条件 `temperature < 0`——
+健全性检查应当命中"不合理的值"，而不是命中所有值。同时修正 5 个 Fixture，
+并新增 `invalid_temperature_field`（负温度）用例让该规则真正被测到。
+
+**教训**：一条规则"命中即异常"的语义，必须是"这个值不正常"，而不是"这个值存在"。
+否则规则越多，噪声越大——这正是告警系统被淹没的典型方式。
 
 **Fuzz**（`verification.fuzz_operator`）：喂超长/乱码/类型错乱输入，算子**不得崩溃、不得误命中**（§10.3）。首轮 Fuzz **抓到 43 个崩溃**（声明式比较拿 str/None 比大小抛 TypeError）→ 加固后（非数值一律不命中）**500+ 迭代 0 崩溃**。固定种子保证可复现。
 
@@ -125,5 +142,5 @@ uint8_t  MError :3;  // 0.正常 1.过热 2.过流 3.过压 4.编码器故障 5-
 | §8.1 文档 Revision（不可变 + 哈希 + 来源） | ✅ 本模块 |
 | §8.2 VendorKnowledgePackage + 事实/推断分层 | ✅ 本模块（含量化噪声过滤 + unconfirmed 标注） |
 | §8.3 配置优先 + 受限 DSL 第二层 | 🟡 声明式✅ + DSL 表达式层✅；单位换算/`for`/状态机待 P2 |
-| §8.4 验证流水线（Fixture 黄金 + 回放 + Fuzz + 新旧差分） | ✅ Fixture 回放 5/5 + Fuzz 0 崩溃 + 新旧差分；编译扫描/SBOM 待补 |
+| §8.4 验证流水线（Fixture 黄金 + 回放 + Fuzz + 新旧差分） | ✅ Fixture 回放 6/6 + Fuzz 0 崩溃 + 新旧差分；编译扫描/SBOM 待补 |
 | §8.5 发布状态机（Shadow/Canary/Rollback） | ✅ `lifecycle.py`（本地确定性 + 门控）；真实 Registry 属 P4 |

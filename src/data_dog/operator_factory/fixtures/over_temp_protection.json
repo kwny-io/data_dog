@@ -6,6 +6,6 @@
     "series": {"temperature": [85, 88, 90, 92], "current": [14, 15, 15, 16]},
     "baseline": {"current": 10.0}
   },
-  "expect_hit": ["FIELD_SANITY_TEMP_NONNEG", "MOTOR_TEMP_PROTECT"],
-  "expect_miss": ["MOTOR_MODE_FLAG_SET", "MOTOR_TEMP_RISE_UNDER_LOAD"]
+  "expect_hit": ["MOTOR_TEMP_PROTECT"],
+  "expect_miss": ["MOTOR_MODE_FLAG_SET", "MOTOR_TEMP_RISE_UNDER_LOAD", "FIELD_SANITY_TEMP_INVALID"]
 }

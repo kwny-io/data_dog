@@ -63,11 +63,14 @@ def build_motor_operator(pkg) -> Operator:
     )
 
     rules = [
+        # 健全性检查：命中「解析不出合理值」的情形才算异常。
+        # 注意必须是 lt（负值）而不是 ge（非负）——写成 ge 0 会对**每一条**正常读数
+        # 都命中，于是所有正常流量都会变成"候选异常"，淹没真正的异常。
         DeclarativeRule(
-            rule_id="FIELD_SANITY_TEMP_NONNEG",
-            field="temperature", operator="ge", value=0.0,
+            rule_id="FIELD_SANITY_TEMP_INVALID",
+            field="temperature", operator="lt", value=0.0,
             severity_hint="info",
-            message="温度字段 >= 0（解析健全性检查，非厂商阈值）",
+            message="温度字段为负值（载荷或解析异常，非厂商阈值）",
         ),
     ]
     if protect_c is not None:

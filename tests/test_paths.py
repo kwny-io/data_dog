@@ -66,7 +66,7 @@ def test_missing_vendor_docs_degrades_detectably(monkeypatch, tmp_path):
     cfg = _detector_config()
     ids = {r.rule_id for r in cfg.rules}
     assert "MOTOR_TEMP_PROTECT" not in ids      # 无文档 → 无过温规则
-    assert "FIELD_SANITY_TEMP_NONNEG" in ids    # 兜底规则仍在
+    assert "FIELD_SANITY_TEMP_INVALID" in ids   # 兜底规则仍在
 
 
 def test_dockerfile_sets_vendor_docs_env():

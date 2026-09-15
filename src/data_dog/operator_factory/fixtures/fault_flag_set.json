@@ -27,11 +27,11 @@
     }
   },
   "expect_hit": [
-    "FIELD_SANITY_TEMP_NONNEG",
     "MOTOR_MODE_FLAG_SET"
   ],
   "expect_miss": [
     "MOTOR_TEMP_RISE_UNDER_LOAD",
-    "MOTOR_TEMP_PROTECT"
+    "MOTOR_TEMP_PROTECT",
+    "FIELD_SANITY_TEMP_INVALID"
   ]
 }
