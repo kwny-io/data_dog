@@ -127,6 +127,20 @@ def test_knowledge_no_copyright_noise():
         assert not (1900 <= s.value <= 2099 and s.unit == "A"), f"年份噪声: {s}"
 
 
+def test_knowledge_excludes_meta_files():
+    """我们自己的说明/许可文件（SOURCES.md/LICENSE/README）不得被当厂商语料。
+
+    真实踩坑：SOURCES.md 里自述的"75°C 是假设"曾被抽成 verified 规格 → 循环自证。
+    """
+    pkg = build_knowledge_package(CLEANED)
+    for s in pkg.numeric_specs:
+        src = s.source.split("@")[0].upper()
+        assert "SOURCES" not in src and "LICENSE" not in src, f"元文件混入语料: {s.source}"
+    # 90°C 必须仍来自厂商协议头（唯一权威出处）
+    prot = [s for s in pkg.numeric_specs if s.key == "motor_temp_protect_c"]
+    assert prot and "unitree_actuator_sdk" in prot[0].source
+
+
 def test_knowledge_flags_unconfirmed_motor_thresholds():
     """电机 75°C warning 阈无权威出处 → 必须标 unconfirmed，不得当厂商事实。"""
     pkg = build_knowledge_package(CLEANED)

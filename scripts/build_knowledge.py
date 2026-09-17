@@ -93,9 +93,14 @@ def build_doc_entries(source: str, text: str) -> list[str]:
 def main() -> int:
     OUT.mkdir(parents=True, exist_ok=True)
     total_entries = 0
+    # 排除"我们自己的说明/许可"文件——它们不是厂商语料，若被当语料会污染抽取
+    # （真实踩坑：SOURCES.md 里自述的"75°C 是假设"曾被抽成 verified 规格，循环自证）。
+    META_NAMES = {"SOURCES.md", "LICENSE", "README", "README.md", "readme.md"}
     for f in sorted(SRC.rglob("*")):
         rel = str(f.relative_to(SRC))
         if "cleaned" in rel:
+            continue
+        if f.name in META_NAMES or f.name.upper().startswith("LICENSE"):
             continue
         # 用文件名匹配双后缀：.idl.txt 的 Path.suffix 只是 .txt
         is_idl = f.name.endswith(".idl.txt")

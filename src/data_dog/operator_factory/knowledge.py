@@ -270,17 +270,30 @@ def extract_protocol_header(text: str, revision: DocumentRevision
 
 _KNOWN_UNITS = set(_NAME_UNIT.values())
 
+# 非厂商语料（我们自己的说明/许可）——绝不可当语料抽取，否则会循环自证。
+_META_NAMES = {"SOURCES.MD", "LICENSE", "README", "README.MD"}
+
+
+def _is_meta_file(name: str) -> bool:
+    return name.upper() in _META_NAMES or name.upper().startswith("LICENSE")
+
 
 def build_knowledge_package(
     cleaned_dir: Path, *, vendor: str = "unitree", product: str = "go2",
 ) -> VendorKnowledgePackage:
-    """扫描 cleaned/ 下的 IDL、文档与协议头，产出知识包（含 revision 与定位）。"""
+    """扫描 cleaned/ 下的 IDL、文档与协议头，产出知识包（含 revision 与定位）。
+
+    **只吃厂商语料**：排除 SOURCES.md / LICENSE / README 等我们自己的元文件——
+    它们不是厂商文档，若被当语料会污染抽取（真实踩坑，见问题台账）。
+    """
     pkg = VendorKnowledgePackage(vendor=vendor, product=product)
     root = cleaned_dir
     for f in sorted(root.rglob("*")):
         if not f.is_file():
             continue
         name = f.name
+        if _is_meta_file(name):
+            continue
         is_idl = name.endswith(".idl.txt")
         is_md = name.endswith(".md")
         is_h = name.endswith(".h")

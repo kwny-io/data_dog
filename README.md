@@ -129,6 +129,9 @@ src/data_dog/
   synth/        合成遥测生成器（Go2 物理参数 + 故障注入 + ground truth）+ 评估
   mujoco_sim/   MuJoCo 仿真数据源（simulate 跑 Go2 + to_sample 转样本 + mujoco_eval 评估）
   operator_factory/  离线算子工厂（文档 revision + 诚实知识抽取 + 受限 DSL + Fixture 回放）
+  data_plane/   在线数据面（网关/兼容绑定/解析链/候选构建 + SSRF 安全引用）
+  alerting/     上报闭环（确定性策略门 + Alert 生命周期 + 幂等 Outbox + 测试 SaaS）
+  e2e/          整链回放（厂商文档→算子→候选→Agent→策略门→SaaS，一条命令）
   observability.py  可观测性（token 消耗 / 每步耗时 / 成本统计）
 ui/             Streamlit 网页版
 evals/          Agent 评估框架（7 case，含对抗性）
@@ -161,6 +164,52 @@ pytest tests/test_operator_factory.py tests/test_operator_verification.py -q   #
 ```
 
 **厂商文档 → 结构化知识（带 revision/来源/定位）→ 检测算子（声明式 + 受限 DSL）→ Fixture 黄金回放**。
-实测：知识包 12 revisions / 61 字段 / 14 条数值规格 / 6 个错误码；回放 5/5 accuracy 1.0。
+实测：知识包 11 revisions / 61 字段 / 9 条数值规格 / 6 个错误码；回放 5/5 accuracy 1.0。
 
 关键点（对齐架构 §8.2）：**只抽文档真有的规格，并区分"能证实 / 待确认"**——官方开源协议头（`unitree_actuator_sdk`，BSD-3）明写电机 **90°C 触发温度保护**，故标 `verified`；而 **75°C warning 阈无出处**，标 `unconfirmed` / `PROJECT ASSUMPTION`，**不冒充厂商事实**。受限 DSL 是自建的 词法→AST 解释器（无动态执行原语，函数闭集白名单，编译期类型检查）。来源与许可见 `vendor_docs/unitree/SOURCES.md`，详见 `docs/operator_factory.md`。
+
+---
+
+## P2 在线数据面（日志 → 候选异常，可跑可测）
+
+```bash
+python -m data_dog.data_plane.p2_demo          # 人读输出
+python -m data_dog.data_plane.p2_demo --json   # 机器可读
+pytest tests/test_data_plane.py -q             # 15 项
+```
+
+**原始日志 → 网关(注入身份/校验/限流) → 兼容绑定(失败关闭) → Parser→Normalizer→Enricher→Window→Detector → 候选异常**。
+实测：6 条日志 → 4 条规范化、2 条失败关闭、1 条 critical 候选（带证据）。
+
+关键点（对齐 §9.1/§9.2）：**身份只在网关注入**（正文自称的身份一律丢弃）；**拿不准就失败关闭**（绑定 `not_found`/`ambiguous`、认证 `denied`，绝不猜）；**热路径不调大模型**。大载荷经受控引用外置，取数前过 **SSRF 校验**（仅 http/https，拒绝 localhost/环回/私有/保留）。详见 `docs/data_plane.md`。
+
+---
+
+## P3 上报闭环（策略门 + 事件生命周期 + SaaS，可跑可测）
+
+```bash
+python -m data_dog.alerting.p3_demo          # 人读输出
+python -m data_dog.alerting.p3_demo --json   # 机器可读
+pytest tests/test_alerting.py -q             # 20 项
+```
+
+**调查结论 → 确定性策略门(§14.2 四条件+冲突消解) → 正式事件(同一 Episode 复用 event_id) → 幂等投递 SaaS → 反馈回填**。
+实测：confirmed+严重码→上报 critical；rejected/缺证据→不上报（失败关闭）；同 Episode 更新 revision 递增、不重复投递。
+
+关键点：**确定性决策表（不让模型判断上报）**、**Episode 语义**（同一故障同一 event_id + 幂等键，构成规则定死）、**失败关闭**、投递前**剔除禁止字段**。详见 `docs/alerting.md`。
+
+> **至此整条链贯通**：厂商文档 →[P1]→ 算子 →[P2]→ 遥测/候选 → Agent 调查 →[P3]→ 策略门 → SaaS。
+
+---
+
+## E2E 整链回放（一条命令跑通全链，§19.3 验收路径）
+
+```bash
+python -m data_dog.e2e.replay_demo          # 人读输出
+python -m data_dog.e2e.replay_demo --json   # 机器可读
+pytest tests/test_e2e.py -q                 # 5 项
+```
+
+**厂商文档 →[P1]→ 算子 →[P2]→ 候选 →[Agent]→ 报告 →[P3]→ 策略门 → SaaS → 反馈**，全程离线确定性可复现。
+实测：98°C 过温日志 → critical 候选 → Agent confirmed(0.9) → 上报 critical → SaaS 接收。
+详见 `docs/e2e.md`（含回放中发现并修复的"跨模块硬编码常量"真实 bug）。

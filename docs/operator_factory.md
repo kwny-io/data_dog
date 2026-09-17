@@ -18,7 +18,7 @@ pytest tests/test_operator_factory.py tests/test_operator_verification.py -q   #
 
 实测输出：
 ```
-知识包：12 份 revision，61 字段规格，14 条数值规格，6 个错误码
+知识包：11 份 revision，61 字段规格，9 条数值规格，6 个错误码
   ✅ 温度保护阈值 90.0°C —— verified 于 .../motor_msg_GO-M8010-6.h@docrev_99a124c861db (line:45)
   待确认（无出处，不冒充厂商事实）：['motor_temp_warning_c']
 算子  ：local.joint_motor-motorstate-detector
@@ -57,6 +57,7 @@ pytest tests/test_operator_factory.py tests/test_operator_verification.py -q   #
 - **只抽文档里能定位的规格**：数值正则要求数字是独立 token，跳过版权/页眉行（防 `© 2023` 被当成 `2023A`）。清理后从原始 30 条噪声降到 **8 条真实规格**。
 - **抽不到的不许编**：公开语料里**没有**电机 75°C warning 阈值（90°C 保护阈见下）。抽取器不会把它写成厂商事实——它只能以 `unconfirmed` 出现在知识包里，或在 DSL 规则里显式标注为 `PROJECT ASSUMPTION`。
 - **单位来自命名约定 → `confidence=inferred`**：IDL 不带单位，`temperature→celsius` 是推断，如实标注。
+- **只吃厂商语料**：`SOURCES.md` / `LICENSE` / `README` 等**我们自己的元文件被显式排除**，不得当语料抽取。真实踩坑：SOURCES.md 里自述的"75°C 是假设"曾被抽成 `verified` 规格 → **循环自证**（自己写的说明被当成厂商出处）。修复后数值规格从虚高的 14 条降到 **9 条真实**，并有回归测试守护。
 
 ### 4.1 权威来源：厂商开源的电机协议头
 
