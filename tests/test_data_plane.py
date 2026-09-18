@@ -178,6 +178,58 @@ def test_candidate_merge_and_severity():
     assert c.evidence and c.evidence_refs
 
 
+def test_candidate_merge_within_window():
+    """合并窗口内的多次命中 → 合成 1 条候选。"""
+    b = CandidateBuilder(merge_window_s=5.0)
+    hit = [{"rule_id": "MOTOR_TEMP_PROTECT", "field": "temperature", "value": 95,
+            "operator": "ge", "threshold": 90.0, "severity_hint": "critical",
+            "operator_id": "d"}]
+    for t in ("2026-09-13T10:00:00Z", "2026-09-13T10:00:02Z",
+              "2026-09-13T10:00:04Z"):          # 间隔 2s，均在 5s 窗口内
+        b.add(device_sn="dev", component_ref="joint_motor.front_left_hip",
+              metrics={"temperature": 95}, hits=hit,
+              occurred_at=t, received_at="t")
+    cands = b.build()
+    assert len(cands) == 1
+    assert cands[0].sample_count == 3
+    assert cands[0].window_start == "2026-09-13T10:00:00Z"
+    assert cands[0].window_end == "2026-09-13T10:00:04Z"
+
+
+def test_candidate_split_outside_window():
+    """超出合并窗口的命中 → 开启新的候选（不合并成一条）。"""
+    b = CandidateBuilder(merge_window_s=5.0)
+    hit = [{"rule_id": "MOTOR_TEMP_PROTECT", "field": "temperature", "value": 95,
+            "operator": "ge", "threshold": 90.0, "severity_hint": "critical",
+            "operator_id": "d"}]
+    b.add(device_sn="dev", component_ref="joint_motor.front_left_hip",
+          metrics={"temperature": 95}, hits=hit,
+          occurred_at="2026-09-13T10:00:00Z", received_at="t")
+    b.add(device_sn="dev", component_ref="joint_motor.front_left_hip",
+          metrics={"temperature": 96}, hits=hit,
+          occurred_at="2026-09-13T10:00:30Z", received_at="t")   # 间隔 30s > 5s
+    cands = b.build()
+    assert len(cands) == 2
+    assert all(c.sample_count == 1 for c in cands)
+    # 两条都属同一信号，但 ID 不同（分别是各自"短时事件"）
+    assert cands[0].signal == cands[1].signal
+    assert cands[0].candidate_id != cands[1].candidate_id
+
+
+def test_candidate_unparseable_time_still_merges():
+    """时间无法解析时保守合并（不因数据质量差而丢合并能力）。"""
+    b = CandidateBuilder(merge_window_s=5.0)
+    hit = [{"rule_id": "MOTOR_TEMP_PROTECT", "field": "temperature", "value": 95,
+            "operator": "ge", "threshold": 90.0, "severity_hint": "warning",
+            "operator_id": "d"}]
+    for t in ("not-a-time", "also-bad"):
+        b.add(device_sn="dev", component_ref="joint_motor.front_left_hip",
+              metrics={"temperature": 95}, hits=hit,
+              occurred_at=t, received_at="t")
+    assert len(b.build()) == 1
+
+
+
 # ---------------------------------------------------------------- 端到端
 
 def test_data_plane_end_to_end(detector_config):

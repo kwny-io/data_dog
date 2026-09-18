@@ -2,8 +2,9 @@
 """P2 候选异常构建（对齐架构 §9.3 第 6 步 + §12.3）。
 
 把 Detector 的命中合并、去重成**少量** CandidateEvent：
-  - 同一 (device, component, signal) 在合并窗口内的多次命中 → 合成**一条**候选
-    （不然刷屏；重复信号合并是 §9.3 第 6 步明确要求）。
+  - 同一 (device, component, signal) 在**合并窗口**（merge_window_s 秒）内的多次命中
+    → 合成**一条**候选（不然刷屏；重复信号合并是 §9.3 第 6 步明确要求）。
+  - 超出合并窗口的命中 → 开启**新的一条**候选（视为另起一个"短时事件"）。
   - 附上 evidence（指标 from/to/baseline）+ evidence_refs（受控引用）。
   - anomaly_score：由**命中严重度**映射（确定性，不用模型）。
 """
@@ -11,12 +12,38 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from ..schemas.events import CandidateEvent, EvidenceSummary
 
 _SEV_RANK = {"info": 0, "warning": 1, "critical": 2}
 _SEV_SCORE = {"info": 0.3, "warning": 0.7, "critical": 1.0}
+
+
+def _parse_time(value: Any) -> Optional[datetime]:
+    """尽量把 occurred_at 解析成带时区的 datetime；解析不了返回 None。
+
+    支持 "2026-09-13T10:00:00Z" / "...+08:00" / 纯 epoch 秒。解析失败时
+    调用方按"同一窗口"处理，保持向后兼容（不因数据质量差而丢合并能力）。
+    """
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):          # epoch 秒
+        try:
+            return datetime.fromtimestamp(float(value), tz=timezone.utc)
+        except (ValueError, OSError, OverflowError):
+            return None
+    s = str(value).strip()
+    if not s:
+        return None
+    try:
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        dt = datetime.fromisoformat(s)
+        return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
 
 
 @dataclass
@@ -32,18 +59,50 @@ class _Group:
     evidence: List[EvidenceSummary] = field(default_factory=list)
     evidence_refs: List[str] = field(default_factory=list)
     operator_id: str = ""
+    # 该组最近一次命中/创建的时间（用于判断是否还在合并窗口内）
+    last_dt: Optional[datetime] = None
 
 
 class CandidateBuilder:
-    """累积命中 → 合并成候选。"""
+    """累积命中 → 按合并窗口归并成候选。"""
 
     def __init__(self, *, merge_window_s: float = 5.0):
         self.merge_window_s = merge_window_s
+        # 所有已形成的组（含已关闭的）；key 唯一，支持同一信号多段事件
         self._groups: Dict[str, _Group] = {}
+        # (device, component, signal) → 当前"打开中"的组 key
+        self._open: Dict[str, str] = {}
+        self._seq = 0
 
     @staticmethod
-    def _key(device_sn: str, component_ref: str, signal: str) -> str:
+    def _base_key(device_sn: str, component_ref: str, signal: str) -> str:
         return f"{device_sn}|{component_ref}|{signal}"
+
+    def _find_group(self, device_sn: str, component_ref: str, signal: str,
+                    occurred_at: str) -> _Group:
+        """找到应归入的组：同信号、且仍在合并窗口内；否则开新组。"""
+        base = self._base_key(device_sn, component_ref, signal)
+        now_dt = _parse_time(occurred_at)
+        open_key = self._open.get(base)
+        if open_key is not None:
+            g = self._groups[open_key]
+            # 时间可解析且两者都可解析时，判断是否超窗
+            if now_dt is None or g.last_dt is None:
+                in_window = True                     # 解析不了 → 保守合并
+            else:
+                delta = abs((now_dt - g.last_dt).total_seconds())
+                in_window = delta <= self.merge_window_s
+            if in_window:
+                return g
+        # 开启新组
+        self._seq += 1
+        key = f"{base}#{self._seq}"
+        g = _Group(device_sn=device_sn, component_ref=component_ref,
+                   signal=signal, window_start=occurred_at, window_end=occurred_at,
+                   last_dt=now_dt)
+        self._groups[key] = g
+        self._open[base] = key
+        return g
 
     def add(self, *, device_sn: str, component_ref: str, metrics: Dict[str, Any],
             hits: List[Dict[str, Any]], occurred_at: str, received_at: str,
@@ -52,14 +111,10 @@ class CandidateBuilder:
         for h in hits:
             rule_id = h["rule_id"]
             signal = _signal_of(rule_id, h.get("field", ""))
-            key = self._key(device_sn, component_ref, signal)
-            g = self._groups.get(key)
-            if g is None:
-                g = _Group(device_sn=device_sn, component_ref=component_ref,
-                           signal=signal, window_start=occurred_at, window_end=occurred_at)
-                self._groups[key] = g
+            g = self._find_group(device_sn, component_ref, signal, occurred_at)
             g.window_end = occurred_at
             g.sample_count += 1
+            g.last_dt = _parse_time(occurred_at) or g.last_dt
             if rule_id not in g.rule_ids:
                 g.rule_ids.append(rule_id)
             # 严重度取最高
@@ -80,7 +135,7 @@ class CandidateBuilder:
                 g.evidence_refs.append(raw_ref)
 
     def build(self) -> List[CandidateEvent]:
-        """产出候选列表（确定性排序：设备→部件→信号）。"""
+        """产出候选列表（确定性排序：设备→部件→信号→首见时间）。"""
         out: List[CandidateEvent] = []
         for key in sorted(self._groups):
             g = self._groups[key]
