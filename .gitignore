@@ -25,3 +25,15 @@ dist/
 .pytest_cache/
 .venv/
 venv/
+
+# 临时抓取 / 本地搜索残留（调研过程产物，不是项目文件）
+.tmpsearch/
+/t.html
+/tri.html
+
+# 本地工作记录 / 基线快照（过程产物，保留在本地即可）
+.replica_baseline.txt
+.replica_log.md
+
+# Streamlit 本地运行缓存
+.streamlit/secrets.toml

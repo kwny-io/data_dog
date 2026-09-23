@@ -1,8 +1,40 @@
 # data_dog —— 机器狗遥测故障调查 Agent
 
+**一句话**：把机器狗的原始日志，变成一份**可上报、可追责、可复现**的故障结论——全链离线确定性，热路径不调大模型。
+
 一个会**自己调查异常**的 Agent：喂给它一个候选异常，它会调用只读工具查遥测 / 厂商知识 / 邻居事件 / 近期变更，逐步推理、建立假设、寻找反证，最后输出一份结构化 `InvestigationReport`（裁决 + 置信度 + 假设 + 缺失证据 + 建议）。
 
-> **当前数据是 mock**：用于跑通"Agent 调查闭环"这条链路。接真实设备时只需替换 `EvidenceStore` 的数据源，不改 Agent / 工具逻辑（见「数据从哪来」）。
+核心目标不是"让模型答得聪明"，而是**让结论值得信**：数值只用有出处的、结论必须挂证据、拿不准就失败关闭。
+
+---
+
+## 亮点速览
+
+| | 亮点 | 证据 |
+|---|---|---|
+| 🔗 | **全链闭环，一条命令跑通** | 厂商文档 →[P1]→ 算子 →[P2]→ 候选 →[Agent]→ 报告 →[P3]→ 策略门 → SaaS 反馈，`python -m data_dog.e2e.replay_demo` |
+| 🧪 | **189 个测试全绿，全离线确定性** | `pytest -q` → `189 passed`（20 个测试文件，fake provider，无需 API Key、不联网） |
+| 🔒 | **热路径确定性：上报不交给模型判断** | 上不上报由**确定性策略门**（四条件决策表 + 冲突消解）决定，同输入永远同结论；模型只出现在"调查报告"那一步 |
+| 🧱 | **不拿 `eval` 执行厂商字符串** | 自建**受限 DSL**：词法 → AST 解释器，无动态执行原语、函数闭集白名单、编译期类型检查 |
+| 🔍 | **诚实抽取，区分"能证实 / 待确认"** | 官方 SDK 头文件明写电机 **90°C 触发保护** → `verified`；无出处的 75°C → `unconfirmed`，**不冒充厂商事实** |
+| 🚪 | **fail-closed 贯穿全链** | 身份只在网关注入（正文自称一律丢弃）、兼容绑定拿不准就拒、错误语义收敛为有限错误码，**绝不降级为无鉴权** |
+| 🔁 | **幂等上报** | `(幂等键, revision)` 复合主键，网络重试 / 进程重启都不会产生重复告警 |
+| 🛡 | **安全设计落地** | SSRF 防护（校验**解析后 IP**、防 DNS rebinding）、`hmac.compare_digest` 常量时间比较、容器非 root、密钥不进镜像 |
+| 📊 | **带 ground truth 的量化评估** | 合成 + MuJoCo 双数据源各 **6/6**；7 个评估 case 含 **2 个对抗性**（提示注入 / 身份伪装） |
+| 🚚 | **能交付：服务 + 容器 + HTTPS** | FastAPI（liveness / readiness 分离）+ Dockerfile + compose（含 Caddy 自动申请 HTTPS）+ Makefile |
+
+**规模**：源码 91 个 Python 文件 / 9652 行，测试 2655 行；5 份正式事件 JSON Schema；15 个 `make` 命令。
+
+---
+
+## 诚实边界（先说清楚，免得误会）
+
+- **不接真实遥测流**。证据来自自洽的 mock / 合成 / MuJoCo 仿真，只能验证**链路正确性**，验证不了真实场景的**误报率**。
+- **多租户不是真隔离**。租户 / 设备身份由网关注入，但行级隔离未做。
+- **不能水平扩展**。窗口与有状态算子在进程内，多副本会不一致，需要状态外置。
+- **P4 大工程明确不做**：沙箱算子运行时、控制面（Registry / Canary / 回滚 / 签名）、实时高吞吐流处理、真实多租户 SaaS——这些需要团队与设施。
+
+> 接真实设备时只需替换 `EvidenceStore` 的数据源实现，Agent / 工具逻辑不用改（见「数据从哪来」）。
 
 ---
 
@@ -43,7 +75,7 @@ python -m streamlit run ui/mujoco_page.py   # MuJoCo 演示页：点按钮跑仿
 包括**产出 0 条候选**的情形（低于阈值不误报、厂商无阈值则不编规则、固件不匹配则失败关闭）。
 
 ```bash
-pytest tests/test_scenarios.py -q   # 14 项：锁定候选来源、证据对齐、问题检索
+pytest tests/test_scenarios.py -q   # 17 项：锁定候选来源、证据对齐、问题检索
 ```
 
 ### 跑一下 Agent 评估（可选）
@@ -149,6 +181,8 @@ src/data_dog/
   alerting/     上报闭环（确定性策略门 + Alert 生命周期 + 幂等 Outbox + 测试 SaaS）
   e2e/          整链回放（厂商文档→算子→候选→Agent→策略门→SaaS，一条命令）
   storage/      持久化（SQLAlchemy：本地 SQLite / 生产 PostgreSQL）+ 仓储层
+  service/      HTTP 服务（FastAPI：liveness/readiness 探针 + 遥测接入 + 查询端）
+  paths.py      资源定位（资源位置外部可注入，防"打包后路径失联"）
   observability.py  可观测性（token 消耗 / 每步耗时 / 成本统计）
 ui/             Streamlit 网页版
 evals/          Agent 评估框架（7 case，含对抗性）
@@ -184,6 +218,26 @@ pytest tests/test_operator_factory.py tests/test_operator_verification.py -q   #
 实测：知识包 11 revisions / 61 字段 / 9 条数值规格 / 6 个错误码；回放 6/6 accuracy 1.0。
 
 关键点（对齐架构 §8.2）：**只抽文档真有的规格，并区分"能证实 / 待确认"**——官方开源协议头（`unitree_actuator_sdk`，BSD-3）明写电机 **90°C 触发温度保护**，故标 `verified`；而 **75°C warning 阈无出处**，标 `unconfirmed` / `PROJECT ASSUMPTION`，**不冒充厂商事实**。受限 DSL 是自建的 词法→AST 解释器（无动态执行原语，函数闭集白名单，编译期类型检查）。来源与许可见 `vendor_docs/unitree/SOURCES.md`，详见 `docs/operator_factory.md`。
+
+---
+
+## 真实 RAG 知识检索（可选，默认关闭）
+
+厂商知识不只是"写死的条目"：把**真实公开厂商资料**（官方 Go2 用户手册、官方 SDK 的 IDL 字段定义、第三方诊断指南，共 10 份，经 MarkItDown 转文本）切块灌进 **Chroma 向量库**，让 Agent 的工具 `query_vendor_knowledge` 走**语义检索**。
+
+- 链路：MarkItDown（文档解析）→ Chroma（`chroma-mcp` 常驻连接）→ `query_vendor_knowledge`
+- 开关：设 `DD_KB_CHROMA=1` 启用；**取不到就降级回内置条目并标注 `retriever`**，不静默假装是检索结果
+- 落地脚本：`scripts/chroma_ingest.py`；来源与许可见 `vendor_docs/unitree/SOURCES.md`
+
+---
+
+## 工程可靠性：一次"静默失败"的发现与防护
+
+本地跑得好好的，**装进容器后悄悄少了一条检测规则**——不报错、不崩溃，只是结果不对。根因是代码用"文件往上数三层"去推配置目录，本地对、安装后路径变了就找不到。
+
+- **识别类别**：这是**静默失败**，比崩溃更危险——**单测全绿也抓不到**，因为它不抛异常。
+- **修法**：资源位置改为**外部可注入**（`data_dog/paths.py` + 环境变量），不再让代码猜路径。
+- **防回归**：`tests/test_paths.py`（7 项）锁定"**降级必须可观测**"。
 
 ---
 
