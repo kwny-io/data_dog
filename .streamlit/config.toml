@@ -1,0 +1,10 @@
+# Streamlit 主题与运行配置（让演示台看起来更"企业级"一些）
+[theme]
+primaryColor = "#2563EB"              # 主色（按钮/高亮）
+backgroundColor = "#FFFFFF"           # 内容区底色
+secondaryBackgroundColor = "#F6F8FB"  # 侧栏/次级底色
+textColor = "#0F172A"                 # 正文色
+font = "sans serif"
+
+[browser]
+gatherUsageStats = false              # 不上报使用统计

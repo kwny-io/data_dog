@@ -140,7 +140,7 @@ class ScenarioRun:
             return f"{name}命中了检测规则：{', '.join(c.rule_matches)}。"
 
         if (self.stats.get("rejected_by_reason") or {}):
-            return "设备信息与已知兼容范围对不上，数据面**拒绝处理而不是猜测**。"
+            return "设备信息与已知兼容范围对不上，数据面拒绝处理而不是猜测。"
 
         has_metrics = any(ev.get("metrics") for ev in self.telemetry_by_component.values())
         if not has_metrics:
