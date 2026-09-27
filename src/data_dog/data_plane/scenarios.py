@@ -26,6 +26,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Any
 
+from ..presentation import component_cn, derive_verdict
 from ..schemas.events import CandidateEvent
 from .p2_demo import _detector_config
 from .pipeline import DataPlane, DataPlaneResult, build_demo_resolver
@@ -35,27 +36,20 @@ DEMO_DEVICE_SN = "device-abc123"
 DEMO_TENANT_ID = "tenant-demo"
 
 # P2 归一化后的字段名（来自 IDL：temperature/current/mode）
-# → Agent 证据侧使用的标准名（对齐架构 §12.2：temperature_c / current_a）
+# → Agent 证据侧使用的标准名（对齐架构 §12.2：temperature_c / current_a）。
+# 供本模块的遥测转换与 `service/evidence.py` 的 RepoEvidenceBridge 复用：
+# 两处必须用同一份映射，否则 Agent 看到的证据会与 demo 静默分叉。
 _STANDARD_NAME = {
     "temperature": "temperature_c",
     "current": "current_a",
     "mode": "mode",
 }
 
-# 部件英文标识 → 中文显示名（只用于界面，不参与计算）
-_COMPONENT_CN = {
-    "joint_motor.front_left_hip": "左前髋关节电机",
-    "joint_motor.front_right_hip": "右前髋关节电机",
-    "joint_motor.front_left_knee": "左前膝关节电机",
-    "joint_motor.front_right_knee": "右前膝关节电机",
-    "battery.main": "主电池",
-    "controller.main": "主控",
-}
-
-
-def component_cn(component_ref: str) -> str:
-    """部件显示名：有中文就用中文，没有就原样返回。"""
-    return _COMPONENT_CN.get(component_ref, component_ref)
+# 部件显示名委托到 presentation（唯一实现），保持本模块 `component_cn` 可用
+__all__ = [
+    "Scenario", "ScenarioRun", "SCENARIOS", "DEMO_DEVICE_SN", "DEMO_TENANT_ID",
+    "component_cn", "match_scenarios", "run_scenario", "run_all", "_STANDARD_NAME",
+]
 
 
 @dataclass(frozen=True)
@@ -110,42 +104,19 @@ class ScenarioRun:
 
     @property
     def verdict(self) -> str:
-        """一句话结论，给不想看细节的人看。"""
-        if self.candidates:
-            c = self.candidates[0]
-            sev = {"critical": "严重", "warning": "警告"}.get(c.severity_hint,
-                                                             c.severity_hint)
-            return f"⚠️ 检测到 1 条{sev}异常"
-        st_ = self.stats
-        if st_.get("rejected"):
-            return "⛔ 日志被拒绝（失败关闭）"
-        return "✅ 没有检测到异常"
+        """一句话结论，给不想看细节的人看。委托 `presentation.derive_verdict`。"""
+        return derive_verdict(
+            [c.to_dict() for c in self.candidates], self.stats,
+            self.telemetry_by_component,
+        )[0]
 
     @property
     def verdict_detail(self) -> str:
-        """结论的一句人话解释。"""
-        if self.candidates:
-            c = self.candidates[0]
-            name = component_cn(c.component_ref)
-            temp = None
-            for ev in self.telemetry_by_component.values():
-                t = ev.get("metrics", {}).get("temperature_c")
-                if t is not None:
-                    temp = t
-                    break
-            if "MOTOR_TEMP_PROTECT" in c.rule_matches and temp is not None:
-                return (f"{name}温度 {temp:.0f}°C，超过厂商文档写明的 90°C "
-                        "安全保护线。")
-            return f"{name}命中了检测规则：{', '.join(c.rule_matches)}。"
-
-        if (self.stats.get("rejected_by_reason") or {}):
-            return "设备信息与已知兼容范围对不上，数据面拒绝处理而不是猜测。"
-
-        has_metrics = any(ev.get("metrics") for ev in self.telemetry_by_component.values())
-        if not has_metrics:
-            return ("这条日志的字段和当前检测算子对不上（本算子只覆盖关节电机），"
-                    "解析不出可用指标，所以没有可判定的内容。")
-        return "各项读数都在厂商文档给出的规则范围内，没有触发任何检测规则。"
+        """结论的一句人话解释。与 verdict 同源（唯一实现，避免前后端分叉）。"""
+        return derive_verdict(
+            [c.to_dict() for c in self.candidates], self.stats,
+            self.telemetry_by_component,
+        )[1]
 
     @property
     def stats(self) -> dict[str, Any]:

@@ -503,3 +503,173 @@ def test_tenant_lists_are_isolated(client):
     # B 看不到（空列表，而非报错——不泄露"另一端有数据"）
     b = client.get("/v1/candidates", headers={"X-Tenant-Id": "tenant-other"}).json()
     assert b["count"] == 0 and b["total"] == 0 and b["items"] == []
+
+
+# ---------------------------------------------------------------- 单资源端点
+
+def _seed_candidate(client, event_id="e1", temperature=96):
+    """接入一条过温日志，返回落库的 candidate_id。"""
+    client.post("/v1/telemetry", headers=_AUTH,
+                json={"events": [_raw(event_id, temperature=temperature)]})
+    items = client.get("/v1/candidates", headers=_Q).json()["items"]
+    return items[0]["candidate_id"]
+
+
+def test_get_single_candidate(client):
+    cid = _seed_candidate(client)
+    r = client.get(f"/v1/candidates/{cid}", headers=_Q)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["item"]["candidate_id"] == cid
+    assert body["item"]["severity_hint"] == "critical"
+
+
+def test_get_candidate_cross_tenant_404(client):
+    """跨租户读单候选 → 404（不泄露"另一端存在该资源"）。"""
+    cid = _seed_candidate(client)
+    r = client.get(f"/v1/candidates/{cid}",
+                   headers={"X-Tenant-Id": "tenant-other"})
+    assert r.status_code == 404
+
+
+def test_get_candidate_requires_tenant(client):
+    cid = _seed_candidate(client)
+    assert client.get(f"/v1/candidates/{cid}").status_code == 401
+
+
+def test_candidate_evidence_endpoint(client):
+    """证据端点：Agent 所见窗口指标 + 参照 + 厂商知识，全部来自落库遥测。"""
+    cid = _seed_candidate(client)
+    r = client.get(f"/v1/candidates/{cid}/evidence", headers=_Q)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["candidate_id"] == cid
+    assert body["component_ref"] == "joint_motor.front_left_hip"
+    # 标准名映射生效（temperature → temperature_c），与 Agent 证据同源
+    assert "temperature_c" in body["metrics"]
+    assert body["metrics"]["temperature_c"] == 96.0
+    assert body["vendor_knowledge"], "关节电机应有厂商知识条目"
+
+
+def test_candidate_evidence_cross_tenant_404(client):
+    cid = _seed_candidate(client)
+    r = client.get(f"/v1/candidates/{cid}/evidence",
+                   headers={"X-Tenant-Id": "tenant-other"})
+    assert r.status_code == 404
+
+
+# ---------------------------------------------------------------- 调查端点
+
+def _investigation_env(monkeypatch):
+    """调查相关测试统一用离线确定性 provider（不调真实 LLM、结果可复现）。"""
+    monkeypatch.setenv("DD_INVESTIGATE_OFFLINE", "1")
+
+
+def test_create_investigation_offline(client, monkeypatch):
+    """离线确定性调查：产出报告 + ReAct 轨迹 + 用量，并持久化。"""
+    _investigation_env(monkeypatch)
+    cid = _seed_candidate(client, temperature=96)
+
+    r = client.post("/v1/investigations", headers=_Q,
+                    json={"candidate_id": cid})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ok"] is True
+    assert body["candidate_id"] == cid
+    inv_id = body["investigation_id"]
+    assert inv_id, "必须有 investigation_id"
+
+    # 报告实体（对齐 §12.4）
+    report = body["report"]
+    assert report["disposition"] in (
+        "confirmed", "rejected", "inconclusive", "needs_human_review")
+    assert report["summary"], "报告必须有结论摘要"
+    # 左髋过温 + 有近期固件变更 → 确定性 provider 给 needs_human_review
+    assert report["disposition"] == "needs_human_review"
+
+    # ReAct 轨迹：至少一条工具调用，工具名在闭集内
+    assert body["trace"], "应有 ReAct 轨迹"
+    names = {s["name"] for s in body["trace"]}
+    assert names <= {"query_candidate_evidence", "query_vendor_knowledge",
+                     "query_neighbor_events", "query_recent_changes"}
+
+    # 人话结论
+    assert body["verdict"] and body["verdict_detail"]
+
+    # 持久化：可直接读回，不重跑 LLM
+    r2 = client.get(f"/v1/investigations/{inv_id}", headers=_Q)
+    assert r2.status_code == 200
+    assert r2.json()["report"]["investigation_id"] == inv_id
+
+    # 出现在历史报告列表里
+    reports = client.get("/v1/reports", headers=_Q).json()
+    assert reports["count"] == 1
+    assert reports["items"][0]["investigation_id"] == inv_id
+
+
+def test_create_investigation_unknown_candidate_404(client, monkeypatch):
+    _investigation_env(monkeypatch)
+    r = client.post("/v1/investigations", headers=_Q,
+                    json={"candidate_id": "cand_does_not_exist"})
+    assert r.status_code == 404
+
+
+def test_create_investigation_cross_tenant_404(client, monkeypatch):
+    """跨租户调查他人候选 → 404（不泄露存在性）。"""
+    _investigation_env(monkeypatch)
+    cid = _seed_candidate(client)
+    r = client.post("/v1/investigations",
+                    headers={"X-Tenant-Id": "tenant-other"},
+                    json={"candidate_id": cid})
+    assert r.status_code == 404
+
+
+def test_create_investigation_requires_candidate_id(client, monkeypatch):
+    _investigation_env(monkeypatch)
+    r = client.post("/v1/investigations", headers=_Q, json={})
+    assert r.status_code == 422
+
+
+def test_create_investigation_requires_tenant(client, monkeypatch):
+    _investigation_env(monkeypatch)
+    r = client.post("/v1/investigations", json={"candidate_id": "x"})
+    assert r.status_code == 401
+
+
+def test_get_investigation_cross_tenant_404(client, monkeypatch):
+    _investigation_env(monkeypatch)
+    cid = _seed_candidate(client)
+    inv_id = client.post("/v1/investigations", headers=_Q,
+                         json={"candidate_id": cid}).json()["investigation_id"]
+    r = client.get(f"/v1/investigations/{inv_id}",
+                   headers={"X-Tenant-Id": "tenant-other"})
+    assert r.status_code == 404
+
+
+def test_reports_require_tenant(client):
+    assert client.get("/v1/reports").status_code == 401
+
+
+def test_reports_pagination(client, monkeypatch):
+    """历史报告列表也分页（防一次拉全表）。
+
+    每次换不同设备：candidate_id 由 device|component|signal 派生，同设备重复接入
+    会命中同一候选、只产出一份报告（幂等，非 bug）。
+    """
+    _investigation_env(monkeypatch)
+    for i in range(3):
+        client.post("/v1/telemetry",
+                    headers={"X-Tenant-Id": "tenant-real",
+                             "X-Device-Sn": f"device-{i}"},
+                    json={"events": [_raw(f"e{i}", temperature=96 + i)]})
+    cids = [c["candidate_id"]
+            for c in client.get("/v1/candidates", headers=_Q).json()["items"]]
+    assert len(cids) == 3
+    for cid in cids:
+        client.post("/v1/investigations", headers=_Q, json={"candidate_id": cid})
+    r = client.get("/v1/reports", headers=_Q, params={"limit": 2})
+    b = r.json()
+    assert b["count"] == 2 and b["has_more"] is True
+    assert b["total"] == 3

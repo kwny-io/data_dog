@@ -25,6 +25,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from .. import settings
+from ..agent.loop import AgentLoop
 from ..core import metrics
 from ..core.logging import (
     clear_request_id,
@@ -37,12 +38,18 @@ from ..data_plane.gateway import TelemetryGateway
 from ..data_plane.p2_demo import _detector_config
 from ..data_plane.pipeline import DataPlane, build_demo_resolver
 from ..errors import ToolErrorCode, http_status_for
+from ..presentation import derive_verdict
 from ..providers.client import LLMCallError
+from ..providers.config import load_config
+from ..providers.offline_demo import DeterministicEvidenceProvider
+from ..schemas.events import CandidateEvent, EvidenceSummary
 from ..storage import migrations
 from ..storage import models as M
 from ..storage import repository as repo
 from ..storage.db import database_url as _database_url
 from ..storage.db import get_engine, session_scope
+from ..tools.investigation import InvestigationTools
+from .evidence import RepoEvidenceBridge
 
 _log = get_logger(__name__)
 
@@ -453,6 +460,179 @@ def create_app() -> FastAPI:
                 "limit": limit, "offset": offset,
                 "has_more": offset + len(rows) < total, "items": rows}
 
+    # -------------------------------------------------- 单资源 + 调查
+
+    @app.get("/v1/candidates/{candidate_id}", tags=["query"])
+    def get_candidate(
+        candidate_id: str,
+        x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
+    ) -> dict[str, Any]:
+        """取单个候选详情。跨租户（或不存在）→ 404，不泄露存在性。"""
+        tenant = _tenant_required(x_tenant_id)
+        with session_scope() as s:
+            item = repo.get_candidate(s, candidate_id, tenant_id=tenant)
+        if item is None:
+            raise HTTPException(status_code=404, detail="候选不存在")
+        return {"ok": True, "item": item}
+
+    @app.get("/v1/candidates/{candidate_id}/evidence", tags=["query"])
+    def get_candidate_evidence(
+        candidate_id: str,
+        x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
+    ) -> dict[str, Any]:
+        """Agent 所见证据：候选窗口的遥测 + 参照 + 候选自带证据 + 厂商知识。
+
+        证据由 `RepoEvidenceBridge` 从**同一批落库遥测**重建（与调查时同源），
+        因此前端"先看证据、再点调查"不会看到两套对不上的数字。
+        """
+        tenant = _tenant_required(x_tenant_id)
+        with session_scope() as s:
+            cand = repo.get_candidate(s, candidate_id, tenant_id=tenant)
+            if cand is None:
+                raise HTTPException(status_code=404, detail="候选不存在")
+            rows = repo.list_telemetry(s, tenant_id=tenant,
+                                       device_sn=cand["device_sn"])
+
+        bridge = RepoEvidenceBridge(rows, device_sn=cand["device_sn"])
+        tel = bridge.query_telemetry(
+            cand["device_sn"], cand["component_ref"],
+            cand["window_start"], cand["window_end"])
+        tel = tel if isinstance(tel, dict) and tel.get("ok") is not False else {}
+        ctype = (cand["component_ref"].split(".", 1) or [""])[0]
+        vendor = bridge.query_vendor_knowledge(ctype)
+
+        return {
+            "ok": True,
+            "candidate_id": candidate_id,
+            "device_sn": cand["device_sn"],
+            "component_ref": cand["component_ref"],
+            "window": {"start": cand["window_start"], "end": cand["window_end"]},
+            "metrics": tel.get("metrics", {}),
+            "reference_window_metrics": tel.get("reference_window_metrics"),
+            "evidence": cand.get("evidence", []),
+            "vendor_knowledge": vendor,
+        }
+
+    @app.get("/v1/reports", tags=["query"])
+    def list_reports(
+        x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
+        limit: int = Query(default=_DEFAULT_PAGE_SIZE, ge=1, le=_MAX_PAGE_SIZE),
+        offset: int = Query(default=0, ge=0),
+    ) -> dict[str, Any]:
+        """分页列出本租户的历史调查报告（调查结果可复用，不必重跑 LLM）。"""
+        tenant = _tenant_required(x_tenant_id)
+        with session_scope() as s:
+            rows = repo.list_reports(s, tenant_id=tenant, limit=limit, offset=offset)
+            total = repo.count_rows(s, M.ReportRow, tenant_id=tenant)
+        return {"ok": True, "count": len(rows), "total": total,
+                "limit": limit, "offset": offset,
+                "has_more": offset + len(rows) < total, "items": rows}
+
+    @app.get("/v1/investigations/{investigation_id}", tags=["query"])
+    def get_investigation(
+        investigation_id: str,
+        x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
+    ) -> dict[str, Any]:
+        """读已持久化的调查报告（跨租户 → 404）。前端据此免重跑 LLM。"""
+        tenant = _tenant_required(x_tenant_id)
+        with session_scope() as s:
+            report = repo.get_report(s, investigation_id, tenant_id=tenant)
+        if report is None:
+            raise HTTPException(status_code=404, detail="调查报告不存在")
+        return {"ok": True, "investigation_id": investigation_id,
+                "report": report}
+
+    @app.post("/v1/investigations", tags=["investigate"])
+    def create_investigation(
+        payload: dict[str, Any],
+        x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
+    ) -> dict[str, Any]:
+        """对一个候选跑一次 Agent 调查，产出并持久化报告。
+
+        **同步**实现（FastAPI 线程池）：真实 LLM 时可能耗时 10–60s，
+        `DD_INVESTIGATE_TIMEOUT_S` 为**整次调查**的总预算（默认 90s），到点
+        失败关闭。诚实边界：同步 + 长超时会占用 worker、进程内有状态，
+        **不能水平扩展**——前端须按"长任务"处理（禁用/进度/可取消）。
+        本端点**绝不被 /v1/telemetry 调用**：热路径保持无 LLM。
+        """
+        tenant = _tenant_required(x_tenant_id)
+        candidate_id = (payload or {}).get("candidate_id")
+        if not candidate_id:
+            raise HTTPException(status_code=422, detail="正文需含 'candidate_id'")
+
+        with session_scope() as s:
+            row = repo.get_candidate(s, candidate_id, tenant_id=tenant)
+            if row is None:
+                metrics.investigations_total.labels(result="not_found").inc()
+                raise HTTPException(status_code=404, detail="候选不存在")
+            tel_rows = repo.list_telemetry(s, tenant_id=tenant,
+                                           device_sn=row["device_sn"])
+
+        cand = _row_to_candidate(row)
+        trace: list[dict[str, Any]] = []
+
+        try:
+            provider = _build_investigation_provider()
+        except HTTPException:
+            metrics.investigations_total.labels(result="failed").inc()
+            raise
+
+        try:
+            bridge = RepoEvidenceBridge(tel_rows, device_sn=cand.device_sn)
+            tools = InvestigationTools(bridge)
+            agent = AgentLoop(provider, tools, model=settings.llm_model() or None,
+                              max_steps=settings.investigate_max_steps(),
+                              trace_cb=trace.append)
+            report = agent.investigate(cand)
+        except LLMCallError as e:
+            # 超时/不可用 → 统一错误码（504/503），失败关闭，不假装查过证据
+            metrics.investigations_total.labels(result="timeout").inc()
+            raise HTTPException(status_code=http_status_for(e.code),
+                                detail=e.detail) from e
+        except Exception as e:                          # noqa: BLE001
+            metrics.investigations_total.labels(result="failed").inc()
+            raise HTTPException(status_code=500,
+                                detail=f"调查执行失败：{type(e).__name__}") from e
+
+        metrics.investigations_total.labels(result="ok").inc()
+
+        # 持久化报告（幂等 upsert）
+        try:
+            with session_scope() as s:
+                repo.save_report(s, report, tenant_id=tenant)
+        except Exception as e:                          # noqa: BLE001
+            # 落库失败不吞掉已算出的结论，但如实标明
+            _log.warning("报告落库失败", extra={"error": f"{type(e).__name__}: {e}"})
+
+        report_dict = report.to_dict()
+        usage = report_dict.get("model_provenance", {}).get("usage", {})
+        # 人话结论：与演示台/候选详情同源（presentation.derive_verdict）
+        tel_map = {cand.component_ref: {
+            "metrics": {},
+            "device_sn": cand.device_sn,
+        }}
+        # 从 trace 里取该候选窗口的实测指标，给 verdict 用（与证据端点一致）
+        for step in trace:
+            res = step.get("result") or {}
+            if step.get("name") == "query_candidate_evidence" and res.get("metrics"):
+                tel_map[cand.component_ref]["metrics"] = res["metrics"]
+                break
+        verdict, verdict_detail = derive_verdict(
+            [report_dict | {"severity_hint": cand.severity_hint,
+                            "component_ref": cand.component_ref,
+                            "rule_matches": cand.rule_matches}],
+            {}, tel_map)
+        return {
+            "ok": True,
+            "investigation_id": report.investigation_id,
+            "candidate_id": candidate_id,
+            "report": report_dict,
+            "verdict": verdict,
+            "verdict_detail": verdict_detail,
+            "trace": trace,
+            "usage": usage,
+        }
+
     return app
 
 
@@ -471,6 +651,90 @@ def _stats_dict(result: Any) -> dict[str, Any]:
         "normalized": len(result.normalized),
         "candidates": len(result.candidates),
     }
+
+
+# ---------------------------------------------------------------- 调查端点辅助
+
+
+def _row_to_candidate(row: dict[str, Any]) -> CandidateEvent:
+    """把落库的候选行重建为 `CandidateEvent`（Agent 调查的输入）。"""
+    evidence = []
+    for e in row.get("evidence", []) or []:
+        if isinstance(e, dict):
+            evidence.append(EvidenceSummary(
+                key=e.get("key", ""),
+                from_value=e.get("from_value"),
+                to_value=e.get("to_value"),
+                baseline=e.get("baseline"),
+                unit=e.get("unit"),
+                note=e.get("note"),
+            ))
+        else:
+            evidence.append(e)
+    return CandidateEvent(
+        candidate_id=row["candidate_id"],
+        device_sn=row["device_sn"],
+        component_ref=row["component_ref"],
+        signal=row["signal"],
+        severity_hint=row["severity_hint"],
+        window_start=row["window_start"],
+        window_end=row["window_end"],
+        sample_count=int(row.get("sample_count", 0)),
+        rule_matches=list(row.get("rule_matches", [])),
+        anomaly_score=float(row.get("anomaly_score", 0.0)),
+        evidence=evidence,
+        evidence_refs=list(row.get("evidence_refs", [])),
+        detector_provenance=row.get("detector_provenance", ""),
+    )
+
+
+class _DeadlineProvider:
+    """给 provider 加一个**整次调查的总墙钟预算**。
+
+    单次 LLM 调用超时（`Provider.timeout`）只保证"一次调用不会永久挂起"；但一次
+    调查最多 `max_steps` 次调用，若每次都快到超时、叠加起来仍可能远超契约承诺的
+    90s。本包装器把"整次调查"纳入同一个预算，到点后任何后续调用立即以
+    `LLMCallError(TIMEOUT)` 失败关闭——端点因此有确定上界，不会长期占用 worker。
+    `AgentLoop` 捕获该异常后会产出 fail-closed 报告（不假装查过证据）。
+    """
+
+    def __init__(self, inner: Any, budget_s: float):
+        self._inner = inner
+        self._deadline = time.monotonic() + max(0.0, budget_s)
+        self._budget_s = budget_s
+
+    def chat(self, messages, **kw):
+        if time.monotonic() >= self._deadline:
+            raise LLMCallError(ToolErrorCode.TIMEOUT,
+                               f"调查总预算 {self._budget_s:.0f}s 已耗尽")
+        return self._inner.chat(messages, **kw)
+
+
+def _build_investigation_provider() -> Any:
+    """按配置构造调查用的 provider（每次调用新建，保证状态隔离）。
+
+    - `DD_INVESTIGATE_OFFLINE=1` → 离线确定性 provider（CI/测试不调真实模型，
+      结论仍由证据推导，非写死剧本）。
+    - 否则用已配置的供应商 + key；未配置 → 503（不静默降级成假结论）。
+    """
+    if settings.investigate_offline():
+        return _DeadlineProvider(DeterministicEvidenceProvider(),
+                                 settings.investigate_timeout_s())
+
+    cfg = load_config()
+    key = (cfg.get("api_key") or "").strip()
+    if not key:
+        raise HTTPException(
+            status_code=503,
+            detail="未配置 LLM 凭据（先 data-dog init 设 key，"
+                   "或设 DD_INVESTIGATE_OFFLINE=1 用离线确定性 provider）")
+    from ..providers.client import Provider
+
+    provider = Provider.from_config(
+        cfg.get("vendor_id") or settings.llm_vendor(), key,
+        timeout=settings.investigate_timeout_s(),
+    )
+    return _DeadlineProvider(provider, settings.investigate_timeout_s())
 
 
 app = create_app()

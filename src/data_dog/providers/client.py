@@ -102,8 +102,9 @@ class Provider:
         self._client = OpenAI(api_key=api_key, base_url=vendor.base_url)
 
     @classmethod
-    def from_config(cls, vendor_id: str, api_key: str) -> Provider:
-        return cls(get_vendor(vendor_id), api_key)
+    def from_config(cls, vendor_id: str, api_key: str,
+                    timeout: float | None = None) -> Provider:
+        return cls(get_vendor(vendor_id), api_key, timeout=timeout)
 
     def chat(
         self,
