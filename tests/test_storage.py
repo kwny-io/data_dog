@@ -175,3 +175,39 @@ def test_database_url_env_switch(monkeypatch, tmp_path):
     assert dbmod.database_url().startswith("sqlite:///")
     monkeypatch.setenv("DD_DATABASE_URL", "postgresql+psycopg://u:p@h:5432/d")
     assert dbmod.database_url().startswith("postgresql+psycopg://")
+
+
+# ---------------------------------------------------------------- 并发安全
+
+def test_concurrent_upsert_same_id_is_idempotent(db_url):
+    """并发写同一主键不得抛 IntegrityError。
+
+    回归测试：`save_candidates` 曾是 get-then-add（read-modify-write），
+    并发的两个线程会同时 get 到 None、各自 INSERT 同一主键，后者 flush 时
+    抛 IntegrityError（实测 8 并发下 2 个抛错）。在 HTTP 服务里这会被兜底成
+    `persist_failed`(207)，把一次**有效写入**误报为失败。
+    """
+    import threading
+
+    errs, ok = [], []
+
+    def worker(i):
+        try:
+            with session_scope(db_url) as s:
+                # 8 个线程写**同一个** candidate_id，制造主键竞争
+                repo.save_candidates(s, [_cand("cand-race-same")])
+            ok.append(i)
+        except Exception as e:                      # noqa: BLE001
+            errs.append(f"{type(e).__name__}: {e}")
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert errs == [], f"并发 upsert 不应抛异常，实际: {errs}"
+    assert len(ok) == 8
+    with session_scope(db_url) as s:
+        rows = repo.list_candidates(s)
+    assert len(rows) == 1, "同一主键并发写入应只留一条记录"

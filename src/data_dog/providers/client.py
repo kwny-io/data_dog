@@ -6,10 +6,55 @@
 """
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
+from ..errors import ToolErrorCode
 from .registry import VendorSpec, get_vendor
+
+
+class LLMCallError(RuntimeError):
+    """LLM 调用失败（已归一化为统一错误码）。
+
+    调用方可用 `e.code` 稳定分类（timeout / unavailable），无需认识各 SDK
+    的异常类型。
+    """
+
+    def __init__(self, code: ToolErrorCode, detail: str = ""):
+        super().__init__(detail or code.value)
+        self.code = code
+        self.detail = detail
+
+
+def _is_timeout(e: BaseException) -> bool:
+    """判断异常是否为超时（跨 SDK/底层库，按类型名与内建超时识别）。"""
+    if isinstance(e, (TimeoutError,)):
+        return True
+    for cls in type(e).__mro__:
+        if cls.__name__ in ("APITimeoutError", "ConnectTimeout", "ReadTimeout",
+                            "Timeout", "TimeoutException"):
+            return True
+    # 有些库把超时包在 cause 里
+    cause = getattr(e, "__cause__", None)
+    if cause is not None and cause is not e:
+        return _is_timeout(cause)
+    return False
+
+# 默认超时（秒）。上游挂起时必须能超时退出，否则会永久占用 worker。
+# 可用 DD_LLM_TIMEOUT_S 覆盖；设为 0 或负值表示不限时（不推荐）。
+_DEFAULT_TIMEOUT_S = 60.0
+
+
+def _default_timeout() -> Optional[float]:
+    raw = os.environ.get("DD_LLM_TIMEOUT_S", "").strip()
+    if not raw:
+        return _DEFAULT_TIMEOUT_S
+    try:
+        v = float(raw)
+    except ValueError:
+        return _DEFAULT_TIMEOUT_S
+    return v if v > 0 else None
 
 
 @dataclass
@@ -32,9 +77,13 @@ class LLMToolParam:
 class Provider:
     """一个具体的 LLM 供应商客户端。"""
 
-    def __init__(self, vendor: VendorSpec, api_key: str):
+    def __init__(self, vendor: VendorSpec, api_key: str,
+                 timeout: Optional[float] = None):
         self.vendor = vendor
         self._api_key = api_key
+        # 单次请求超时：上游挂起时必须能退出，否则永久占用 worker。
+        # 显式传参优先；否则读 DD_LLM_TIMEOUT_S；默认 60s。
+        self.timeout = _default_timeout() if timeout is None else timeout
         # 统一用 OpenAI SDK，仅替换 base_url
         from openai import OpenAI
         self._client = OpenAI(api_key=api_key, base_url=vendor.base_url)
@@ -70,8 +119,19 @@ class Provider:
             kwargs["tool_choice"] = "auto"
 
         import time
+        if self.timeout is not None:
+            kwargs["timeout"] = self.timeout
         t0 = time.perf_counter()
-        resp = self._client.chat.completions.create(**kwargs)
+        try:
+            resp = self._client.chat.completions.create(**kwargs)
+        except Exception as e:                          # noqa: BLE001
+            # 归一化为统一失败语义：超时 → timeout；其余 → unavailable。
+            # 调用方（AgentLoop）据此稳定分类，不必认识各 SDK 的异常类型。
+            if _is_timeout(e):
+                raise LLMCallError(ToolErrorCode.TIMEOUT,
+                                   f"LLM 调用超时（{self.timeout}s）") from e
+            raise LLMCallError(ToolErrorCode.UNAVAILABLE,
+                               f"{type(e).__name__}: {e}") from e
         duration_ms = (time.perf_counter() - t0) * 1000.0
         choice = resp.choices[0]
         msg = choice.message

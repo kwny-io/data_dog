@@ -16,6 +16,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
+from ..errors import ToolErrorCode, err
 from .candidate import CandidateBuilder
 from .chain import (
     Detector, Enricher, Normalizer, Parser, StatusCodeNormalizer, WindowBuffer,
@@ -68,7 +69,9 @@ class DataPlane:
         ok, env_or_err = self.gateway.ingest(raw, auth)
         if not ok:
             self.stats.rejected += 1
-            self.stats.bump("gateway")
+            # 保留网关给出的细分失败原因（如 rate_limited / bad_encoding / too_large），
+            # 否则限流等被拒绝的情形会被笼统记成 "gateway"，无法在指标上区分。
+            self.stats.bump(_gateway_reason(env_or_err))
             return None, env_or_err
         env: RawLogEnvelope = env_or_err
 
@@ -90,7 +93,17 @@ class DataPlane:
             self.stats.bump("no_parser")
             return None, {"ok": False, "error": "contract_mismatch",
                           "detail": f"绑定 {binding.revision} 未挂载 parser"}
-        metrics = parser.parse(_payload(env))
+
+        # 取载荷：外置引用必须先过 SSRF 安全校验；被拒 → **失败关闭**。
+        # 不能静默当作"空载荷"继续（那会让一条被安全策略拒绝的日志，
+        # 表现为"没检出异常"，与 §16.4 失败关闭语义相悖）。
+        payload, payload_err = _payload(env)
+        if payload_err is not None:
+            self.stats.rejected += 1
+            self.stats.bump(payload_err.get("reason", "payload_ref"))
+            return None, payload_err
+
+        metrics = parser.parse(payload)
         missing = metrics.pop("__missing__", [])
 
         # Normalizer + 状态码规范化
@@ -99,8 +112,8 @@ class DataPlane:
         if "_merror" in metrics:
             status_codes = self.status_normalizer.codes_for(metrics.pop("_merror"))
 
-        # Enricher：工况 + 基线
-        condition = self.enricher.condition_from(_payload(env))
+        # Enricher：工况 + 基线（载荷已在上方解析并校验过，这里复用同一份）
+        condition = self.enricher.condition_from(payload)
         component = _component_of(env)
         baseline = {}
         for fld in metrics:
@@ -150,26 +163,46 @@ class DataPlane:
         )
 
 
-def _payload(env: RawLogEnvelope) -> Dict[str, Any]:
-    """小载荷内联解析（真实场景走 payload_ref 受控引用 + fetch.validate_url）。"""
+def _payload(env: RawLogEnvelope) -> Tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
+    """解析事件载荷。返回 (payload, error)。
+
+    error 非 None 表示**失败关闭**：调用方必须据此拒绝该条事件，不得继续。
+
+    - 外置引用（payload_ref）：必须先过 SSRF 安全校验；被拒 → 返回错误，不静默降级。
+    - 内联载荷（payload_inline）：JSON 解析失败 → 返回错误（畸形输入不该被当作
+      "正常但无数据"，否则一条坏日志会伪装成"没检出异常"）。
+    """
     if env.payload_ref:
         from .fetch import validate_url     # 外置引用必须先过安全校验
         d = validate_url(env.payload_ref)
         if not d.allowed:
-            return {}
+            return {}, err(ToolErrorCode.DENIED,
+                           f"payload_ref 被安全策略拒绝: {d.reason}",
+                           reason="payload_ref_denied")
     if env.payload_inline:
         import json
         try:
-            return json.loads(env.payload_inline)
-        except (json.JSONDecodeError, TypeError):
-            return {}
-    return {}
+            return json.loads(env.payload_inline), None
+        except (json.JSONDecodeError, TypeError) as e:
+            return {}, err(ToolErrorCode.INVALID_INPUT,
+                           f"payload_inline 不是合法 JSON: {e}",
+                           reason="payload_malformed")
+    return {}, None
 
 
 def _component_of(env: RawLogEnvelope) -> str:
     if env.component_hint:
         return env.component_hint
     return "unknown.unknown"
+
+
+def _gateway_reason(err_obj: Any) -> str:
+    """从网关错误体里取细分原因；取不到就退回笼统的 "gateway"。"""
+    if isinstance(err_obj, dict):
+        r = err_obj.get("reason")
+        if r:
+            return str(r)
+    return "gateway"
 
 
 def build_demo_resolver(detector_config) -> CompatibilityResolver:

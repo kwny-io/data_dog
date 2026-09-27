@@ -90,10 +90,28 @@ class TelemetryGateway:
         b.tokens -= 1
         return True
 
+    def snapshot(self) -> Dict[str, Any]:
+        """限流状态快照（供 /metrics 与排查使用）。"""
+        return {
+            "rate_per_sec": self.rate_per_sec,
+            "burst": self.burst,
+            "tracked_keys": len(self._buckets),
+            "accepted": self.stats.accepted,
+            "rejected": self.stats.rejected,
+            "rate_limited": self.stats.rate_limited,
+        }
+
     # -- 分区键 --
     @staticmethod
     def partition_key(device_sn: str, component: str) -> str:
         return f"{device_sn}|{component}"
+
+    # -- 统一拒绝：计数 + 带上细分原因（供上层指标分类）--
+    def _reject(self, reason: str, code: ToolErrorCode, detail: str
+                ) -> Tuple[bool, Dict[str, Any]]:
+        self.stats.rejected += 1
+        self.stats._bump(reason)
+        return False, err(code, detail, reason=reason)
 
     def ingest(self, raw: Dict[str, Any], auth: Optional[Dict[str, Any]]
                ) -> Tuple[bool, Any]:
@@ -103,45 +121,36 @@ class TelemetryGateway:
         """
         caller = self.authenticate(auth)
         if caller is None:
-            self.stats.rejected += 1
-            self.stats._bump("auth")
-            return False, err(ToolErrorCode.DENIED, "认证失败或缺少可信身份")
+            return self._reject("auth", ToolErrorCode.DENIED, "认证失败或缺少可信身份")
 
         if not isinstance(raw, dict):
-            self.stats.rejected += 1
-            self.stats._bump("not_a_dict")
-            return False, err(ToolErrorCode.INVALID_INPUT, "载荷不是对象")
+            return self._reject("not_a_dict", ToolErrorCode.INVALID_INPUT, "载荷不是对象")
 
         # 必需字段
         missing = [f for f in _REQUIRED_FIELDS if raw.get(f) in (None, "")]
         if missing:
-            self.stats.rejected += 1
-            self.stats._bump("missing_fields")
-            return False, err(ToolErrorCode.INVALID_INPUT, f"缺必需字段: {missing}")
+            return self._reject("missing_fields", ToolErrorCode.INVALID_INPUT,
+                                f"缺必需字段: {missing}")
 
         # 编码白名单
         enc = str(raw.get("encoding", "utf-8")).lower()
         if enc not in _ALLOWED_ENCODINGS:
-            self.stats.rejected += 1
-            self.stats._bump("bad_encoding")
-            return False, err(ToolErrorCode.INVALID_INPUT, f"不支持的编码: {enc}")
+            return self._reject("bad_encoding", ToolErrorCode.INVALID_INPUT,
+                                f"不支持的编码: {enc}")
 
         # 大小限制
         inline = raw.get("payload_inline")
         if inline is not None:
             size = len(inline.encode("utf-8", errors="replace"))
             if size > _MAX_PAYLOAD_BYTES:
-                self.stats.rejected += 1
-                self.stats._bump("too_large")
-                return False, err(ToolErrorCode.INVALID_INPUT,
-                                  f"载荷过大: {size}B > {_MAX_PAYLOAD_BYTES}B")
+                return self._reject("too_large", ToolErrorCode.INVALID_INPUT,
+                                    f"载荷过大: {size}B > {_MAX_PAYLOAD_BYTES}B")
 
         # 限流
         if not self._allow(caller.device_sn):
             self.stats.rate_limited += 1
-            self.stats.rejected += 1
-            self.stats._bump("rate_limited")
-            return False, err(ToolErrorCode.RATE_LIMITED, f"设备 {caller.device_sn} 超限")
+            return self._reject("rate_limited", ToolErrorCode.RATE_LIMITED,
+                                f"设备 {caller.device_sn} 超限")
 
         # 身份以认证上下文为准（正文里的身份被丢弃）
         env = RawLogEnvelope(

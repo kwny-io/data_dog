@@ -268,3 +268,33 @@ def test_fetch_rejects_dns_rebind_to_private():
     # 注入 resolver 模拟"域名解析到内网"（DNS rebinding）
     d = validate_url("https://evil.example/x", resolver=lambda h: ["10.0.0.9"])
     assert not d.allowed and "非公网" in d.reason
+
+
+# ---------------------------------------------------------------- 载荷失败关闭
+
+def test_payload_ref_denied_is_fail_closed(detector_config):
+    """外置引用被安全策略拒绝 → 该条必须**失败关闭**，不得静默当作空载荷。
+
+    回归测试：`_payload` 曾在 SSRF 校验失败时静默 `return {}`，于是一条被安全
+    策略拒绝的日志会表现为"正常但没检出异常"，与该模块「失败关闭」的宣称相悖。
+    """
+    dp = DataPlane(build_demo_resolver(detector_config))
+    raw = _raw("e-badref",
+               payload_ref="http://169.254.169.254/latest/meta-data",
+               payload_inline="")
+    norm, e = dp.process_one(raw, AUTH)
+    assert norm is None, "被拒的载荷不得产出规范化事件"
+    assert e is not None and e.get("error") == "denied"
+    assert e.get("reason") == "payload_ref_denied"
+    assert dp.stats.rejected == 1
+    assert dp.stats.rejected_by_reason.get("payload_ref_denied") == 1
+
+
+def test_payload_inline_malformed_is_fail_closed(detector_config):
+    """内联载荷非法 JSON → 失败关闭（坏日志不该伪装成"无异常"）。"""
+    dp = DataPlane(build_demo_resolver(detector_config))
+    raw = _raw("e-badjson", payload_inline="{not json")
+    norm, e = dp.process_one(raw, AUTH)
+    assert norm is None
+    assert e is not None and e.get("reason") == "payload_malformed"
+    assert dp.stats.rejected_by_reason.get("payload_malformed") == 1

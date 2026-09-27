@@ -23,12 +23,39 @@ class ToolErrorCode(str, Enum):
     EXECUTION_FAILED = "execution_failed"    # 执行失败（兜底）
 
 
-def err(code: ToolErrorCode, detail: Any = None) -> Dict[str, Any]:
-    """构造统一错误结果。"""
+def err(code: ToolErrorCode, detail: Any = None, *, reason: str = "") -> Dict[str, Any]:
+    """构造统一错误结果。
+
+    reason：可选的**细分原因**（比 error 码更具体，供指标/排查分类，如
+    `rate_limited` / `bad_encoding` / `too_large`）。错误码本身保持有限闭集，
+    细分原因挂在独立字段上，不污染错误码契约。
+    """
     d: Dict[str, Any] = {"ok": False, "error": code.value}
     if detail is not None:
         d["detail"] = detail
+    if reason:
+        d["reason"] = reason
     return d
+
+
+# 错误码 → HTTP 状态码（服务边界用；工具层错误借此稳定映射到 HTTP 语义）
+_HTTP_STATUS = {
+    ToolErrorCode.INVALID_INPUT: 422,
+    ToolErrorCode.CONTRACT_MISMATCH: 422,
+    ToolErrorCode.DENIED: 403,
+    ToolErrorCode.NOT_FOUND: 404,
+    ToolErrorCode.AMBIGUOUS: 409,
+    ToolErrorCode.VERSION_CONFLICT: 409,
+    ToolErrorCode.TIMEOUT: 504,
+    ToolErrorCode.UNAVAILABLE: 503,
+    ToolErrorCode.RATE_LIMITED: 429,
+    ToolErrorCode.EXECUTION_FAILED: 500,
+}
+
+
+def http_status_for(code: ToolErrorCode) -> int:
+    """把统一错误码映射为 HTTP 状态码（未知码兜底 500，不泄内部细节）。"""
+    return _HTTP_STATUS.get(code, 500)
 
 
 def ok(data: Dict[str, Any]) -> Dict[str, Any]:

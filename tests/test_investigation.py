@@ -191,3 +191,55 @@ def test_context_injection_a4():
                  {"component": "joint_motor.front_left_hip"})  # 缺 window args
     assert bad["error"] == "invalid_input"
     print("PASS test_context_injection_a4")
+
+
+# ---------------------------------------------------------------- 模型失败关闭
+
+class _TimeoutProvider:
+    """模拟 LLM 调用超时（Provider 层已归一化为 LLMCallError）。"""
+
+    def chat(self, messages, tools=None, model=None, temperature=0.2,
+             max_tokens=2048):
+        from data_dog.errors import ToolErrorCode
+        from data_dog.providers.client import LLMCallError
+        raise LLMCallError(ToolErrorCode.TIMEOUT, "LLM 调用超时（60.0s）")
+
+
+def test_llm_timeout_fails_closed():
+    """模型超时 → 必须失败关闭为 needs_human_review，不得抛栈或瞎判。
+
+    回归测试：AgentLoop 原先对 provider.chat 无异常处理，LLM 超时/不可用会
+    直接抛出；上游挂起还会永久占用 worker（Provider 原先也没设 timeout）。
+    """
+    from data_dog.evidence.store import EvidenceStore
+    tools = InvestigationTools(EvidenceStore())
+    agent = AgentLoop(_TimeoutProvider(), tools)
+    cand = CandidateEvent(
+        candidate_id="c-timeout", device_sn="device-go2-0001",
+        component_ref="joint_motor.front_left_hip", signal="temperature_high",
+        severity_hint="critical", window_start="2026-09-13T10:00:00Z",
+        window_end="2026-09-13T10:00:04Z", sample_count=3,
+        rule_matches=["MOTOR_TEMP_PROTECT"], anomaly_score=1.0,
+        evidence=[EvidenceSummary(key="temperature", from_value=40, to_value=95)],
+        evidence_refs=["metricwin://x"], detector_provenance="d@1.0")
+
+    report = agent.investigate(cand)
+    assert report.disposition == "needs_human_review", \
+        f"模型失败应失败关闭，实际 {report.disposition}"
+    assert "timeout" in report.summary.lower() or "失败关闭" in report.summary
+
+
+def test_llm_error_normalizes_sdk_exception():
+    """Provider 层把各家 SDK 异常归一化为 LLMCallError（超时/不可用）。"""
+    from data_dog.errors import ToolErrorCode
+    from data_dog.providers.client import LLMCallError, _is_timeout
+
+    class APITimeoutError(Exception):
+        pass
+
+    assert _is_timeout(APITimeoutError("boom"))
+    assert _is_timeout(TimeoutError("t"))
+    assert not _is_timeout(ValueError("nope"))
+
+    e = LLMCallError(ToolErrorCode.TIMEOUT, "超时了")
+    assert e.code == ToolErrorCode.TIMEOUT and "超时" in e.detail

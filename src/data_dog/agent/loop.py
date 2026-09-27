@@ -19,6 +19,7 @@ import json
 from typing import Any, Dict, List
 
 from ..providers.client import (
+    LLMCallError,
     LLMChatMessage,
     LLMToolParam,
     Provider,
@@ -135,15 +136,22 @@ class AgentLoop:
         _chat_accepts_usage = _accepts_kwarg(self.provider, "usage_tracker")
         while steps < self.max_steps:
             steps += 1
-            if _chat_accepts_usage:
-                resp = self.provider.chat(
-                    messages, tools=tool_params, model=self.model,
-                    usage_tracker=tracker,
-                )
-            else:
-                resp = self.provider.chat(
-                    messages, tools=tool_params, model=self.model,
-                )
+            try:
+                if _chat_accepts_usage:
+                    resp = self.provider.chat(
+                        messages, tools=tool_params, model=self.model,
+                        usage_tracker=tracker,
+                    )
+                else:
+                    resp = self.provider.chat(
+                        messages, tools=tool_params, model=self.model,
+                    )
+            except LLMCallError as e:
+                # 模型调用失败（超时/不可用）→ 失败关闭，绝不假装查过证据。
+                # 对齐 §9.4：Agent 不可用时普通候选交人工复核，不瞎判。
+                return self._fail_closed(
+                    candidate,
+                    f"模型调用失败（{e.code.value}），失败关闭: {e.detail}")
 
             if resp["kind"] == "text":
                 # 模型直接给结论（通常发生在它已经拿到足够证据时）
