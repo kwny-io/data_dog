@@ -44,6 +44,16 @@ def _raw(event_id="e1", temperature=95, **kw):
 _AUTH = {"X-Tenant-Id": "tenant-real", "X-Device-Sn": "device-go2-0001"}
 
 
+def _auth_enabled(client, headers=None) -> str:
+    """从 Prometheus 文本指标里读 auth_enabled 的值（"0"/"1"）。"""
+    body = client.get("/metrics", headers=headers or {}).text
+    for line in body.splitlines():
+        # 无标签 gauge 输出形如 `data_dog_auth_enabled 0.0`（不带 `{`）
+        if line.startswith("data_dog_auth_enabled "):
+            return line.rsplit(" ", 1)[-1].split(".")[0]
+    raise AssertionError("指标里没有 data_dog_auth_enabled")
+
+
 # ---------------------------------------------------------------- 探针
 
 def test_healthz_ok(client):
@@ -61,11 +71,19 @@ def test_readyz_reports_db(client):
 
 
 def test_metrics_shape(client):
+    """/metrics 返回 Prometheus 文本格式（可被 Prometheus 直接抓取）。"""
     r = client.get("/metrics")
     assert r.status_code == 200
-    body = r.json()
-    assert body["resolver_ready"] is True
-    assert "candidates_total" in body
+    assert r.headers["content-type"].startswith("text/plain")
+    body = r.text
+    # 必须是 Prometheus 文本格式（HELP/TYPE 行），不是 JSON
+    assert "# HELP" in body and "# TYPE" in body
+    # 业务 / HTTP / 进程信息指标都应存在
+    assert "data_dog_candidates_created_total" in body
+    assert "data_dog_http_requests_total" in body
+    assert "data_dog_db_rows" in body
+    assert "data_dog_auth_enabled" in body
+    assert "data_dog_resolver_ready" in body
 
 
 # ---------------------------------------------------------------- 鉴权
@@ -144,7 +162,7 @@ def test_ingest_is_idempotent_across_repeats(client):
 
 def test_api_key_disabled_by_default(client):
     """不设 DD_API_KEY → 不校验（本地开发/评测行为不变）。"""
-    assert client.get("/metrics").json()["auth_enabled"] is False
+    assert _auth_enabled(client) == "0"
     assert client.get("/v1/candidates").status_code == 200
 
 
@@ -174,12 +192,222 @@ def test_api_key_enforced_when_set(client, monkeypatch):
     assert ingest.json()["stats"]["candidates"] == 1
     # /metrics 属受保护端点（开启鉴权后同样要带密钥）
     assert client.get("/metrics").status_code == 401
-    m = client.get("/metrics", headers={"X-API-Key": key}).json()
-    assert m["auth_enabled"] is True
+    assert _auth_enabled(client, headers={"X-API-Key": key}) == "1"
 
 
 def test_blank_api_key_counts_as_unset(client, monkeypatch):
     """仅空白不算"已配置"——否则会误判为已开启鉴权。"""
     monkeypatch.setenv("DD_API_KEY", "   ")
-    assert client.get("/metrics").json()["auth_enabled"] is False
+    assert _auth_enabled(client) == "0"
     assert client.get("/v1/candidates").status_code == 200
+
+
+# ---------------------------------------------------------------- 限流（跨请求）
+
+def test_rate_limit_applies_across_requests(client, monkeypatch):
+    """限流必须跨请求生效。
+
+    回归测试：曾经每个请求新建 DataPlane，而 DataPlane 又新建 TelemetryGateway，
+    令牌桶随请求生灭 → 桶永远满、跨请求限流形同虚设（§16.3 声称做了实际没做）。
+    这里把共享网关换成小容量桶，验证第 3 个请求被限。
+    """
+    import importlib
+
+    from data_dog.data_plane.gateway import TelemetryGateway
+    # 注意：模块末尾 `app = create_app()` 会把模块属性 app 覆盖成 FastAPI 实例，
+    # 因此不能用 `from data_dog.service import app`，要用 importlib 取模块本体。
+    svc = importlib.import_module("data_dog.service.app")
+
+    # burst=2：本设备前 2 条放行，第 3 条起超限
+    monkeypatch.setattr(svc._state, "gateway",
+                        TelemetryGateway(rate_per_sec=0.0, burst=2))
+
+    # 三次独立请求（每次都是新的 DataPlane，模拟真实请求隔离）
+    codes = []
+    for i in range(3):
+        r = client.post("/v1/telemetry", headers=_AUTH,
+                        json={"events": [_raw(event_id=f"rl{i}")]})
+        codes.append(r.status_code)
+
+    assert codes[0] == 200 and codes[1] == 200, f"前两条应放行，实际 {codes}"
+    # 第 3 条应被限流：整条事件被失败关闭 → 无候选、stats.rejected=1
+    r3 = client.post("/v1/telemetry", headers=_AUTH,
+                     json={"events": [_raw(event_id="rl3")]})
+    assert r3.status_code == 200, "限流是逐条失败关闭，不是整个请求失败"
+    body = r3.json()
+    assert body["stats"]["rejected"] == 1, "第 3 条应被限流拒绝"
+    assert body["stats"]["rejected_by_reason"].get("rate_limited") == 1
+    assert body["stats"]["candidates"] == 0
+
+
+# ---------------------------------------------------------------- 统一错误契约
+
+def test_error_code_http_mapping():
+    """统一错误码 → HTTP 状态码映射必须是有限闭集且语义正确。"""
+    from data_dog.errors import ToolErrorCode, http_status_for
+    assert http_status_for(ToolErrorCode.DENIED) == 403
+    assert http_status_for(ToolErrorCode.NOT_FOUND) == 404
+    assert http_status_for(ToolErrorCode.RATE_LIMITED) == 429
+    assert http_status_for(ToolErrorCode.TIMEOUT) == 504
+    assert http_status_for(ToolErrorCode.UNAVAILABLE) == 503
+    assert http_status_for(ToolErrorCode.INVALID_INPUT) == 422
+
+
+def test_llm_error_returns_unified_contract(client, monkeypatch):
+    """LLM 调用失败 → 统一错误体 + 正确状态码（超时 504 / 不可用 503）。"""
+    import importlib
+
+    from data_dog.errors import ToolErrorCode
+    from data_dog.providers.client import LLMCallError
+    svc = importlib.import_module("data_dog.service.app")
+
+    def boom(*a, **kw):
+        raise LLMCallError(ToolErrorCode.TIMEOUT, "LLM 调用超时（60.0s）")
+
+    # 让接入路径走到模型调用：直接给 app 挂一个路由来触发异常处理器
+    monkeypatch.setattr(svc._state, "new_plane", boom)
+
+    r = client.post("/v1/telemetry", headers=_AUTH, json={"events": [_raw()]})
+    assert r.status_code == 504, f"超时应映射 504，实际 {r.status_code}"
+    body = r.json()
+    assert body["ok"] is False and body["error"] == "timeout"
+
+
+def test_auth_rejection_uses_unified_contract(client, monkeypatch):
+    """鉴权拒绝也用统一错误体（不混两套契约）。"""
+    monkeypatch.setenv("DD_API_KEY", "secret-key-value")
+    r = client.get("/v1/candidates", headers={"X-API-Key": "wrong"})
+    assert r.status_code == 401
+    body = r.json()
+    assert body["ok"] is False
+    assert body["error"] == "denied"
+    assert body["reason"] == "unauthorized"
+
+
+# ---------------------------------------------------------------- 日志与追踪
+
+def test_request_id_returned_and_propagated(client):
+    """每个请求都有 request_id，并回传响应头（便于与上游链路对齐）。"""
+    r = client.get("/v1/candidates")
+    rid = r.headers.get("X-Request-Id")
+    assert rid, "响应必须带 X-Request-Id"
+    assert len(rid) >= 8
+
+
+def test_request_id_honors_client_supplied(client):
+    """客户端透传的 X-Request-Id 应被沿用（跨服务链路对齐）。"""
+    r = client.get("/v1/candidates", headers={"X-Request-Id": "upstream-abc-123"})
+    assert r.headers.get("X-Request-Id") == "upstream-abc-123"
+
+
+def test_json_logging_emits_parseable_lines(capsys):
+    """结构化日志必须是可解析的 JSON 行，且带 request_id。"""
+    import json as _json
+
+    from data_dog.core.logging import (
+        clear_request_id, get_logger, set_request_id, setup_logging,
+    )
+    setup_logging(level="INFO", json_output=True, service="test-svc")
+    log = get_logger("test.logger")
+    set_request_id("rid-log-test")
+    log.info("带上下文的日志", extra={"device_sn": "device-go2-0001"})
+    clear_request_id()
+
+    out = capsys.readouterr().out.strip().splitlines()
+    assert out, "应有日志输出"
+    rec = _json.loads(out[-1])           # 必须能解析成 JSON
+    assert rec["msg"] == "带上下文的日志"
+    assert rec["request_id"] == "rid-log-test"
+    assert rec["device_sn"] == "device-go2-0001"
+    assert rec["service"] == "test-svc"
+    assert rec["level"] == "INFO"
+
+
+def test_logging_human_readable_mode(capsys):
+    """DD_LOG_JSON=0 时用人类可读格式（本地调试友好）。"""
+    from data_dog.core.logging import get_logger, setup_logging
+    setup_logging(level="INFO", json_output=False)
+    get_logger("t").info("人读格式")
+    out = capsys.readouterr().out
+    assert "人读格式" in out and not out.strip().startswith("{")
+
+
+# ---------------------------------------------------------------- 分页
+
+def test_candidates_pagination(client):
+    """查询端点必须分页，且返回 total/has_more（防一次拉全表）。"""
+    # 灌 5 条不同设备的候选
+    for i in range(5):
+        client.post("/v1/telemetry",
+                    headers={"X-Tenant-Id": "t1", "X-Device-Sn": f"dev-{i}"},
+                    json={"events": [_raw(event_id=f"pg{i}")]})
+
+    r = client.get("/v1/candidates", params={"limit": 2, "offset": 0})
+    assert r.status_code == 200
+    b = r.json()
+    assert b["count"] == 2 and b["limit"] == 2 and b["offset"] == 0
+    assert b["total"] == 5 and b["has_more"] is True
+
+    # 最后一页：has_more=False
+    r2 = client.get("/v1/candidates", params={"limit": 10, "offset": 4})
+    b2 = r2.json()
+    assert b2["count"] == 1 and b2["has_more"] is False
+
+    # 分页不重叠：offset=2 拿到的与 offset=0 不同
+    r3 = client.get("/v1/candidates", params={"limit": 2, "offset": 2})
+    ids0 = {c["candidate_id"] for c in b["items"]}
+    ids2 = {c["candidate_id"] for c in r3.json()["items"]}
+    assert not (ids0 & ids2), "分页结果不应重叠"
+
+
+def test_pagination_limit_is_capped(client):
+    """limit 超上限应被拒（不得允许一次拉全表）。"""
+    assert client.get("/v1/candidates", params={"limit": 99999}).status_code == 422
+    assert client.get("/v1/candidates", params={"limit": 0}).status_code == 422
+    assert client.get("/v1/candidates", params={"offset": -1}).status_code == 422
+
+
+# ---------------------------------------------------------------- 指标
+
+def test_ingest_increments_business_metrics(client):
+    """接入必须反映到 Prometheus 指标（业务量可被监控）。"""
+    client.post("/v1/telemetry", headers=_AUTH, json={"events": [_raw()]})
+
+    body = client.get("/metrics").text
+    assert "data_dog_telemetry_events_total" in body
+    assert "data_dog_candidates_created_total" in body
+    # 候选计数应 > 0（过温日志会命中）
+    for line in body.splitlines():
+        if line.startswith("data_dog_candidates_created_total "):
+            assert float(line.rsplit(" ", 1)[-1]) >= 1.0
+            break
+    else:
+        raise AssertionError("缺少 data_dog_candidates_created_total")
+
+
+def test_metrics_path_label_is_route_template(client):
+    """指标 path 标签必须是**路由模板**，不是实际 URL（控制标签基数）。"""
+    client.get("/v1/candidates", params={"limit": 1})
+    body = client.get("/metrics").text
+    # 应出现路由模板
+    assert 'path="/v1/candidates"' in body
+    # 不应出现带查询串的实际 URL
+    assert "limit=1" not in body, "path 标签混入了查询串（基数会爆）"
+
+
+def test_metrics_rejected_reason_labeled(client):
+    """被失败关闭的事件按细分原因计数（限流等可被单独告警）。"""
+    import importlib
+
+    from data_dog.data_plane.gateway import TelemetryGateway
+    svc = importlib.import_module("data_dog.service.app")
+    old = svc._state.gateway
+    try:
+        svc._state.gateway = TelemetryGateway(rate_per_sec=0.0, burst=1)
+        client.post("/v1/telemetry", headers=_AUTH, json={"events": [_raw(event_id="m1")]})
+        client.post("/v1/telemetry", headers=_AUTH, json={"events": [_raw(event_id="m2")]})
+        body = client.get("/metrics").text
+        assert 'reason="rate_limited"' in body
+        assert "data_dog_rate_limited_total" in body
+    finally:
+        svc._state.gateway = old
