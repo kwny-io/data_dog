@@ -47,6 +47,15 @@ describe("vocabulary — graceful degradation", () => {
     expect(out).not.toContain("op.");
   });
 
+  it("does not leak the op. namespace prefix when the id has no version", () => {
+    // Regression: the operators table called ruleName() on a bare id like
+    // "op.temperature_protect" and rendered "op 温度保护" — the namespace
+    // prefix surfaced as a literal token. operatorName() drops it.
+    const out = operatorName("op.temperature_protect");
+    expect(out).toBe("温度保护算子");
+    expect(out).not.toMatch(/^op\b/);
+  });
+
   it("does not leak English glue words into a composed phrase", () => {
     expect(signalName("temperature_rising_under_normalized_load")).not.toMatch(
       /\b(under|of|the|in)\b/,

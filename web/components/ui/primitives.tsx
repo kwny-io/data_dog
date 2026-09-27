@@ -78,24 +78,37 @@ export function MetricTile({
   unit,
   hint,
   tone = "primary",
+  pending,
   className,
 }: {
   label: string;
-  value: React.ReactNode;
+  /** Required unless `pending` is set. */
+  value?: React.ReactNode;
   unit?: string;
   hint?: React.ReactNode;
   tone?: Tone;
+  /** When true, the tile renders the pending shape instead of a value. */
+  pending?: boolean;
   className?: string;
 }) {
   return (
     <Panel className={clsx("px-4 py-3", className)}>
       <div className="text-xs font-medium text-ink-muted">{label}</div>
-      <div className="mt-1.5 flex items-baseline gap-1.5">
-        <span className={clsx("reading text-[26px] font-semibold leading-none", TONE_CLASS[tone].text)}>
-          {value}
-        </span>
-        {unit && <span className="text-xs text-ink-muted">{unit}</span>}
-      </div>
+      {pending ? (
+        <div className="mt-1.5">
+          <span className="reading text-[26px] font-semibold leading-none text-ink-faint">—</span>
+          <span className="ml-2 align-middle text-[10px] uppercase tracking-wide text-ink-faint">
+            待接入
+          </span>
+        </div>
+      ) : (
+        <div className="mt-1.5 flex items-baseline gap-1.5">
+          <span className={clsx("reading text-[26px] font-semibold leading-none", TONE_CLASS[tone].text)}>
+            {value}
+          </span>
+          {unit && <span className="text-xs text-ink-muted">{unit}</span>}
+        </div>
+      )}
       {hint && <div className="mt-1.5 text-xs text-ink-faint">{hint}</div>}
     </Panel>
   );
@@ -135,6 +148,69 @@ export function Badge({
       )}
       {children}
     </span>
+  );
+}
+
+/* ------------------------------------------------------------ PendingSlot *
+ * A *designed* not-yet-wired state. When a panel's data source has no endpoint
+ * yet, the enterprise-grade answer is not an apology in the header ("尚未实现,
+ * 本页不编造数据") — it is to build the real information architecture now and
+ * mark the slot with the shape the data will take, the exact source, and how to
+ * reproduce it. The frame is drawn as a dashed hairline so a gap reads as
+ * "a measured field awaiting its value", not as an error or an oversight.
+ *
+ * Deliberately holds NO numbers: representing pending data as a zero, a dash in
+ * a data cell, or a chart with an invented series are all lies of different
+ * sizes. This primitive makes the absence legible instead. */
+
+export function PendingSlot({
+  title,
+  will,
+  source,
+  command,
+  className,
+}: {
+  /** What this slot is (e.g. "通过率趋势"). */
+  title: string;
+  /** What will appear here once wired. */
+  will: React.ReactNode;
+  /** Where the data comes from (module path / endpoint). */
+  source?: string;
+  /** Reproduce command, shown in mono. */
+  command?: string;
+  className?: string;
+}) {
+  return (
+    <div
+      className={clsx(
+        "flex flex-col gap-1.5 border border-dashed border-rule-strong px-3 py-2.5",
+        className,
+      )}
+      role="group"
+      aria-label={`${title}：数据源未接入`}
+    >
+      <div className="flex items-center gap-2">
+        <span
+          aria-hidden
+          className="inline-block h-1.5 w-1.5 shrink-0 rotate-45 border border-ink-faint"
+        />
+        <span className="text-xs font-medium text-ink-muted">{title}</span>
+        <span className="reading ml-auto text-[10px] uppercase tracking-wide text-ink-faint">
+          数据源未接入
+        </span>
+      </div>
+      <p className="text-xs leading-relaxed text-ink-muted">{will}</p>
+      {source && (
+        <p className="reading break-all text-[11px] text-ink-faint">
+          {source}
+        </p>
+      )}
+      {command && (
+        <code className="reading mt-0.5 block break-all border-l-2 border-rule pl-2.5 text-[11px] text-ink">
+          {command}
+        </code>
+      )}
+    </div>
   );
 }
 
