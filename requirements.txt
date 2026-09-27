@@ -8,6 +8,7 @@ PyYAML>=6.0
 rich>=13.0.0
 numpy>=1.24.0
 SQLAlchemy>=2.0
+alembic>=1.13
 
 # HTTP service (P2 data plane 在线入口): python -m data_dog.service
 fastapi>=0.110.0
