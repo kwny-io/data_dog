@@ -13,17 +13,17 @@
 | | 亮点 | 证据 |
 |---|---|---|
 | 🔗 | **全链闭环，一条命令跑通** | 厂商文档 →[P1]→ 算子 →[P2]→ 候选 →[Agent]→ 报告 →[P3]→ 策略门 → SaaS 反馈，`python -m data_dog.e2e.replay_demo` |
-| 🧪 | **189 个测试全绿，全离线确定性** | `pytest -q` → `189 passed`（20 个测试文件，fake provider，无需 API Key、不联网） |
+| 🧪 | **207 个测试全绿，全离线确定性** | `pytest -q` → `207 passed`（20 个测试文件，fake provider，无需 API Key、不联网） |
 | 🔒 | **热路径确定性：上报不交给模型判断** | 上不上报由**确定性策略门**（四条件决策表 + 冲突消解）决定，同输入永远同结论；模型只出现在"调查报告"那一步 |
 | 🧱 | **不拿 `eval` 执行厂商字符串** | 自建**受限 DSL**：词法 → AST 解释器，无动态执行原语、函数闭集白名单、编译期类型检查 |
 | 🔍 | **诚实抽取，区分"能证实 / 待确认"** | 官方 SDK 头文件明写电机 **90°C 触发保护** → `verified`；无出处的 75°C → `unconfirmed`，**不冒充厂商事实** |
 | 🚪 | **fail-closed 贯穿全链** | 身份只在网关注入（正文自称一律丢弃）、兼容绑定拿不准就拒、错误语义收敛为有限错误码，**绝不降级为无鉴权** |
 | 🔁 | **幂等上报** | `(幂等键, revision)` 复合主键，网络重试 / 进程重启都不会产生重复告警 |
-| 🛡 | **安全设计落地** | SSRF 防护（校验**解析后 IP**、防 DNS rebinding）、`hmac.compare_digest` 常量时间比较、容器非 root、密钥不进镜像 |
+| 🛡 | **安全设计落地** | SSRF 前置校验（仅 http/https、拒绝 localhost/环回/私有/保留，校验**全部解析 IP**；IP 未 pin 到连接，接线时需在连接层再校验）、`hmac.compare_digest` 常量时间比较、容器非 root、密钥不进镜像 |
 | 📊 | **带 ground truth 的量化评估** | 合成 + MuJoCo 双数据源各 **6/6**；7 个评估 case 含 **2 个对抗性**（提示注入 / 身份伪装） |
 | 🚚 | **能交付：服务 + 容器 + HTTPS** | FastAPI（liveness / readiness 分离）+ Dockerfile + compose（含 Caddy 自动申请 HTTPS）+ Makefile |
 
-**规模**：源码 91 个 Python 文件 / 9652 行，测试 2655 行；5 份正式事件 JSON Schema；15 个 `make` 命令。
+**规模**：源码 75 个 Python 文件 / 10366 行，测试 3001 行；5 份正式事件 JSON Schema；15 个 `make` 命令。
 
 ---
 
