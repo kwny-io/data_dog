@@ -27,7 +27,7 @@ export function SeverityBadge({ severity }: { severity: SeverityHint | AlertSeve
 export function AlertStateBadge({ state }: { state: AlertState }) {
   const s = ALERT_STATE_STYLE[state];
   return (
-    <Badge tone={s.tone} dot filled={s.filled}>
+    <Badge tone={s.tone} dot filled>
       {s.zh}
       <TechValue value={state} label="状态枚举" className="ml-1" />
     </Badge>

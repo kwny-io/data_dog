@@ -83,7 +83,7 @@ export function AlertStateMachine({
               <StateNode
                 state={state}
                 tone={style.tone}
-                filled={style.filled}
+                filled={count > 0}
                 count={count}
                 selected={isSel}
                 onClick={() => onSelect?.(isSel ? null : state)}
@@ -101,13 +101,17 @@ export function AlertStateMachine({
        *  read as a parenthesised debug dump. */}
       <div className="flex flex-wrap items-center gap-x-5 gap-y-2 border-t border-rule px-4 py-3 text-[11px] text-ink-muted">
         <span className="flex items-center gap-1.5">
+          <span className="inline-block h-2.5 w-2.5 rounded-full bg-ink-faint" aria-hidden />
+          实心＝当前有告警，空心＝无
+        </span>
+        <span className="flex items-center gap-1.5">
           <span className="inline-block h-3 w-4 border-2 border-rule-strong" aria-hidden />
           进行中：{ACTIVE_ALERT_STATES.map((s) => ALERT_STATE_LABEL[s]).join("、")}
           <TechValue value={ACTIVE_ALERT_STATES.join("/")} label="状态枚举" />
         </span>
         <span className="flex items-center gap-1.5">
-          <span className="inline-block h-2.5 w-2.5 rounded-full bg-ink-faint" aria-hidden />
-          终态：{ALERT_STATE_LABEL.closed}（无出边）
+          <span className="inline-block h-2.5 w-2.5 border border-rule-strong" aria-hidden />
+          终态无出边：{ALERT_STATE_LABEL.closed}
           <TechValue value="closed" label="状态枚举" />
         </span>
         <span className="flex items-center gap-1.5">

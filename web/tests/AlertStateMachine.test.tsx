@@ -42,4 +42,21 @@ describe("AlertStateMachine", () => {
     const btn = screen.getByTitle(/（escalated）/);
     expect(btn).toHaveAttribute("aria-pressed", "true");
   });
+
+  it("fills the status dot only when the state has a non-zero count", () => {
+    // The dot reads like an indicator light, so it must mean one: solid = this
+    // state currently has alerts. A state with no alerts stays hollow — it is
+    // not "the empty step", it is "a state you are not in right now".
+    const { container } = render(<AlertStateMachine counts={{ detected: 3 }} />);
+    const btn = (state: string) =>
+      [...container.querySelectorAll("button")].find((b) =>
+        b.getAttribute("title")?.includes(`（${state}）`),
+      )!;
+    const dot = (state: string) => btn(state).querySelector<HTMLElement>("span[aria-hidden]")!;
+
+    // jsdom has no Tailwind, so assert the inline style the component sets:
+    // a filled dot carries an inline background; a hollow one does not.
+    expect(dot("detected").style.backgroundColor).toBeTruthy();
+    expect(dot("closed").style.backgroundColor).toBe("");
+  });
 });

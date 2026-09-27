@@ -119,20 +119,18 @@ export const ALERT_STATE_LABEL: Record<AlertState, string> = {
 
 export interface AlertStateStyle {
   tone: Tone;
-  /** Filled dot vs hollow: distinguishes states that share a tone. */
-  filled: boolean;
   zh: string;
 }
 
 export const ALERT_STATE_STYLE: Record<AlertState, AlertStateStyle> = {
-  detected: { tone: "warning", filled: false, zh: "已检测" },
-  confirmed: { tone: "critical", filled: true, zh: "已确认" },
-  escalated: { tone: "critical", filled: true, zh: "已升级" },
-  recovering: { tone: "primary", filled: false, zh: "恢复中" },
-  resolved: { tone: "confirmed", filled: true, zh: "已解决" },
-  closed: { tone: "suppressed", filled: true, zh: "已关闭" },
-  suppressed: { tone: "suppressed", filled: false, zh: "已抑制" },
-  rejected: { tone: "suppressed", filled: true, zh: "已驳回" },
+  detected: { tone: "warning", zh: "已检测" },
+  confirmed: { tone: "critical", zh: "已确认" },
+  escalated: { tone: "critical", zh: "已升级" },
+  recovering: { tone: "primary", zh: "恢复中" },
+  resolved: { tone: "confirmed", zh: "已解决" },
+  closed: { tone: "suppressed", zh: "已关闭" },
+  suppressed: { tone: "suppressed", zh: "已抑制" },
+  rejected: { tone: "suppressed", zh: "已驳回" },
 };
 
 export function isActiveAlert(state: AlertState): boolean {
