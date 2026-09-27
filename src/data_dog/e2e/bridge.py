@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """E2E 证据桥：把 P2 数据面/合成样本接成 Agent 的查询接口（与 EvidenceStore 同形）。
 
 Agent 通过 4 个只读工具查证据；这里提供一个**由候选反查遥测**的证据源：
@@ -11,8 +10,6 @@ Agent 通过 4 个只读工具查证据；这里提供一个**由候选反查遥
 """
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
-
 from ..errors import ToolErrorCode, err
 from ..evidence.store import ALLOWED_COMPONENTS, RECENT_CHANGES, VENDOR_KNOWLEDGE
 
@@ -20,7 +17,7 @@ from ..evidence.store import ALLOWED_COMPONENTS, RECENT_CHANGES, VENDOR_KNOWLEDG
 class CandidateEvidenceBridge:
     """按候选 → 遥测窗口的证据源。telemetry_by_component 由 P2 回放时填充。"""
 
-    def __init__(self, telemetry_by_component: Optional[Dict[str, Dict]] = None,
+    def __init__(self, telemetry_by_component: dict[str, dict] | None = None,
                  *, device_sn: str = "device-go2-0001"):
         self.telemetry = telemetry_by_component or {}
         self.device_sn = device_sn
@@ -41,7 +38,7 @@ class CandidateEvidenceBridge:
                 for item in VENDOR_KNOWLEDGE.get(component_type, [])]
 
     def query_neighbor_events(self, device_sn, component, window_start, window_end):
-        return {"device_sn": device_sn, "events": []}
+        return []
 
     def query_recent_changes(self, device_sn, component, since):
         if component not in ALLOWED_COMPONENTS:

@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """MuJoCo 运行 Go2 模型，导出物理自洽的关节遥测 + 电机温度。
 
 目的：把 Go2 放进 mujoco（third_party/mujoco_menagerie/unitree_go2/scene.xml）跑一段
@@ -13,7 +12,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional
 
 import numpy as np
 
@@ -25,7 +23,7 @@ DEFAULT_MODEL = (
 )
 
 # 与 synth/generator.DEFAULT_PARAMS 保持一致的 Go2 电机热参数（一阶热模型）
-MOTOR_PARAMS: Dict[str, float] = {
+MOTOR_PARAMS: dict[str, float] = {
     "kt": 0.25,     # N·m/A 扭矩常数
     "R": 0.35,      # Ohm 绕组电阻
     "Cth": 900.0,   # J/K 电机+外壳热容
@@ -45,7 +43,7 @@ ACTUATORS = [
 @dataclass
 class SimResult:
     """mujoco 仿真导出的原始结果（尚不包含合成故障/噪声）。"""
-    joints: List[str]
+    joints: list[str]
     ts: np.ndarray                 # (n_steps,) 秒
     pos: np.ndarray                # (n_steps, n_joint) rad
     vel: np.ndarray                # (n_steps, n_joint) rad/s
@@ -77,7 +75,7 @@ def simulate(
     dt: float = 0.01,
     kp: float = 30.0,
     kd: float = 2.0,
-    seed: Optional[int] = None,
+    seed: int | None = None,
 ) -> SimResult:
     """加载 go2 模型，PD 追踪正弦摆动，导出关节遥测 + 热模型温度。
 

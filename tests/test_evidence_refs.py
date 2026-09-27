@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Evidence Ref 解析协议测试（缺架构口 E-8）。
 
 覆盖：
@@ -24,7 +23,6 @@ from data_dog.evidence.refs import (
     metricwin_ref_for,
     parse_ref,
 )
-
 
 # ---------- 1. 语法 ----------
 

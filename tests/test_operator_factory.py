@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """P1 离线算子工厂测试：DSL 安全求值器 + 文档知识抽取 + Fixture 回放。
 
 覆盖重点：
@@ -16,7 +15,10 @@ from pathlib import Path
 import pytest
 
 from data_dog.operator_factory.dsl import (
-    DSLError, WindowContext, compile_rule, evaluate,
+    DSLError,
+    WindowContext,
+    compile_rule,
+    evaluate,
 )
 from data_dog.operator_factory.knowledge import build_knowledge_package
 from data_dog.operator_factory.p1_demo import build_motor_operator

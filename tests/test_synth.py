@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Go2 合成遥测生成器 + ground truth 评估的测试。
 
 验证：
@@ -7,15 +6,12 @@
 - 用合成数据跑 Agent 调查（确定性 provider），对比 ground truth，正常→rejected、
   故障→needs_human_review/confirmed，能得到高准确率。
 """
-import json
 
-import numpy as np
 
 from data_dog.synth import (
+    FAULT_DEFS,
     SynthGenConfig,
     generate_sample,
-    synthesize_batch,
-    FAULT_DEFS,
 )
 from data_dog.synth.synth_eval import build_samples, run_synth_eval, summarize_synth
 
@@ -77,7 +73,7 @@ def test_synth_eval_accuracy_against_ground_truth():
 
 def test_build_samples_covers_all_faults():
     samples, labels = build_samples(2, 120.0, 0)
-    faults = [l["fault"] for l in labels]
+    faults = [lb["fault"] for lb in labels]
     assert faults == ["normal", "F1_stall", "F2_temp_rise",
                       "F3_packet_loss", "F4_current_bias", "F5_load_spike"]
     assert len(samples) == len(faults)

@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """结构化日志（JSON）+ 请求上下文（request_id）。
 
 设计取舍
@@ -16,12 +15,11 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import sys
 import time
 import uuid
 from contextvars import ContextVar
-from typing import Any, Dict, Optional
+from typing import Any
 
 # 当前请求上下文（request_id 等）。用 ContextVar 以适配异步/多线程。
 _request_id: ContextVar[str] = ContextVar("request_id", default="")
@@ -35,7 +33,7 @@ _RESERVED = {
 }
 
 
-def set_request_id(rid: Optional[str] = None) -> str:
+def set_request_id(rid: str | None = None) -> str:
     """设置当前上下文的 request_id（不传则生成一个）。返回最终值。"""
     rid = rid or uuid.uuid4().hex[:16]
     _request_id.set(rid)
@@ -59,7 +57,7 @@ class JsonFormatter(logging.Formatter):
         self.version = version
 
     def format(self, record: logging.LogRecord) -> str:
-        payload: Dict[str, Any] = {
+        payload: dict[str, Any] = {
             "ts": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(record.created))
                   + f".{int(record.msecs):03d}Z",
             "level": record.levelname,
@@ -72,6 +70,11 @@ class JsonFormatter(logging.Formatter):
         rid = get_request_id()
         if rid:
             payload["request_id"] = rid
+        # W3C trace-id（若本请求建立了追踪上下文）——便于跨服务对齐链路
+        from .tracing import get_trace_id
+        tid = get_trace_id()
+        if tid:
+            payload["trace_id"] = tid
 
         # 业务字段（logger.info("x", extra={"foo": 1}) 里的 foo）
         for k, v in record.__dict__.items():
@@ -83,19 +86,20 @@ class JsonFormatter(logging.Formatter):
         return json.dumps(payload, ensure_ascii=False, default=str)
 
 
-def setup_logging(*, level: Optional[str] = None,
-                  service: Optional[str] = None,
+def setup_logging(*, level: str | None = None,
+                  service: str | None = None,
                   version: str = "",
-                  json_output: Optional[bool] = None) -> None:
+                  json_output: bool | None = None) -> None:
     """配置根 logger。幂等，可重复调用。
 
     - level：`DD_LOG_LEVEL`（默认 INFO）
     - json_output：`DD_LOG_JSON`（默认 1=JSON；设 0 用人类可读格式，便于本地调试）
     """
-    lvl = (level or os.environ.get("DD_LOG_LEVEL", "INFO")).upper()
-    svc = service or os.environ.get("DD_SERVICE_NAME", "data-dog")
+    from .. import settings
+    lvl = (level or settings.log_level()).upper()
+    svc = service or settings.service_name()
     if json_output is None:
-        json_output = os.environ.get("DD_LOG_JSON", "1").strip() != "0"
+        json_output = settings.log_json()
 
     handler = logging.StreamHandler(sys.stdout)
     if json_output:

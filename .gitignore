@@ -37,3 +37,11 @@ venv/
 
 # Streamlit 本地运行缓存
 .streamlit/secrets.toml
+
+# 覆盖率产物（pytest --cov / make cov 生成）
+.coverage
+.coverage.*
+htmlcov/
+
+# 本地 agent/编辑器工具配置（非项目代码）
+.claude/

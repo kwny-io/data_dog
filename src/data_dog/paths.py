@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """项目资源路径解析（源码态 / 已安装态 / 容器态都能用）。
 
 **为什么需要它**：以前各模块用 `Path(__file__).resolve().parents[3]` 推"仓库根"。
@@ -15,15 +14,15 @@
 """
 from __future__ import annotations
 
-import os
 from pathlib import Path
-from typing import Optional
+
+from . import settings
 
 # 认定"项目根"的标志物：仓库里至少有一个
 _ROOT_MARKERS = ("pyproject.toml", "vendor_docs")
 
 
-def _walk_up_for(start: Path, marker: str, max_up: int = 8) -> Optional[Path]:
+def _walk_up_for(start: Path, marker: str, max_up: int = 8) -> Path | None:
     cur = start
     for _ in range(max_up):
         if (cur / marker).exists():
@@ -36,7 +35,7 @@ def _walk_up_for(start: Path, marker: str, max_up: int = 8) -> Optional[Path]:
 
 def project_root() -> Path:
     """项目根目录（best-effort）。容器里建议用 DD_PROJECT_ROOT 显式指定。"""
-    env = os.environ.get("DD_PROJECT_ROOT", "").strip()
+    env = settings.project_root()
     if env:
         return Path(env)
 
@@ -57,7 +56,7 @@ def vendor_docs_dir() -> Path:
 
     可用 DD_VENDOR_DOCS 直接指定，容器里指向挂载/拷贝进来的目录。
     """
-    env = os.environ.get("DD_VENDOR_DOCS", "").strip()
+    env = settings.vendor_docs_dir()
     if env:
         return Path(env)
     return project_root() / "vendor_docs"
@@ -65,7 +64,7 @@ def vendor_docs_dir() -> Path:
 
 def operators_dir() -> Path:
     """算子产物目录（`operators/`）。"""
-    env = os.environ.get("DD_OPERATORS_DIR", "").strip()
+    env = settings.operators_dir()
     if env:
         return Path(env)
     return project_root() / "operators"
@@ -73,7 +72,7 @@ def operators_dir() -> Path:
 
 def data_dir() -> Path:
     """运行期本地数据目录（默认 SQLite / 向量库等）。"""
-    env = os.environ.get("DD_DATA_DIR", "").strip()
+    env = settings.data_dir()
     if env:
         return Path(env)
     return project_root()

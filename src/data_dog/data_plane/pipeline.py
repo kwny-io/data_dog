@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """P2 在线数据面：端到端流水线（把 §9.1~§9.3 串起来）。
 
     raw envelope → Gateway(注入身份/校验/限流)
@@ -14,12 +13,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 from ..errors import ToolErrorCode, err
 from .candidate import CandidateBuilder
 from .chain import (
-    Detector, Enricher, Normalizer, Parser, StatusCodeNormalizer, WindowBuffer,
+    Detector,
+    Enricher,
+    Normalizer,
+    Parser,
+    StatusCodeNormalizer,
+    WindowBuffer,
 )
 from .events import NormalizedTelemetryEvent, RawLogEnvelope
 from .gateway import TelemetryGateway
@@ -31,7 +35,7 @@ class DataPlaneStats:
     ingested: int = 0
     resolved: int = 0
     rejected: int = 0
-    rejected_by_reason: Dict[str, int] = field(default_factory=dict)
+    rejected_by_reason: dict[str, int] = field(default_factory=dict)
 
     def bump(self, reason: str) -> None:
         self.rejected_by_reason[reason] = self.rejected_by_reason.get(reason, 0) + 1
@@ -39,8 +43,8 @@ class DataPlaneStats:
 
 @dataclass
 class DataPlaneResult:
-    normalized: List[NormalizedTelemetryEvent] = field(default_factory=list)
-    candidates: List[Any] = field(default_factory=list)
+    normalized: list[NormalizedTelemetryEvent] = field(default_factory=list)
+    candidates: list[Any] = field(default_factory=list)
     stats: DataPlaneStats = field(default_factory=DataPlaneStats)
 
 
@@ -48,11 +52,11 @@ class DataPlane:
     """在线数据面最小闭环。"""
 
     def __init__(self, resolver: CompatibilityResolver, *,
-                 gateway: Optional[TelemetryGateway] = None,
+                 gateway: TelemetryGateway | None = None,
                  window_size: int = 30,
-                 normalizer: Optional[Normalizer] = None,
-                 status_normalizer: Optional[StatusCodeNormalizer] = None,
-                 enricher: Optional[Enricher] = None):
+                 normalizer: Normalizer | None = None,
+                 status_normalizer: StatusCodeNormalizer | None = None,
+                 enricher: Enricher | None = None):
         self.resolver = resolver
         self.gateway = gateway or TelemetryGateway()
         self.normalizer = normalizer or Normalizer()
@@ -63,8 +67,8 @@ class DataPlane:
         self.stats = DataPlaneStats()
 
     # ---- 单个事件 ----
-    def process_one(self, raw: Dict[str, Any], auth: Optional[Dict[str, Any]]
-                    ) -> Tuple[Optional[NormalizedTelemetryEvent], Optional[Any]]:
+    def process_one(self, raw: dict[str, Any], auth: dict[str, Any] | None
+                    ) -> tuple[NormalizedTelemetryEvent | None, Any | None]:
         self.stats.ingested += 1
         ok, env_or_err = self.gateway.ingest(raw, auth)
         if not ok:
@@ -87,7 +91,7 @@ class DataPlane:
 
         # Parser：需要从注册的算子取 FieldSpec。这里用 binding.extra 携带的 parser 配置。
         parser = binding.extra.get("_parser")
-        detector: Optional[Detector] = binding.extra.get("_detector")
+        detector: Detector | None = binding.extra.get("_detector")
         if parser is None:
             self.stats.rejected += 1
             self.stats.bump("no_parser")
@@ -108,7 +112,7 @@ class DataPlane:
 
         # Normalizer + 状态码规范化
         metrics = self.normalizer.normalize(metrics)
-        status_codes: List[str] = []
+        status_codes: list[str] = []
         if "_merror" in metrics:
             status_codes = self.status_normalizer.codes_for(metrics.pop("_merror"))
 
@@ -151,9 +155,9 @@ class DataPlane:
         return norm, None
 
     # ---- 批量 ----
-    def process_batch(self, raws: List[Dict[str, Any]],
-                      auth: Optional[Dict[str, Any]]) -> DataPlaneResult:
-        normalized: List[NormalizedTelemetryEvent] = []
+    def process_batch(self, raws: list[dict[str, Any]],
+                      auth: dict[str, Any] | None) -> DataPlaneResult:
+        normalized: list[NormalizedTelemetryEvent] = []
         for raw in raws:
             norm, _err = self.process_one(raw, auth)
             if norm is not None:
@@ -163,7 +167,7 @@ class DataPlane:
         )
 
 
-def _payload(env: RawLogEnvelope) -> Tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
+def _payload(env: RawLogEnvelope) -> tuple[dict[str, Any], dict[str, Any] | None]:
     """解析事件载荷。返回 (payload, error)。
 
     error 非 None 表示**失败关闭**：调用方必须据此拒绝该条事件，不得继续。
@@ -173,7 +177,7 @@ def _payload(env: RawLogEnvelope) -> Tuple[Dict[str, Any], Optional[Dict[str, An
       "正常但无数据"，否则一条坏日志会伪装成"没检出异常"）。
     """
     if env.payload_ref:
-        from .fetch import validate_url     # 外置引用必须先过安全校验
+        from .fetch import validate_url  # 外置引用必须先过安全校验
         d = validate_url(env.payload_ref)
         if not d.allowed:
             return {}, err(ToolErrorCode.DENIED,

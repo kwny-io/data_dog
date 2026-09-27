@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """P3 端到端演示：调查结论 → 策略门 → 正式事件 → 投递 SaaS → 反馈闭环。
 
 跑法：
@@ -55,13 +54,13 @@ def main() -> int:
          "candidate_severities": ["warning", "critical"]},
         device_ref="device-opaque-001", component_ref="joint_motor.front_left_hip"))
 
-    r2 = _emit("rejected", svc.process(
+    _emit("rejected", svc.process(
         {"investigation_id": "inv-002", "disposition": "rejected", "confidence": 0.8,
          "summary": "电池 SOC 正常，误报"},
         {"evidence_refs": ["metricwin://cand_02"]},
         device_ref="device-opaque-001", component_ref="battery.main"))
 
-    r3 = _emit("缺证据", svc.process(
+    _emit("缺证据", svc.process(
         {"investigation_id": "inv-003", "disposition": "confirmed", "confidence": 0.9,
          "summary": "证据缺失样例"},
         {}, device_ref="device-opaque-001", component_ref="joint_motor.front_left_hip"))

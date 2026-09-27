@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """可观测性：token 消耗 / 每步耗时 / 成本统计（后端采集 + CLI/前端展示）。
 
 设计：后端在 Provider.chat 和 AgentLoop 采集，前端（rich 命令行 / streamlit）只做展示。
@@ -12,14 +11,11 @@
 """
 from __future__ import annotations
 
-import time
-from dataclasses import dataclass, field
-from typing import Dict, List, Optional
-
+from dataclasses import dataclass
 
 # 价格表：$ 每 1M tokens（输入/输出），近似值（公开定价，随供应商可调整）
 # key: f"{vendor_id}/{model}"；模型名做前缀匹配
-_PRICES: Dict[str, List[float]] = {
+_PRICES: dict[str, list[float]] = {
     "deepseek/deepseek-chat": [0.27, 1.10],    # 2024 定价
     "openai/gpt-4o-mini": [0.15, 0.60],
     "openai/gpt-4o": [2.50, 10.00],
@@ -27,7 +23,7 @@ _PRICES: Dict[str, List[float]] = {
 }
 
 
-def lookup_price(vendor_id: str, model: str) -> Optional[List[float]]:
+def lookup_price(vendor_id: str, model: str) -> list[float] | None:
     """按供应商+模型查 (输入$每1M, 输出$每1M)；没匹配到返回 None。"""
     key = f"{vendor_id}/{model}"
     if key in _PRICES:
@@ -58,7 +54,7 @@ class CallStat:
         return (self.prompt_tokens / 1e6) * price[0] + \
                (self.completion_tokens / 1e6) * price[1]
 
-    def to_dict(self) -> Dict:
+    def to_dict(self) -> dict:
         return {
             "model": self.model,
             "prompt_tokens": self.prompt_tokens,
@@ -74,7 +70,7 @@ class UsageTracker:
     """进程内用量累计器：跨多次调用累加 token / 耗时 / 成本。"""
 
     def __init__(self):
-        self.calls: List[CallStat] = []
+        self.calls: list[CallStat] = []
 
     def record(self, stat: CallStat) -> None:
         self.calls.append(stat)
@@ -104,7 +100,7 @@ class UsageTracker:
     def call_count(self) -> int:
         return len(self.calls)
 
-    def summary(self) -> Dict:
+    def summary(self) -> dict:
         """给前端展示的汇总（JSON 友好）。"""
         priced = [c for c in self.calls if lookup_price(c.vendor_id, c.model) is not None]
         return {

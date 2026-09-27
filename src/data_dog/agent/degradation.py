@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Agent 降级路径：Agent 不可用时候选事件如何处置（对齐架构 §9.4 + §16.4）。
 
 为什么需要它
@@ -25,7 +24,6 @@ D 现有链路默认「Agent 在线」：候选进 `AgentLoop.investigate` 出�
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import List
 
 # 严重硬规则信号：命中任一即视为"确定性上报"路径（fail-safe）。
 # 刻意用明确的错误码/事件特征，不用过于宽泛的模式（如单字符 "E_"），
@@ -60,7 +58,7 @@ class DegradationDecision:
         }
 
 
-def is_hard_rule(signal: str, rule_matches: List[str],
+def is_hard_rule(signal: str, rule_matches: list[str],
                  severity_hint: str = "") -> bool:
     """命中硬规则：严重度 critical，或规则名/信号含严重错误码特征。
 
@@ -83,10 +81,10 @@ class DegradationPolicy:
     """
     agent_available: bool = True
     queue_capacity: int = 100
-    _queue: List[str] = field(default_factory=list, repr=False)
+    _queue: list[str] = field(default_factory=list, repr=False)
 
     @property
-    def queued(self) -> List[str]:
+    def queued(self) -> list[str]:
         """当前排队中的候选 id（副本，外部不能改内部状态）。"""
         return list(self._queue)
 
@@ -123,11 +121,11 @@ class DegradationPolicy:
             cid, INVESTIGATE_NOW,
             "Agent 可用，交付正常调查。", candidate.severity_hint)
 
-    def decide_batch(self, candidates) -> List[DegradationDecision]:
+    def decide_batch(self, candidates) -> list[DegradationDecision]:
         """批量决策；顺序即候选顺序，便于与上游候选清单对齐。"""
         return [self.decide(c) for c in candidates]
 
-    def drain(self) -> List[str]:
+    def drain(self) -> list[str]:
         """取出并清空队列（Agent 恢复后取回待复核候选）。"""
         out = list(self._queue)
         self._queue.clear()

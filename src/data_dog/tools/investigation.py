@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """受控调查 Tool：Agent 唯一能访问的外部世界入口（对齐架构 13.2）。
 
 所有 Tool 都是只读、带权限校验（仅允许白名单部件）、返回最小证据，
@@ -6,11 +5,11 @@
 """
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any
 
 from ..context import RuntimeContext, default_context
 from ..errors import ToolErrorCode, err, ok
-from ..evidence.store import EvidenceStore
+from ..evidence.store import EvidenceSource
 
 
 class InvestigationTools:
@@ -21,13 +20,13 @@ class InvestigationTools:
     校验 / 收紧，越权返回 denied。Agent 无法通过改参数越权。
     """
 
-    def __init__(self, store: EvidenceStore, ctx: RuntimeContext | None = None):
+    def __init__(self, store: EvidenceSource, ctx: RuntimeContext | None = None):
         self.store = store
         self.ctx = ctx or default_context()
 
     def query_candidate_evidence(
         self, device_sn: str, component: str, window_start: str, window_end: str
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """查同部件在一个时间窗内的遥测与参照。"""
         res = self.store.query_telemetry(
             device_sn, component, window_start, window_end
@@ -40,14 +39,14 @@ class InvestigationTools:
 
     def query_vendor_knowledge(
         self, component_type: str, question: str = ""
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """查询与当前组件型号绑定的厂商知识条目。"""
         items = self.store.query_vendor_knowledge(component_type, question)
         return ok({"component_type": component_type, "items": items})
 
     def query_neighbor_events(
         self, device_sn: str, component: str, window_start: str, window_end: str
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """查同设备其他部件在相同时窗内是否有异常（支持关联）。"""
         evs = self.store.query_neighbor_events(
             device_sn, component, window_start, window_end
@@ -56,7 +55,7 @@ class InvestigationTools:
 
     def query_recent_changes(
         self, device_sn: str, component: str, since: str
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """查某部件近期固件/算子/配置变更（排查"变更新引入异常"）。"""
         res = self.store.query_recent_changes(device_sn, component, since)
         if isinstance(res, dict) and res.get("ok") is False:
@@ -65,7 +64,7 @@ class InvestigationTools:
                    "since": since, "changes": res.get("changes", [])})
 
     # ---- 工具描述，供模型 / 生成 tool 定义用 ----#
-    TOOL_SPECS: Dict[str, Dict[str, Any]] = {
+    TOOL_SPECS: dict[str, dict[str, Any]] = {
         "query_candidate_evidence": {
             "name": "query_candidate_evidence",
             "description": (
@@ -128,7 +127,7 @@ class InvestigationTools:
         """返回给模型的工具定义列表（供 Provider.chat 用）。"""
         return list(self.TOOL_SPECS.values())
 
-    def call(self, name: str, args: Dict[str, Any]) -> Dict[str, Any]:
+    def call(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
         """按名字+参数调用某个 Tool（AgentLoop 用）。
 
         A4 注入点：
@@ -152,7 +151,7 @@ class InvestigationTools:
         except TypeError as e:
             return err(ToolErrorCode.INVALID_INPUT, str(e))
 
-    def with_task(self, device_sn: str, allowed_components=None) -> "InvestigationTools":
+    def with_task(self, device_sn: str, allowed_components=None) -> InvestigationTools:
         """绑定到一次具体任务的可信上下文（设备+授权范围），返回新实例。"""
         new_ctx = RuntimeContext(
             tenant_id=self.ctx.tenant_id,
@@ -166,6 +165,6 @@ class InvestigationTools:
         )
         return InvestigationTools(self.store, new_ctx)
 
-    def with_context(self, ctx: RuntimeContext) -> "InvestigationTools":
+    def with_context(self, ctx: RuntimeContext) -> InvestigationTools:
         """绑定一个完整的外部可信上下文（如来自 context-injector MCP）。"""
         return InvestigationTools(self.store, ctx)

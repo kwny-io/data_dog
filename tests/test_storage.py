@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """持久化层测试（SQLAlchemy）。
 
 覆盖：建表 / 幂等 upsert / 重启不丢 / 查询过滤 / 各表往返。
@@ -9,8 +8,8 @@ from __future__ import annotations
 import pytest
 
 from data_dog.alerting.lifecycle import AlertEvent
-from data_dog.alerting.service import AlertReportingService
 from data_dog.alerting.saas import SaaSTestAdapter
+from data_dog.alerting.service import AlertReportingService
 from data_dog.schemas.events import CandidateEvent, EvidenceSummary, InvestigationReport
 from data_dog.storage import repository as repo
 from data_dog.storage.db import init_db, session_scope

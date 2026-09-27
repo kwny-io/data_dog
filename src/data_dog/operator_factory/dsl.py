@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """受限 DSL 的安全求值器（实现 docs/dsl_spec.md v0.1 的可落地子集）。
 
 设计要点（对齐架构 §11 / §8.3）：
@@ -23,8 +22,9 @@ P2 与 Enricher 一起做）；状态机（dsl_spec §5，本模块只做无状�
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any
 
 
 class DSLError(ValueError):
@@ -54,8 +54,8 @@ class Token:
     pos: int
 
 
-def tokenize(src: str) -> List[Token]:
-    toks: List[Token] = []
+def tokenize(src: str) -> list[Token]:
+    toks: list[Token] = []
     i = 0
     while i < len(src):
         m = _TOKEN_RE.match(src, i)
@@ -65,7 +65,7 @@ def tokenize(src: str) -> List[Token]:
         kind = m.lastgroup
         if kind == "ws":
             continue
-        toks.append(Token(kind, m.group(), m.start()))
+        toks.append(Token(kind or "", m.group(), m.start()))
     toks.append(Token("eof", "", len(src)))
     return toks
 
@@ -108,7 +108,7 @@ class Binary:
 @dataclass
 class Call:
     name: str
-    args: List[Any]
+    args: list[Any]
 
 
 # 运算符优先级（数字越小越低；对齐 dsl_spec §3.1）
@@ -138,7 +138,7 @@ WINDOW_FUNCS = {
 class Parser:
     """递归下降 + 优先级爬升。"""
 
-    def __init__(self, toks: List[Token]):
+    def __init__(self, toks: list[Token]):
         self.toks = toks
         self.i = 0
         self.declared_fields: set[str] = set()
@@ -228,7 +228,7 @@ class Parser:
         识别为一个 ident，这里据前缀判定。"""
         is_window = name == "window" or name.startswith("window.")
         self.expect("(")
-        args: List[Any] = []
+        args: list[Any] = []
         if self.peek().value != ")":
             while True:
                 args.append(self.parse_expr(0))
@@ -270,13 +270,13 @@ def _duration_to_seconds(s: str) -> float:
 @dataclass
 class WindowContext:
     """窗口聚合只依赖事件时间序列（确定性）。缺失字段 → None，按 missing() 语义处理。"""
-    series: Dict[str, List[float]] = field(default_factory=dict)
-    baseline: Dict[str, float] = field(default_factory=dict)
+    series: dict[str, list[float]] = field(default_factory=dict)
+    baseline: dict[str, float] = field(default_factory=dict)
 
-    def _vals(self, name: str) -> Optional[List[float]]:
+    def _vals(self, name: str) -> list[float] | None:
         return self.series.get(name)
 
-    def agg(self, func: str, field_name: str, extra: Tuple = ()) -> Any:
+    def agg(self, func: str, field_name: str, extra: tuple = ()) -> Any:
         vals = self._vals(field_name)
         if vals is None or not vals:
             return None
@@ -338,7 +338,7 @@ def _as_number(x: Any) -> float:
 
 
 class Evaluator:
-    def __init__(self, fields: Dict[str, Any], window: Optional[WindowContext] = None):
+    def __init__(self, fields: dict[str, Any], window: WindowContext | None = None):
         self.fields = fields
         self.window = window or WindowContext()
 
@@ -423,12 +423,12 @@ class Evaluator:
             return bool(self.eval_node(node.left)) or bool(self.eval_node(node.right))
         if op == "|":
             return int(_as_number(self.eval_node(node.left))) | int(_as_number(self.eval_node(node.right)))
-        l = self.eval_node(node.left)
-        r = self.eval_node(node.right)
+        lv = self.eval_node(node.left)
+        rv = self.eval_node(node.right)
         if op in ("==", "!="):
-            eq = (l == r)
+            eq = (lv == rv)
             return eq if op == "==" else (not eq)
-        ln, rn = _as_number(l), _as_number(r)
+        ln, rn = _as_number(lv), _as_number(rv)
         if op == "+":
             return ln + rn
         if op == "-":
@@ -536,7 +536,7 @@ class CompiledRule:
     ast: Any
     severity_hint: str = "warning"
     message: str = ""
-    for_seconds: Optional[float] = None
+    for_seconds: float | None = None
 
 
 def compile_rule(rule: dict, declared_fields: Sequence[str] = ()) -> CompiledRule:
@@ -565,8 +565,8 @@ def compile_rule(rule: dict, declared_fields: Sequence[str] = ()) -> CompiledRul
     )
 
 
-def evaluate(rule: CompiledRule, fields: Dict[str, Any],
-             window: Optional[WindowContext] = None) -> bool:
+def evaluate(rule: CompiledRule, fields: dict[str, Any],
+             window: WindowContext | None = None) -> bool:
     """对单个事件（+窗口上下文）求值，返回是否命中。
 
     健壮性：任何求值期异常（字段缺失导致的 None 比较、类型不符等）一律视为"不命中"，

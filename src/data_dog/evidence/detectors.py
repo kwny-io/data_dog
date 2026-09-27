@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """用离线索生成的声明式算子做在线检测（桥接 A1 ← Agent 证据线）。
 
 把 operators/generated/*.yaml 加载成规则检测器；query_telemetry 返回遥测时，
@@ -10,7 +9,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import yaml
 
@@ -30,7 +29,7 @@ _FIELD_ALIASES = {
 }
 
 
-def _lookup(telemetry: Dict[str, Any], rule_field: str) -> Optional[Any]:
+def _lookup(telemetry: dict[str, Any], rule_field: str) -> Any | None:
     """在遥测里找规则字段的取值（含别名归一）。"""
     if rule_field in telemetry:
         return telemetry[rule_field]
@@ -52,8 +51,8 @@ def _match(operator, actual, threshold):
 class GeneratedRuleDetector:
     """从 operators/generated/ 加载声明式算子，提供按部件的检测。"""
 
-    def __init__(self, operators_dir: Optional[Path] = None):
-        self.by_component: Dict[str, dict] = {}
+    def __init__(self, operators_dir: Path | None = None):
+        self.by_component: dict[str, dict] = {}
         self._load(operators_dir or _default_operators_dir())
 
     def _load(self, d: Path) -> None:
@@ -68,7 +67,7 @@ class GeneratedRuleDetector:
             if comp:
                 self.by_component[comp] = cfg
 
-    def detect(self, component: str, telemetry: Dict[str, Any]) -> List[Dict[str, Any]]:
+    def detect(self, component: str, telemetry: dict[str, Any]) -> list[dict[str, Any]]:
         """对一份遥测应用该部件的阈值规则，返回命中列表（空 = 无异常）。"""
         cfg = self.by_component.get(component)
         if not cfg:

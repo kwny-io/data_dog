@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """数据库迁移的程序化入口（alembic 封装）。
 
 为什么需要它
@@ -19,12 +18,11 @@
 """
 from __future__ import annotations
 
-import os
 from pathlib import Path
-from typing import Optional
+
+from alembic.config import Config
 
 from alembic import command
-from alembic.config import Config
 
 
 def project_root() -> Path:
@@ -36,21 +34,28 @@ def project_root() -> Path:
 
 
 def make_config(url: str) -> Config:
-    """构造 alembic Config，把连接串显式注入（不依赖 alembic.ini 里的值）。"""
+    """构造 alembic Config，把连接串显式注入（不依赖 alembic.ini 里的值）。
+
+    注意：alembic 的 `set_main_option` 底层是 `configparser`，其中 `%` 是
+    插值语法。若连接串含百分号编码（如 `?options=-csearch_path%3Dxxx`，
+    或 URI 形式密码里的 `%40`），必须转义为 `%%`，否则 configparser 会抛
+    `ValueError: invalid interpolation syntax`。转义只影响这里存的字符串，
+    alembic 读回时会还原为单个 `%`。
+    """
     root = project_root()
     cfg = Config(str(root / "alembic.ini"))
     cfg.set_main_option("script_location", str(root / "alembic"))
-    cfg.set_main_option("sqlalchemy.url", url)
+    cfg.set_main_option("sqlalchemy.url", url.replace("%", "%%"))
     return cfg
 
 
-def upgrade_head(url: Optional[str] = None) -> None:
+def upgrade_head(url: str | None = None) -> None:
     """把数据库迁移到最新版本。"""
     from .db import database_url
     command.upgrade(make_config(url or database_url()), "head")
 
 
-def current_revision(url: Optional[str] = None) -> str:
+def current_revision(url: str | None = None) -> str:
     """返回当前库的迁移版本号（未迁移过返回空串）。"""
     from alembic.runtime.migration import MigrationContext
     from sqlalchemy import create_engine
@@ -66,4 +71,5 @@ def current_revision(url: Optional[str] = None) -> str:
 
 def auto_migrate_enabled() -> bool:
     """是否允许服务启动时自动迁移（默认允许；生产多副本应设 DD_AUTO_MIGRATE=0）。"""
-    return os.environ.get("DD_AUTO_MIGRATE", "1").strip() != "0"
+    from .. import settings
+    return settings.auto_migrate()

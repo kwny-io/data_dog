@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """data_dog 命令行入口。
 
 用法：
@@ -9,7 +8,6 @@
 from __future__ import annotations
 
 import json
-import sys
 from pathlib import Path
 
 import typer
@@ -44,14 +42,14 @@ def init(
         spec = get_vendor(vendor)
     except ValueError as e:
         typer.echo(str(e), err=True)
-        raise typer.Exit(1)
+        raise typer.Exit(1) from e
 
     # 2) 填 key（默认读环境变量已有的，避免重复）
     import os
     existing = os.environ.get(spec.requires_env_key, "")
     key = typer.prompt(
         f"粘贴你的 {spec.label} API Key"
-        + (f"（检测到环境变量已有，直接回车沿用）" if existing else ""),
+        + ("（检测到环境变量已有，直接回车沿用）" if existing else ""),
         default=existing,
     )
     if not key or key == existing:
@@ -113,10 +111,11 @@ def test(
     offline: bool = typer.Option(False, help="离线演示（用 fake provider，无需 key）"),
 ):
     """交互窗：从候选清单挑一个调查，也可导入自定义 JSON；一轮可对比多个结论。"""
-    from .candidates import BY_KEY, TEST_CASES
     from rich.console import Console
     from rich.panel import Panel
     from rich.table import Table
+
+    from .candidates import TEST_CASES
 
     console = Console()
     provider = _make_provider(offline, vendor, model, interactive=True)
@@ -151,8 +150,8 @@ def test(
     history = []
     while True:
         choice = typer.prompt(
-            "\n挑选一个编号调查 [1-%d]，n=临时新建异常，b=对比上一步，q=结束并汇总，i=导入自定义 JSON"
-            % len(TEST_CASES),
+            f"\n挑选一个编号调查 [1-{len(TEST_CASES)}]，"
+            "n=临时新建异常，b=对比上一步，q=结束并汇总，i=导入自定义 JSON",
             default="1",
         ).strip().lower()
 
@@ -274,7 +273,6 @@ def _make_provider(offline: bool, vendor: str | None, model: str | None,
     cfg = load_config()
     vid = vendor or cfg["vendor_id"]
     key = cfg["api_key"]
-    mdl = model or cfg["model"] or None
     if not key:
         hint = "交互窗里选个候选回车前，先 data-dog init 接入 key；或加 --offline 用离线条模型演示。" if interactive else "加 --offline 用离线条模型演示，或先 data-dog init"
         typer.echo(f"尚未配置 API Key。{hint}", err=True)
@@ -283,9 +281,9 @@ def _make_provider(offline: bool, vendor: str | None, model: str | None,
 
 
 def _build_agent(provider, model):
+    from .agent.loop import AgentLoop
     from .evidence.store import EvidenceStore
     from .tools.investigation import InvestigationTools
-    from .agent.loop import AgentLoop
     evidence = EvidenceStore()
     tools = InvestigationTools(evidence)
     trace_steps, trace_cb = _make_trace_cb()
@@ -306,6 +304,8 @@ def _ui_module(name: str):
     here = Path(__file__).resolve()
     ui_path = here.parents[2] / "ui" / f"{name}.py"
     spec = importlib.util.spec_from_file_location(name, ui_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"无法加载 UI 模块 {name}（路径: {ui_path}）")
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod

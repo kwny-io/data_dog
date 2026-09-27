@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """HTTP 服务入口（FastAPI）：把 P2 数据面暴露为可长期运行的服务。
 
 启动：
@@ -17,23 +16,33 @@
 from __future__ import annotations
 
 import hmac
-import os
 import time
 from contextlib import asynccontextmanager
-from typing import Any, Dict, Optional
+from typing import Any
 
 from fastapi import FastAPI, Header, HTTPException, Query, Response
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from ..core.logging import (
-    clear_request_id, get_logger, get_request_id, set_request_id, setup_logging,
-)
+from .. import settings
 from ..core import metrics
+from ..core.logging import (
+    clear_request_id,
+    get_logger,
+    set_request_id,
+    setup_logging,
+)
+from ..core.tracing import clear_trace, start_trace
 from ..data_plane.gateway import TelemetryGateway
 from ..data_plane.p2_demo import _detector_config
 from ..data_plane.pipeline import DataPlane, build_demo_resolver
 from ..errors import ToolErrorCode, http_status_for
 from ..providers.client import LLMCallError
+from ..storage import migrations
+from ..storage import models as M
+from ..storage import repository as repo
+from ..storage.db import database_url as _database_url
+from ..storage.db import get_engine, session_scope
 
 _log = get_logger(__name__)
 
@@ -48,28 +57,10 @@ def _route_template(request) -> str:
     route = request.scope.get("route")
     path = getattr(route, "path", None)
     return path or "unmatched"
-from ..storage import models as M
-from ..storage import repository as repo
-from ..storage.db import database_url as _database_url
-from ..storage import migrations
-from ..storage.db import get_engine, session_scope
+
 
 _VERSION = "0.1.0"
 _STARTED_AT = time.time()
-
-
-def _env_float(name: str, default: float) -> float:
-    try:
-        return float(os.environ.get(name, "").strip() or default)
-    except ValueError:
-        return default
-
-
-def _env_int(name: str, default: int) -> int:
-    try:
-        return int(os.environ.get(name, "").strip() or default)
-    except ValueError:
-        return default
 
 
 # ------------------------------------------------------------------ 服务状态
@@ -88,20 +79,20 @@ class ServiceState:
 
     def __init__(self) -> None:
         self.resolver = None
-        self.build_error: Optional[str] = None
+        self.build_error: str | None = None
         self.request_count = 0
         self.rejected_requests = 0
         # 跨请求共享的接入网关（限流状态所在）
         self.gateway = TelemetryGateway(
-            rate_per_sec=_env_float("DD_RATE_PER_SEC", 200.0),
-            burst=_env_int("DD_RATE_BURST", 400),
+            rate_per_sec=settings.rate_per_sec(),
+            burst=settings.rate_burst(),
         )
         try:
             self.resolver = build_demo_resolver(_detector_config())
         except Exception as e:            # 缺厂商文档/依赖时不致命，降级为不可用
             self.build_error = f"{type(e).__name__}: {e}"
 
-    def new_plane(self) -> Optional[DataPlane]:
+    def new_plane(self) -> DataPlane | None:
         if self.resolver is None:
             return None
         return DataPlane(self.resolver, gateway=self.gateway)
@@ -112,8 +103,8 @@ _state = ServiceState()
 
 # ------------------------------------------------------------------ 工具
 
-def _auth_from_headers(tenant_id: Optional[str], device_sn: Optional[str]
-                       ) -> Dict[str, Any]:
+def _auth_from_headers(tenant_id: str | None, device_sn: str | None
+                       ) -> dict[str, Any]:
     """身份只认请求头（认证主体），不认正文。缺一即拒绝（失败关闭）。"""
     if not tenant_id or not device_sn:
         raise HTTPException(status_code=401,
@@ -121,7 +112,7 @@ def _auth_from_headers(tenant_id: Optional[str], device_sn: Optional[str]
     return {"tenant_id": tenant_id, "device_sn": device_sn, "principal": "http-gateway"}
 
 
-def _tenant_required(tenant_id: Optional[str]) -> str:
+def _tenant_required(tenant_id: str | None) -> str:
     """读路径的租户上下文：只认 `X-Tenant-Id`，缺失/空 → 401（失败关闭）。
 
     为什么不接受 `?tenant_id=` 查询参数：查询串可被链接、日志、浏览器历史携带与
@@ -134,7 +125,7 @@ def _tenant_required(tenant_id: Optional[str]) -> str:
     return tenant_id
 
 
-def _db_reachable() -> Dict[str, Any]:
+def _db_reachable() -> dict[str, Any]:
     """探测数据库连通性：直接建立一条连接（拿到即通，不做任何查询）。"""
     try:
         conn = get_engine().connect()
@@ -193,12 +184,28 @@ def create_app() -> FastAPI:
         lifespan=_lifespan,
     )
 
+    # -------------------------------------------------- CORS（可选）
+    # 仅当 DD_CORS_ORIGINS 显式给出来源时才挂载；未设 = 同源（浏览器默认拦跨源）。
+    # 不用 "*"：带凭据的跨源请求下 `*` 会被浏览器拒绝，且会放开所有站点。
+    _origins = settings.cors_origins()
+    if _origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=_origins,
+            allow_credentials=True,
+            allow_methods=["GET", "POST", "OPTIONS"],
+            allow_headers=["Content-Type", "X-API-Key", "X-Tenant-Id",
+                           "X-Device-Sn", "X-Request-Id", "traceparent"],
+            expose_headers=["X-Request-Id", "traceparent"],
+        )
+        _log.info("CORS 已启用", extra={"origins": _origins})
+
     # -------------------------------------------------- 统一错误契约
 
     def _error_body(code: ToolErrorCode, detail: Any = "", *, reason: str = ""
-                    ) -> Dict[str, Any]:
+                    ) -> dict[str, Any]:
         """服务边界统一错误体：{ok, error, detail}。错误码保持有限闭集。"""
-        body: Dict[str, Any] = {"ok": False, "error": code.value, "detail": detail}
+        body: dict[str, Any] = {"ok": False, "error": code.value, "detail": detail}
         if reason:
             body["reason"] = reason
         return body
@@ -224,24 +231,30 @@ def create_app() -> FastAPI:
 
     @app.middleware("http")
     async def _request_context(request, call_next):
-        """为每个请求建立 request_id，贯穿该请求内所有日志行，并回传响应头。
+        """为每个请求建立 request_id + trace 上下文，贯穿该请求内所有日志行。
 
-        客户端可透传 `X-Request-Id`（便于与上游链路对齐）；没带则生成一个。
-        出事时用这个 id 能把一次请求的全部日志捞出来。
+        - `X-Request-Id`：客户端可透传（与上游对齐），没带则生成；回传响应头。
+        - `traceparent`（W3C）：上游带了合法值就沿用其 trace-id；两种情况都新建
+          span-id，并回传响应头。见 `core/tracing.py` 的边界说明。
+        出事时用 request_id/trace_id 能把一次请求的全部日志捞出来。
         """
         rid = set_request_id(request.headers.get("X-Request-Id"))
+        _trace_id, traceparent = start_trace(request.headers.get("traceparent"))
         t0 = time.perf_counter()
         try:
             response = await call_next(request)
         finally:
             duration_ms = round((time.perf_counter() - t0) * 1000.0, 2)
             clear_request_id()
+            clear_trace()
         response.headers["X-Request-Id"] = rid
+        response.headers["traceparent"] = traceparent
         # 探针不记访问日志（会被编排层高频轮询，刷屏）
         if request.url.path not in _PUBLIC_PATHS:
             _log.info("请求完成", extra={
                 "method": request.method, "path": request.url.path,
                 "status": response.status_code, "duration_ms": duration_ms,
+                "tenant_id": request.headers.get("X-Tenant-Id", ""),
             })
             # 指标：path 用**路由模板**（控制标签基数）
             metrics.observe_http(request.method, _route_template(request),
@@ -256,7 +269,7 @@ def create_app() -> FastAPI:
 
         默认不设 → 不校验（本地开发/评测不受影响）。对外暴露时**必须**设置。
         """
-        expected = os.environ.get("DD_API_KEY", "").strip()
+        expected = settings.api_key()
         if expected and request.url.path not in _PUBLIC_PATHS:
             if not _api_key_ok(_extract_api_key(request), expected):
                 _state.rejected_requests += 1
@@ -271,15 +284,15 @@ def create_app() -> FastAPI:
     # -------------------------------------------------- 探针
 
     @app.get("/healthz", tags=["probe"])
-    def healthz() -> Dict[str, Any]:
+    def healthz() -> dict[str, Any]:
         """存活探针：进程活着即 200，不触碰任何外部依赖。"""
-        return {"status": "ok", "service": os.environ.get("DD_SERVICE_NAME", "data-dog"),
+        return {"status": "ok", "service": settings.service_name(),
                 "version": _VERSION, "uptime_s": round(time.time() - _STARTED_AT, 1)}
 
     @app.get("/readyz", tags=["probe"])
     def readyz() -> JSONResponse:
         """就绪探针：探测数据库连通性。不通 → 503（编排层摘流量，但不重启）。"""
-        checks: Dict[str, Any] = {"database": _db_reachable()}
+        checks: dict[str, Any] = {"database": _db_reachable()}
         ready = bool(checks["database"]["ok"])
 
         # 迁移版本（库 schema 是否已到 head）
@@ -307,8 +320,7 @@ def create_app() -> FastAPI:
         """
         # 进程信息（每次抓取时刷新）
         metrics.info.labels(version=_VERSION).set(1)
-        metrics.auth_enabled.set(
-            1 if os.environ.get("DD_API_KEY", "").strip() else 0)
+        metrics.auth_enabled.set(1 if settings.api_key() else 0)
         metrics.resolver_ready.set(1 if _state.resolver is not None else 0)
         metrics.uptime_seconds.set(round(time.time() - _STARTED_AT, 1))
         try:
@@ -329,11 +341,11 @@ def create_app() -> FastAPI:
 
     @app.post("/v1/telemetry", tags=["ingest"])
     def ingest_telemetry(
-        payload: Dict[str, Any],
+        payload: dict[str, Any],
         response: Response,
-        x_tenant_id: Optional[str] = Header(default=None, alias="X-Tenant-Id"),
-        x_device_sn: Optional[str] = Header(default=None, alias="X-Device-Sn"),
-    ) -> Dict[str, Any]:
+        x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
+        x_device_sn: str | None = Header(default=None, alias="X-Device-Sn"),
+    ) -> dict[str, Any]:
         """接收一批原始日志，跑数据面，产出候选并落库。
 
         正文格式：
@@ -395,12 +407,12 @@ def create_app() -> FastAPI:
 
     @app.get("/v1/candidates", tags=["query"])
     def list_candidates(
-        x_tenant_id: Optional[str] = Header(default=None, alias="X-Tenant-Id"),
-        device_sn: Optional[str] = Query(default=None),
-        component_ref: Optional[str] = Query(default=None),
+        x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
+        device_sn: str | None = Query(default=None),
+        component_ref: str | None = Query(default=None),
         limit: int = Query(default=_DEFAULT_PAGE_SIZE, ge=1, le=_MAX_PAGE_SIZE),
         offset: int = Query(default=0, ge=0),
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         tenant = _tenant_required(x_tenant_id)
         with session_scope() as s:
             rows = repo.list_candidates(s, tenant_id=tenant, device_sn=device_sn,
@@ -413,10 +425,10 @@ def create_app() -> FastAPI:
 
     @app.get("/v1/alerts", tags=["query"])
     def list_alerts(
-        x_tenant_id: Optional[str] = Header(default=None, alias="X-Tenant-Id"),
+        x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
         limit: int = Query(default=_DEFAULT_PAGE_SIZE, ge=1, le=_MAX_PAGE_SIZE),
         offset: int = Query(default=0, ge=0),
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         tenant = _tenant_required(x_tenant_id)
         with session_scope() as s:
             rows = repo.list_alerts(s, tenant_id=tenant, limit=limit, offset=offset)
@@ -427,11 +439,11 @@ def create_app() -> FastAPI:
 
     @app.get("/v1/outbox", tags=["query"])
     def list_outbox(
-        x_tenant_id: Optional[str] = Header(default=None, alias="X-Tenant-Id"),
-        status: Optional[str] = Query(default=None),
+        x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
+        status: str | None = Query(default=None),
         limit: int = Query(default=_DEFAULT_PAGE_SIZE, ge=1, le=_MAX_PAGE_SIZE),
         offset: int = Query(default=0, ge=0),
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         tenant = _tenant_required(x_tenant_id)
         with session_scope() as s:
             rows = repo.list_outbox(s, tenant_id=tenant, status=status,
@@ -449,7 +461,7 @@ def _url_scheme() -> str:
     return url.split(":", 1)[0] if ":" in url else url
 
 
-def _stats_dict(result: Any) -> Dict[str, Any]:
+def _stats_dict(result: Any) -> dict[str, Any]:
     st = result.stats
     return {
         "ingested": st.ingested,

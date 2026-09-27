@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """统一失败语义（对齐架构 13.4）。
 
 工具/Agent 层所有失败都收敛到有限几种错误码，而不是散落的字符串。
@@ -7,7 +6,7 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Any, Dict
+from typing import Any
 
 
 class ToolErrorCode(str, Enum):
@@ -23,14 +22,14 @@ class ToolErrorCode(str, Enum):
     EXECUTION_FAILED = "execution_failed"    # 执行失败（兜底）
 
 
-def err(code: ToolErrorCode, detail: Any = None, *, reason: str = "") -> Dict[str, Any]:
+def err(code: ToolErrorCode, detail: Any = None, *, reason: str = "") -> dict[str, Any]:
     """构造统一错误结果。
 
     reason：可选的**细分原因**（比 error 码更具体，供指标/排查分类，如
     `rate_limited` / `bad_encoding` / `too_large`）。错误码本身保持有限闭集，
     细分原因挂在独立字段上，不污染错误码契约。
     """
-    d: Dict[str, Any] = {"ok": False, "error": code.value}
+    d: dict[str, Any] = {"ok": False, "error": code.value}
     if detail is not None:
         d["detail"] = detail
     if reason:
@@ -58,6 +57,6 @@ def http_status_for(code: ToolErrorCode) -> int:
     return _HTTP_STATUS.get(code, 500)
 
 
-def ok(data: Dict[str, Any]) -> Dict[str, Any]:
+def ok(data: dict[str, Any]) -> dict[str, Any]:
     """构造统一成功结果（只读查询返回时包装）。"""
     return {"ok": True, **data}

@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """对抗性（adversarial）评估 case 的回归测试。
 
 评测集 case（case_01~05）验证"正常输入下行为正确"；
@@ -15,8 +14,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from evals.cases import CASES, find_case
-from evals.runner import run_case, summarize
 from evals.run_evals import MockDecisionProvider
+from evals.runner import run_case, summarize
 
 
 def _case_ids():

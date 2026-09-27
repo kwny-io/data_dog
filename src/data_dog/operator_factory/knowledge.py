@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """P1：文档 Revision 管理 + VendorKnowledgePackage 结构化抽取。
 
 对齐架构：
@@ -20,8 +19,7 @@ import hashlib
 import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
-
+from typing import Any
 
 # ---------------------------------------------------------------- 文档 Revision
 
@@ -34,12 +32,12 @@ class DocumentRevision:
     language: str = "en"
     vendor: str = "unitree"
     product: str = "go2"
-    supersedes: Optional[str] = None   # 替代的旧 revision（可空）
+    supersedes: str | None = None   # 替代的旧 revision（可空）
     notes: str = ""
 
 
 def make_revision(path: Path, *, root: Path, vendor: str = "unitree",
-                  product: str = "go2", supersedes: Optional[str] = None) -> DocumentRevision:
+                  product: str = "go2", supersedes: str | None = None) -> DocumentRevision:
     data = path.read_bytes()
     digest = hashlib.sha256(data).hexdigest()
     rel = str(path.relative_to(root)).replace("\\", "/")
@@ -59,7 +57,7 @@ def make_revision(path: Path, *, root: Path, vendor: str = "unitree",
 class FieldSpec:
     name: str
     type: str                    # 来自 IDL
-    unit: Optional[str] = None
+    unit: str | None = None
     source: str = ""             # 来源文档（含 revision）
     locator: str = ""            # 定位（行号/小节）
     confidence: str = "verified"  # verified | inferred | unconfirmed
@@ -103,13 +101,13 @@ class VendorKnowledgePackage:
     """受约束的结构化知识包（对齐 §8.2）。"""
     vendor: str
     product: str
-    revisions: List[str] = field(default_factory=list)          # 引用的 revision_id
-    fields: List[FieldSpec] = field(default_factory=list)
-    numeric_specs: List[NumericSpec] = field(default_factory=list)
-    error_codes: List[ErrorCode] = field(default_factory=list)
-    unconfirmed: List[KnowledgeItem] = field(default_factory=list)
+    revisions: list[str] = field(default_factory=list)          # 引用的 revision_id
+    fields: list[FieldSpec] = field(default_factory=list)
+    numeric_specs: list[NumericSpec] = field(default_factory=list)
+    error_codes: list[ErrorCode] = field(default_factory=list)
+    unconfirmed: list[KnowledgeItem] = field(default_factory=list)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
@@ -170,9 +168,9 @@ def _line_of(text: str, needle: str) -> int:
     return 0
 
 
-def extract_fields(idl_text: str, revision: DocumentRevision) -> List[FieldSpec]:
+def extract_fields(idl_text: str, revision: DocumentRevision) -> list[FieldSpec]:
     """从清洗后的 IDL 字段表抽字段规格。单位来自命名约定 → confidence=inferred。"""
-    out: List[FieldSpec] = []
+    out: list[FieldSpec] = []
     for line in idl_text.splitlines():
         m = _IDL_FIELD.match(line)
         if not m:
@@ -188,9 +186,9 @@ def extract_fields(idl_text: str, revision: DocumentRevision) -> List[FieldSpec]
     return out
 
 
-def extract_numeric_specs(doc_text: str, revision: DocumentRevision) -> List[NumericSpec]:
+def extract_numeric_specs(doc_text: str, revision: DocumentRevision) -> list[NumericSpec]:
     """从手册/诊断文本抽明写的数值规格（带行号定位）。只抽**能定位**的，不推断阈值。"""
-    out: List[NumericSpec] = []
+    out: list[NumericSpec] = []
     seen: set[tuple] = set()
     for i, line in enumerate(doc_text.splitlines(), 1):
         if _NOISE_LINE.search(line):
@@ -232,7 +230,7 @@ def _semantic_key(low: str, unit: str) -> str:
 
 
 def extract_protocol_header(text: str, revision: DocumentRevision
-                            ) -> tuple[List[NumericSpec], List[ErrorCode]]:
+                            ) -> tuple[list[NumericSpec], list[ErrorCode]]:
     """从厂商 C/C++ 协议头（.h）的注释里抽**权威规格**：
 
       - 温度保护阈值（如 GO-M8010-6：'90°C时触发温度保护'）→ NumericSpec(verified)
@@ -240,8 +238,8 @@ def extract_protocol_header(text: str, revision: DocumentRevision
 
     这是把"项目假设"升级为"厂商事实"的权威来源（官方开源仓库、BSD-3 许可）。
     """
-    specs: List[NumericSpec] = []
-    codes: List[ErrorCode] = []
+    specs: list[NumericSpec] = []
+    codes: list[ErrorCode] = []
     src = f"{revision.source}@{revision.revision_id}"
     for i, line in enumerate(text.splitlines(), 1):
         # 温度保护阈值（中/英文两种语序）
@@ -313,7 +311,7 @@ def build_knowledge_package(
     return pkg
 
 
-def flag_unconfirmed(pkg: VendorKnowledgePackage, keys: List[str]) -> None:
+def flag_unconfirmed(pkg: VendorKnowledgePackage, keys: list[str]) -> None:
     """显式登记"文档里没有、不能当厂商事实"的条目（如电机 75/90°C 阈值）。
 
     不生成、不编造，只如实标注为待确认——供下游决定用 assumptions 还是转人工。

@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """演示场景：用**真实 P2 数据面**从原始日志产出候选（供 UI / 回归测试复用）。
 
 为什么要这个模块
@@ -25,7 +24,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from ..schemas.events import CandidateEvent
 from .p2_demo import _detector_config
@@ -70,15 +69,15 @@ class Scenario:
     label: str
     component: str
     note: str
-    events: List[Dict[str, Any]]
-    keywords: List[str] = field(default_factory=list)
-    baseline_events: List[Dict[str, Any]] = field(default_factory=list)
+    events: list[dict[str, Any]]
+    keywords: list[str] = field(default_factory=list)
+    baseline_events: list[dict[str, Any]] = field(default_factory=list)
     expect_candidate: bool = True
     expect_severity: str = ""
 
 
 def match_scenarios(query: str,
-                    scenarios: Optional[List[Scenario]] = None) -> List[Scenario]:
+                    scenarios: list[Scenario] | None = None) -> list[Scenario]:
     """关键字检索：把用户描述的问题匹配到场景（空查询返回全部）。
 
     匹配 label + keywords + component，大小写不敏感，任一关键词命中即算匹配。
@@ -100,9 +99,9 @@ def match_scenarios(query: str,
 class ScenarioRun:
     """一个场景跑完的结果。"""
     scenario: Scenario
-    candidates: List[CandidateEvent]
-    telemetry_by_component: Dict[str, Dict[str, Any]]
-    result: Optional[DataPlaneResult] = None
+    candidates: list[CandidateEvent]
+    telemetry_by_component: dict[str, dict[str, Any]]
+    result: DataPlaneResult | None = None
 
     @property
     def short_name(self) -> str:
@@ -149,7 +148,7 @@ class ScenarioRun:
         return "各项读数都在厂商文档给出的规则范围内，没有触发任何检测规则。"
 
     @property
-    def stats(self) -> Dict[str, Any]:
+    def stats(self) -> dict[str, Any]:
         if self.result is None:
             return {}
         st = self.result.stats
@@ -165,7 +164,7 @@ class ScenarioRun:
 
 def _raw(event_id: str, *, occurred_at: str, temperature: int, current: int,
          component: str, firmware: str = "3.2.1", mode: int = 0,
-         payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+         payload: dict[str, Any] | None = None) -> dict[str, Any]:
     """构造一条原始日志（RawLogEnvelope 的输入形态）。
 
     `payload` 可覆盖默认的电机字段载荷——用于演示"字段与算子不匹配"的情形。
@@ -187,7 +186,7 @@ def _raw(event_id: str, *, occurred_at: str, temperature: int, current: int,
     }
 
 
-def _build_scenarios() -> List[Scenario]:
+def _build_scenarios() -> list[Scenario]:
     hip = "joint_motor.front_left_hip"
     knee = "joint_motor.front_left_knee"
     rhip = "joint_motor.front_right_hip"
@@ -284,14 +283,14 @@ def _build_scenarios() -> List[Scenario]:
     ]
 
 
-SCENARIOS: List[Scenario] = _build_scenarios()
+SCENARIOS: list[Scenario] = _build_scenarios()
 
 
-def _telemetry_entry(component: str, metrics: Dict[str, Any],
-                     baseline: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+def _telemetry_entry(component: str, metrics: dict[str, Any],
+                     baseline: dict[str, Any] | None) -> dict[str, Any]:
     """把 P2 归一化 metrics 转成 Agent 证据源认识的窗口查询结果。"""
     std = {_STANDARD_NAME.get(k, k): float(v) for k, v in metrics.items()}
-    entry: Dict[str, Any] = {
+    entry: dict[str, Any] = {
         "device_sn": DEMO_DEVICE_SN,
         "component": component,
         "metrics": std,
@@ -315,7 +314,7 @@ def run_scenario(scenario: Scenario, *,
 
     # 基线窗只用来取参照值，**不参与候选**：因此用独立的 DataPlane 跑，
     # 否则它的命中会累积进同一个 CandidateBuilder，基线也被当成异常。
-    baseline_metrics: Dict[str, Dict[str, Any]] = {}
+    baseline_metrics: dict[str, dict[str, Any]] = {}
     if scenario.baseline_events:
         base_plane = DataPlane(resolver)
         base_res = base_plane.process_batch(scenario.baseline_events, auth)
@@ -326,7 +325,7 @@ def run_scenario(scenario: Scenario, *,
     plane = DataPlane(resolver)
     result = plane.process_batch(scenario.events, auth)
 
-    telemetry: Dict[str, Dict[str, Any]] = {}
+    telemetry: dict[str, dict[str, Any]] = {}
     for ev in result.normalized:
         ref = f"{ev.component_type}.{ev.component_instance}"
         telemetry[ref] = _telemetry_entry(ref, ev.metrics, baseline_metrics.get(ref))
@@ -335,6 +334,6 @@ def run_scenario(scenario: Scenario, *,
                        telemetry_by_component=telemetry, result=result)
 
 
-def run_all(scenarios: Optional[List[Scenario]] = None) -> List[ScenarioRun]:
+def run_all(scenarios: list[Scenario] | None = None) -> list[ScenarioRun]:
     """跑全部场景（顺序确定，便于 UI 与回归测试）。"""
     return [run_scenario(s) for s in (scenarios if scenarios is not None else SCENARIOS)]

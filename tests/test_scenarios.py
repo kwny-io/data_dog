@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """演示场景回归测试：锁定"候选由 P2 真实产出、且与证据同源"。
 
 为什么需要它
@@ -17,13 +16,15 @@ import pytest
 
 from data_dog.agent.loop import AgentLoop
 from data_dog.data_plane.scenarios import (
-    DEMO_DEVICE_SN, SCENARIOS, match_scenarios, run_all,
+    DEMO_DEVICE_SN,
+    SCENARIOS,
+    match_scenarios,
+    run_all,
 )
 from data_dog.e2e.bridge import CandidateEvidenceBridge
 from data_dog.evidence.store import ALLOWED_COMPONENTS
 from data_dog.providers.offline_demo import DeterministicEvidenceProvider
 from data_dog.tools.investigation import InvestigationTools
-
 
 # ---------------------------------------------------------------- 问题检索
 

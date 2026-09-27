@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """A3：提出「发布 / 回滚 / 上报」意图（架构 13.2 的 write 类工具，最小可跑版）。
 
 架构要求 Agent 不能直接干副作用（发布、上报 SaaS），而应**提出意图**，
@@ -14,10 +13,11 @@
 """
 from __future__ import annotations
 
+import builtins
 import hashlib
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, List
+from typing import Any
 
 from .errors import ToolErrorCode, err, ok
 
@@ -27,7 +27,7 @@ class OutboxItem:
     """outbox 里的一条待处理意图。"""
     idempotency_key: str      # 幂等键：同一意图只收一次
     op: str                   # release / rollback / alert_report
-    payload: Dict[str, Any]
+    payload: dict[str, Any]
     created_at: float = field(default_factory=time.time)
     receipt_id: str = field(default="")
 
@@ -45,9 +45,9 @@ class ProposeOutbox:
     """
 
     def __init__(self):
-        self._items: Dict[str, OutboxItem] = {}
+        self._items: dict[str, OutboxItem] = {}
 
-    def put(self, op: str, idempotency_key: str, payload: Dict[str, Any]) -> OutboxItem:
+    def put(self, op: str, idempotency_key: str, payload: dict[str, Any]) -> OutboxItem:
         """写入一条意图。同 idempotency_key 已存在 → 直接返回已有条目（幂等）。"""
         if idempotency_key in self._items:
             return self._items[idempotency_key]
@@ -55,7 +55,7 @@ class ProposeOutbox:
         self._items[idempotency_key] = item
         return item
 
-    def list(self) -> List[Dict[str, Any]]:
+    def list(self) -> builtins.list[dict[str, Any]]:
         return [item.__dict__ for item in self._items.values()]
 
     def __len__(self) -> int:
@@ -70,7 +70,7 @@ def get_outbox() -> ProposeOutbox:
     return _OUTBOX
 
 
-def _receipt(item: OutboxItem) -> Dict[str, Any]:
+def _receipt(item: OutboxItem) -> dict[str, Any]:
     """最小的、可审计的回执：确认意图已成功落库。"""
     return {
         "op": item.op,
@@ -83,7 +83,7 @@ def _receipt(item: OutboxItem) -> Dict[str, Any]:
 
 def propose_operator_release(
     artifact_ref: str, target_stage: str, reason: str, outbox: ProposeOutbox | None = None,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """提出：把一个算子制品发布到某阶段（影子/灰度/全量）。"""
     box = _OUTBOX if outbox is None else outbox
     if not artifact_ref or not target_stage:
@@ -100,7 +100,7 @@ def propose_operator_release(
 
 def propose_operator_rollback(
     release_ref: str, reason: str, outbox: ProposeOutbox | None = None,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """提出：回滚某个已发布的制品（恢复前一签名版本）。"""
     box = _OUTBOX if outbox is None else outbox
     if not release_ref:
@@ -118,7 +118,7 @@ def propose_operator_rollback(
 def propose_alert_report(
     investigation_ref: str, summary: str, severity: str,
     outbox: ProposeOutbox | None = None,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """提出：把一份调查结论作为正式事件上报（进入 SaaS 生命周期前的一步）。"""
     box = _OUTBOX if outbox is None else outbox
     if not investigation_ref:

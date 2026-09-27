@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """多事件确定性关联（对齐架构 14.1）—— 雏形。
 
 架构要求：关联不能用文本相似度瞎猜，而应基于结构化的关联键。
@@ -13,13 +12,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Tuple
 
 from .schemas.events import CandidateEvent
 
-
 # 信号族：把相近的异常信号归到一类（结构化映射，不是文本相似度）
-SIGNAL_FAMILY: Dict[str, str] = {
+SIGNAL_FAMILY: dict[str, str] = {
     "temperature_rising_under_normalized_load": "thermal",
     "temperature_spike": "thermal",
     "current_high": "electrical",
@@ -35,7 +32,7 @@ def signal_family(signal: str) -> str:
 
 
 # ---- A2 拓扑维度：部件所属电源域（对齐架构 14.1“同一电源域/总线”）----
-COMPONENT_POWER_DOMAIN: Dict[str, str] = {
+COMPONENT_POWER_DOMAIN: dict[str, str] = {
     "battery.main": "power_bus",
     "controller.main": "power_bus",
     "joint_motor.front_left_hip": "power_bus",
@@ -60,12 +57,12 @@ class CorrelationGroup:
     family: str
     window_start: str
     window_end: str
-    candidate_ids: List[str] = field(default_factory=list)
-    component_refs: List[str] = field(default_factory=list)
+    candidate_ids: list[str] = field(default_factory=list)
+    component_refs: list[str] = field(default_factory=list)
     power_domain: str = ""            # A2 拓扑维度：所属电源域
-    linked_group_ids: List[str] = field(default_factory=list)  # 同域其他组
+    linked_group_ids: list[str] = field(default_factory=list)  # 同域其他组
 
-    def to_dict(self) -> Dict:
+    def to_dict(self) -> dict:
         return {
             "group_id": self.group_id,
             "device_sn": self.device_sn,
@@ -85,9 +82,9 @@ class Correlator:
     def __init__(self, window_tolerance: str = "00:05"):
         self.window_tolerance = window_tolerance  # 雏形里暂存，未做复杂窗口重叠计算
 
-    def correlate(self, candidates: List[CandidateEvent]) -> List[CorrelationGroup]:
+    def correlate(self, candidates: list[CandidateEvent]) -> list[CorrelationGroup]:
         # 第一遍：按 设备 + 时间窗 + 信号族 归并基础组
-        buckets: Dict[Tuple[str, str, str, str], CorrelationGroup] = {}
+        buckets: dict[tuple[str, str, str, str], CorrelationGroup] = {}
         for c in candidates:
             fam = signal_family(c.signal)
             key = (c.device_sn, fam, c.window_start, c.window_end)

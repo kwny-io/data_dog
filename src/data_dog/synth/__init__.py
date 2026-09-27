@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """合成遥测数据生成器（Go2 物理参数 + 故障注入 + ground truth）。
 
 目标：产出一批"物理自洽、带真实标签"的遥测时间序列，喂给 data_dog 的 Agent 调查，
@@ -21,13 +20,13 @@
 每条样本都带 ground truth：一段(部件, 时间窗, 故障类型) 的标签，供评估对比。
 """
 from .generator import (
+    DEFAULT_PARAMS,
+    FAULT_DEFS,
     Go2MotorModel,
     SynthGenConfig,
     SynthSample,
     generate_sample,
     synthesize_batch,
-    DEFAULT_PARAMS,
-    FAULT_DEFS,
 )
 
 __all__ = [

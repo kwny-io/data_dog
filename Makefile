@@ -4,11 +4,14 @@
 PY ?= .venv/Scripts/python.exe
 PORT ?= 8000
 
-.PHONY: help install test serve probe ingest e2e ui up down logs ps health clean
+.PHONY: help install test lint typecheck cov serve probe ingest e2e ui up down logs ps health clean
 
 help:            ## 显示所有命令
 	@echo "make install  安装依赖(含服务)"
 	@echo "make test     跑全量测试"
+	@echo "make lint     ruff 静态检查"
+	@echo "make typecheck mypy 类型检查"
+	@echo "make cov      带覆盖率跑测试"
 	@echo "make serve    本机起服务(不用 Docker)"
 	@echo "make probe    探存活/就绪/指标"
 	@echo "make ingest   发一条演示日志(过温)"
@@ -23,6 +26,15 @@ install:         ## 安装依赖
 
 test:            ## 全量测试
 	$(PY) -m pytest -q
+
+lint:            ## ruff 静态检查
+	$(PY) -m ruff check src tests
+
+typecheck:       ## mypy 类型检查
+	$(PY) -m mypy src
+
+cov:             ## 带覆盖率跑测试
+	$(PY) -m pytest -q --cov=src/data_dog --cov-report=term-missing
 
 serve:           ## 本机起服务
 	$(PY) -m data_dog.service

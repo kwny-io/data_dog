@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """P2 接入网关（对齐架构 §9.1）。
 
 职责：
@@ -14,7 +13,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional, Tuple
+from typing import Any
 
 from ..errors import ToolErrorCode, err
 from .events import RawLogEnvelope
@@ -45,7 +44,7 @@ class GatewayStats:
     accepted: int = 0
     rejected: int = 0
     rate_limited: int = 0
-    by_reason: Dict[str, int] = field(default_factory=dict)
+    by_reason: dict[str, int] = field(default_factory=dict)
 
     def _bump(self, reason: str) -> None:
         self.by_reason[reason] = self.by_reason.get(reason, 0) + 1
@@ -60,12 +59,12 @@ class TelemetryGateway:
     def __init__(self, *, rate_per_sec: float = 200.0, burst: int = 400):
         self.rate_per_sec = rate_per_sec
         self.burst = burst
-        self._buckets: Dict[str, _Bucket] = {}
+        self._buckets: dict[str, _Bucket] = {}
         self.stats = GatewayStats()
         self._clock = time.monotonic
 
     # -- 认证（桩）：真实部署由网关注入；这里演示"正文身份一律不作数" --
-    def authenticate(self, auth: Optional[Dict[str, Any]]) -> Optional[AuthenticatedCaller]:
+    def authenticate(self, auth: dict[str, Any] | None) -> AuthenticatedCaller | None:
         if not auth:
             return None
         tenant = auth.get("tenant_id")
@@ -90,7 +89,7 @@ class TelemetryGateway:
         b.tokens -= 1
         return True
 
-    def snapshot(self) -> Dict[str, Any]:
+    def snapshot(self) -> dict[str, Any]:
         """限流状态快照（供 /metrics 与排查使用）。"""
         return {
             "rate_per_sec": self.rate_per_sec,
@@ -108,13 +107,13 @@ class TelemetryGateway:
 
     # -- 统一拒绝：计数 + 带上细分原因（供上层指标分类）--
     def _reject(self, reason: str, code: ToolErrorCode, detail: str
-                ) -> Tuple[bool, Dict[str, Any]]:
+                ) -> tuple[bool, dict[str, Any]]:
         self.stats.rejected += 1
         self.stats._bump(reason)
         return False, err(code, detail, reason=reason)
 
-    def ingest(self, raw: Dict[str, Any], auth: Optional[Dict[str, Any]]
-               ) -> Tuple[bool, Any]:
+    def ingest(self, raw: dict[str, Any], auth: dict[str, Any] | None
+               ) -> tuple[bool, Any]:
         """接收一条原始日志。返回 (ok, event_or_error)。
 
         注意：raw 里**即使带 tenant_id/device_sn，也一律被认证身份覆盖**。

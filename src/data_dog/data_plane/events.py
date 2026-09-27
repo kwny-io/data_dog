@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """P2 标准事件模型（对齐架构 §12.1 / §12.2）。
 
 - RawLogEnvelope：网关接入的原始日志信封。身份字段（tenant_id/device_sn）**只由网关注入**，
@@ -10,7 +9,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 
 @dataclass
@@ -30,9 +29,9 @@ class RawLogEnvelope:
     payload_digest: str = ""        # 正文 sha256
     protocol_version: str = ""
     component_hint: str = ""        # 非权威提示
-    payload_inline: Optional[str] = None   # 小载荷可直接内联（大载荷走 payload_ref）
+    payload_inline: str | None = None   # 小载荷可直接内联（大载荷走 payload_ref）
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
@@ -45,11 +44,11 @@ class NormalizedTelemetryEvent:
     occurred_at: str
     component_type: str
     component_instance: str
-    metrics: Dict[str, Any] = field(default_factory=dict)
-    status_codes: List[str] = field(default_factory=list)
+    metrics: dict[str, Any] = field(default_factory=dict)
+    status_codes: list[str] = field(default_factory=list)
     operating_condition: str = ""
     parse_confidence: float = 1.0
-    missing_fields: List[str] = field(default_factory=list)
+    missing_fields: list[str] = field(default_factory=list)
     clock_skew_ms: int = 0
     operator_id: str = ""
     operator_version: str = ""
@@ -60,5 +59,5 @@ class NormalizedTelemetryEvent:
     def component_ref(self) -> str:
         return f"{self.component_type}.{self.component_instance}"
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return asdict(self)

@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """A7：RAG 知识检索 —— 经 chroma-mcp 查询真实厂商知识库。
 
 连接方式与 mcp_context.py 同款：常驻 stdio MCP 客户端（一次 spawn 多次查询，
@@ -14,10 +13,11 @@ import atexit
 import json
 import os
 import subprocess
-import sys
 import threading
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
+
+from . import settings
 
 DEFAULT_CHROMA_EXE = Path(r"D:\.venv-chroma\Scripts\chroma-mcp.exe")
 REQUEST_TIMEOUT_S = 60.0
@@ -28,12 +28,12 @@ class KnowledgeRetrievalError(RuntimeError):
 
 
 def _chroma_exe() -> Path:
-    override = os.environ.get("DD_CHROMA_MCP_EXE", "").strip()
+    override = settings.chroma_mcp_exe()
     return Path(override) if override else DEFAULT_CHROMA_EXE
 
 
 def _collection() -> str:
-    return os.environ.get("DD_KB_COLLECTION", "unitree_go2")
+    return settings.kb_collection()
 
 
 class ChromaKnowledgeClient:
@@ -42,7 +42,7 @@ class ChromaKnowledgeClient:
     def __init__(self, exe: Path, data_dir: Path):
         self.exe = exe
         self.data_dir = data_dir
-        self.proc: Optional[subprocess.Popen] = None
+        self.proc: subprocess.Popen | None = None
         self._next_id = 1
 
     def is_alive(self) -> bool:
@@ -95,12 +95,12 @@ class ChromaKnowledgeClient:
         self._send({"jsonrpc": "2.0", "method": "notifications/initialized"})
 
     # ---- JSON-RPC 基元（与 mcp_context 同构）----
-    def _send(self, msg: Dict[str, Any]) -> None:
+    def _send(self, msg: dict[str, Any]) -> None:
         assert self.proc is not None and self.proc.stdin is not None
         self.proc.stdin.write(json.dumps(msg, ensure_ascii=False) + "\n")
         self.proc.stdin.flush()
 
-    def _recv(self, req_id: int) -> Dict[str, Any]:
+    def _recv(self, req_id: int) -> dict[str, Any]:
         assert self.proc is not None and self.proc.stdout is not None
         while True:
             line = self.proc.stdout.readline()
@@ -118,7 +118,7 @@ class ChromaKnowledgeClient:
                     raise KnowledgeRetrievalError(f"JSON-RPC 错误: {resp['error']}")
                 return resp["result"]
 
-    def _request(self, method: str, params: Dict[str, Any]) -> Dict[str, Any]:
+    def _request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         req_id = self._next_id
         self._next_id += 1
         self._send({"jsonrpc": "2.0", "id": req_id, "method": method, "params": params})
@@ -131,7 +131,7 @@ class ChromaKnowledgeClient:
             watchdog.cancel()
 
     # ---- 业务 ----
-    def query(self, question: str, n_results: int = 3) -> List[Dict[str, Any]]:
+    def query(self, question: str, n_results: int = 3) -> list[dict[str, Any]]:
         if not self.is_alive():
             self.close()
             self._start()
@@ -155,7 +155,7 @@ class ChromaKnowledgeClient:
         docs = payload.get("documents") or [[]]
         dists = payload.get("distances") or [[]]
         metas = payload.get("metadatas") or [[]]
-        hits: List[Dict[str, Any]] = []
+        hits: list[dict[str, Any]] = []
         for i, doc in enumerate(docs[0]):
             meta = (metas[0][i] if metas[0] and i < len(metas[0]) else {}) or {}
             # 来源优先取 metadata；ingest 未存 metadata 时从文本首行 [来源: x] 提取
@@ -171,7 +171,7 @@ class ChromaKnowledgeClient:
         return hits
 
 
-_PERSISTENT: Optional[ChromaKnowledgeClient] = None
+_PERSISTENT: ChromaKnowledgeClient | None = None
 
 
 def close_knowledge_server() -> None:
@@ -184,7 +184,7 @@ def close_knowledge_server() -> None:
 atexit.register(close_knowledge_server)
 
 
-def query_knowledge(question: str, n_results: int = 3) -> List[Dict[str, Any]]:
+def query_knowledge(question: str, n_results: int = 3) -> list[dict[str, Any]]:
     """查一次 RAG 知识库；常驻复用，坏了自动重建重试一次。"""
     global _PERSISTENT
     client = _PERSISTENT

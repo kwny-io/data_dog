@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Evidence Ref 解析协议（对齐架构 §5 术语表 / §12 / §5「证据优先」原则）。
 
 ## 问题（缺口 E-8）
@@ -43,8 +42,9 @@ from __future__ import annotations
 import hashlib
 import json as _json
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any
 
 from ..errors import ToolErrorCode, err, ok
 from .store import ALLOWED_COMPONENTS, TELEMETRY
@@ -69,14 +69,14 @@ class ParsedRef:
     """解析后的结构化引用（不可变）。"""
     scheme: str
     authority: str
-    path: List[str] = field(default_factory=list)
+    path: list[str] = field(default_factory=list)
 
     @property
     def raw(self) -> str:
         p = "".join(f"/{seg}" for seg in self.path)
         return f"{self.scheme}://{self.authority}{p}"
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {"scheme": self.scheme, "authority": self.authority,
                 "path": list(self.path)}
 
@@ -125,7 +125,7 @@ def digest(payload: Any) -> str:
 
 # 数据源回调签名：(authority, path) -> (found: bool, payload: Any)
 # found=False → resolve() 收敛为 not_found；抛 PermissionError → denied。
-SourceFn = Callable[[str, List[str]], Tuple[bool, Any]]
+SourceFn = Callable[[str, list[str]], tuple[bool, Any]]
 
 
 class EvidenceResolver:
@@ -137,12 +137,12 @@ class EvidenceResolver:
         clock: 注入时钟（秒级 epoch），便于测试过期路径，不依赖真实时间。
     """
 
-    def __init__(self, sources: Optional[Dict[str, SourceFn]] = None,
+    def __init__(self, sources: dict[str, SourceFn] | None = None,
                  *, ttl_seconds: int = 3600,
-                 clock: Optional[Callable[[], float]] = None):
+                 clock: Callable[[], float] | None = None):
         # 注意：用 `is not None` 而非 `or`——传入空 dict 是"显式不要任何源"，
         # 应返回 unavailable，而不是悄悄回退到内置源。
-        self._sources: Dict[str, SourceFn] = sources if sources is not None else {
+        self._sources: dict[str, SourceFn] = sources if sources is not None else {
             "metricwin": _metricwin_source,
             "rawlog": _rawlog_source,
             "vendordoc": _vendordoc_source,
@@ -151,8 +151,8 @@ class EvidenceResolver:
         self.ttl_seconds = ttl_seconds
         self._clock = clock or (lambda: 0.0)
 
-    def resolve(self, raw: str, *, issued_at: Optional[float] = None,
-                expected_digest: Optional[str] = None) -> Dict[str, Any]:
+    def resolve(self, raw: str, *, issued_at: float | None = None,
+                expected_digest: str | None = None) -> dict[str, Any]:
         """解析单个引用，返回统一成功/失败结构。
 
         Args:
@@ -194,7 +194,7 @@ class EvidenceResolver:
 
         return ok({"ref": ref.to_dict(), "source": ref.scheme, "payload": payload})
 
-    def resolve_all(self, refs: List[str], **kw: Any) -> Dict[str, Any]:
+    def resolve_all(self, refs: list[str], **kw: Any) -> dict[str, Any]:
         """批量解析：保序，逐条给结果（一条失败不影响其他条）。"""
         out = [self.resolve(r, **kw) for r in refs]
         return ok({"results": out,
@@ -206,7 +206,7 @@ class EvidenceResolver:
 # 内置 mock 数据源（可插拔：真实部署替换这些函数即可，解析/校验逻辑不变）
 # --------------------------------------------------------------------------- #
 
-def _metricwin_source(authority: str, path: List[str]) -> Tuple[bool, Any]:
+def _metricwin_source(authority: str, path: list[str]) -> tuple[bool, Any]:
     """`metricwin://<candidate_id>` —— 候选指标窗口证据。
 
     authority 是**候选 id**（与 `CandidateBuilder` 产出的真实格式一致）。
@@ -222,7 +222,7 @@ def _metricwin_source(authority: str, path: List[str]) -> Tuple[bool, Any]:
                   "note": "mock 源未建立候选索引；接真实 Candidate Store 后返回指标窗口"}
 
 
-def _rawlog_source(authority: str, path: List[str]) -> Tuple[bool, Any]:
+def _rawlog_source(authority: str, path: list[str]) -> tuple[bool, Any]:
     """`rawlog://<event_id>` —— 原始日志正文（外置）最小摘要。"""
     known = {"opaque-ref", "e1", "e2", "e3", "e4"}
     if authority not in known:
@@ -231,7 +231,7 @@ def _rawlog_source(authority: str, path: List[str]) -> Tuple[bool, Any]:
                   "note": "原始日志正文外置（mock 摘要）"}
 
 
-def _vendordoc_source(authority: str, path: List[str]) -> Tuple[bool, Any]:
+def _vendordoc_source(authority: str, path: list[str]) -> tuple[bool, Any]:
     """`vendordoc://<doc_id>` —— 厂商文档条目。"""
     docs = {
         "motor-x2-thermal": {
@@ -247,7 +247,7 @@ def _vendordoc_source(authority: str, path: List[str]) -> Tuple[bool, Any]:
     return True, docs[authority]
 
 
-def _replay_source(authority: str, path: List[str]) -> Tuple[bool, Any]:
+def _replay_source(authority: str, path: list[str]) -> tuple[bool, Any]:
     """`replay://<run_id>` —— 回放结果摘要。"""
     if authority != "latest":
         return False, None
@@ -274,14 +274,14 @@ def default_resolver(**kw: Any) -> EvidenceResolver:
 
 # 供测试/演示：把遥测窗口查询能力暴露成一个可注入的源，
 # 便于演示"越权 → denied"而非只能拿到占位。
-def make_telemetry_source(telemetry: Optional[Dict[str, Any]] = None) -> SourceFn:
+def make_telemetry_source(telemetry: dict[str, Any] | None = None) -> SourceFn:
     """构造一个按 `metricwin://<component>/<start>~<end>` 取真实遥测的源。
 
     部件不在白名单 → PermissionError（→ denied）；窗口无数据 → not_found。
     """
     data = telemetry if telemetry is not None else TELEMETRY
 
-    def _src(authority: str, path: List[str]) -> Tuple[bool, Any]:
+    def _src(authority: str, path: list[str]) -> tuple[bool, Any]:
         component = authority
         if component not in ALLOWED_COMPONENTS:
             raise PermissionError(component)
@@ -294,7 +294,7 @@ def make_telemetry_source(telemetry: Optional[Dict[str, Any]] = None) -> SourceF
     return _src
 
 
-def make_metricwin_source(telemetry: Optional[Dict[str, Any]] = None) -> SourceFn:
+def make_metricwin_source(telemetry: dict[str, Any] | None = None) -> SourceFn:
     """别名：语义上更贴近 scheme 名的构造器（供测试/演示注入）。
 
     与 `make_telemetry_source` 等价，保留两个名字是为了让调用点读起来

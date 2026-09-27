@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """A3：提出「发布 / 回滚 / 上报」意图（架构 13.2 write 类工具的最小落地）。
 
 验证：
@@ -95,7 +94,6 @@ class FakeProvider:
 
 
 def test_agent_auto_proposes_alert_for_review_report():
-    from data_dog.reporter import get_outbox
     # 用独立 outbox 隔离，避免污染全局
     box = ProposeOutbox()
     agent = AgentLoop(FakeProvider("needs_human_review"), InvestigationTools(EvidenceStore()),

@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """离线确定性 Provider：结论由**真实证据数据**推导，可离线跑、可测试。
 
 用途：没有模型 key 时让演示/回归测试能跑完整调查链路（AgentLoop → 工具 → 报告），
@@ -10,7 +9,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from ..evidence.store import RECENT_CHANGES
 
@@ -26,11 +25,11 @@ class DeterministicEvidenceProvider:
 
     def __init__(self, since: str = "2026-08-10"):
         self.n = 0
-        self.cand: Dict[str, Any] = {}
+        self.cand: dict[str, Any] = {}
         self.since = since
 
     # ---- 从消息里取出候选（认 component_ref，避免把工具结果当成候选）----
-    def _grab(self, messages: List[Any]) -> None:
+    def _grab(self, messages: list[Any]) -> None:
         for m in messages:
             content = m.get("content") if isinstance(m, dict) else getattr(m, "content", "")
             if not content or "{" not in content:
@@ -43,7 +42,7 @@ class DeterministicEvidenceProvider:
                 self.cand = obj
 
     def chat(self, messages, tools=None, model=None, temperature=0.2,
-             max_tokens=2048, **kw) -> Dict[str, Any]:
+             max_tokens=2048, **kw) -> dict[str, Any]:
         self._grab(messages)
         comp = self.cand.get("component_ref", "joint_motor.front_left_hip")
         ws = self.cand.get("window_start", "10:00")
@@ -68,7 +67,7 @@ class DeterministicEvidenceProvider:
             ensure_ascii=False)}
 
     @staticmethod
-    def _conclusion(comp: str, severity: str) -> Dict[str, Any]:
+    def _conclusion(comp: str, severity: str) -> dict[str, Any]:
         changes = RECENT_CHANGES.get(comp, [])
         if severity != "critical":
             return {

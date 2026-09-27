@@ -1,14 +1,12 @@
-# -*- coding: utf-8 -*-
 """data_dog：机器狗及其他具身设备遥测的 Agentic 故障调查平台。"""
 __version__ = "0.1.0"
 
-from .providers import Provider
-from .schemas import CandidateEvent, InvestigationReport
 from .agent.loop import AgentLoop
-from .evidence.store import EvidenceStore
-from .tools.investigation import InvestigationTools
 from .correlation import Correlator, explain_episode
 from .errors import ToolErrorCode
+from .evidence.store import EvidenceStore
+from .observability import CallStat, UsageTracker, fmt_cost, lookup_price
+from .providers import Provider
 from .reporter import (
     ProposeOutbox,
     get_outbox,
@@ -16,16 +14,17 @@ from .reporter import (
     propose_operator_release,
     propose_operator_rollback,
 )
+from .schemas import CandidateEvent, InvestigationReport
 from .synth import (
+    DEFAULT_PARAMS,
+    FAULT_DEFS,
     Go2MotorModel,
     SynthGenConfig,
     SynthSample,
     generate_sample,
     synthesize_batch,
-    DEFAULT_PARAMS,
-    FAULT_DEFS,
 )
-from .observability import UsageTracker, CallStat, lookup_price, fmt_cost
+from .tools.investigation import InvestigationTools
 
 __all__ = [
     "__version__",

@@ -34,9 +34,19 @@ target_metadata = Base.metadata
 
 
 def _url() -> str:
-    """连接串：优先 alembic -x db_url=... 覆盖，否则用应用同源配置。"""
+    """连接串优先级：`-x db_url=...` > 显式注入的 `sqlalchemy.url` > 应用同源配置。
+
+    CLI 直接跑 alembic 时，ini 里没有 `sqlalchemy.url`（刻意留空），于是回落到
+    `DD_DATABASE_URL`——保证迁移与应用连同一个库。程序化调用
+    （`storage.migrations.make_config(url)`）会把连接串写进 `sqlalchemy.url`，
+    这里必须认它，否则那些显式传入的 URL（如测试用的独立 schema）会被忽略、
+    静默迁移到 `DD_DATABASE_URL` 指向的库上。
+    """
     override = context.get_x_argument(as_dictionary=True).get("db_url")
-    return override or database_url()
+    if override:
+        return override
+    cfg_url = config.get_main_option("sqlalchemy.url")
+    return cfg_url or database_url()
 
 
 def run_migrations_offline() -> None:

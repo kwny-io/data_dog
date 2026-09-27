@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """数据库迁移测试（alembic）。
 
 覆盖：
@@ -15,9 +14,9 @@ from __future__ import annotations
 import sqlite3
 
 import pytest
-from alembic import command
 from sqlalchemy import create_engine, inspect
 
+from alembic import command
 from data_dog.storage import migrations
 
 _HEAD = "head"

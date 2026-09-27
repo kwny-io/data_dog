@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """P2 兼容性绑定解析（对齐架构 §9.2）。
 
 按 `vendor + model + firmware + protocol_version` 选择**唯一**算子集合。
@@ -11,12 +10,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 from ..errors import ToolErrorCode, err
 
 
-def _ver_tuple(v: str) -> Tuple[int, ...]:
+def _ver_tuple(v: str) -> tuple[int, ...]:
     """宽松版本解析：非数字段忽略，用于比较。"""
     out = []
     for part in str(v).replace("-", ".").split("."):
@@ -24,7 +23,7 @@ def _ver_tuple(v: str) -> Tuple[int, ...]:
     return tuple(out) or (0,)
 
 
-def _in_range(ver: str, spec: Optional[str]) -> bool:
+def _in_range(ver: str, spec: str | None) -> bool:
     """支持 None（不约束）/ 精确 "3.2.1" / 区间 ">=3.1,<4.0"。"""
     if spec is None or spec == "":
         return True
@@ -54,9 +53,9 @@ def _in_range(ver: str, spec: Optional[str]) -> bool:
 class Compatibility:
     """算子的兼容范围（§9.2 绑定维度）。"""
     vendor: str
-    models: Tuple[str, ...] = ()
-    firmware: Optional[str] = None          # 精确或区间
-    protocol_versions: Tuple[str, ...] = ()
+    models: tuple[str, ...] = ()
+    firmware: str | None = None          # 精确或区间
+    protocol_versions: tuple[str, ...] = ()
 
 
 @dataclass
@@ -65,10 +64,10 @@ class OperatorBinding:
     operator_id: str
     version: str
     compat: Compatibility
-    parser: Optional[str] = None
-    normalizer: Optional[str] = None
-    detector: Optional[str] = None           # 对应 P1 生成的检测算子 id
-    extra: Dict[str, Any] = field(default_factory=dict)
+    parser: str | None = None
+    normalizer: str | None = None
+    detector: str | None = None           # 对应 P1 生成的检测算子 id
+    extra: dict[str, Any] = field(default_factory=dict)
 
     @property
     def revision(self) -> str:
@@ -78,14 +77,14 @@ class OperatorBinding:
 class CompatibilityResolver:
     """把一个（vendor/model/firmware/protocol）请求解析为唯一绑定。"""
 
-    def __init__(self, bindings: Optional[List[OperatorBinding]] = None):
-        self._bindings: List[OperatorBinding] = list(bindings or [])
+    def __init__(self, bindings: list[OperatorBinding] | None = None):
+        self._bindings: list[OperatorBinding] = list(bindings or [])
 
     def register(self, binding: OperatorBinding) -> None:
         self._bindings.append(binding)
 
     def resolve(self, *, vendor: str, model: str, firmware: str,
-                protocol_version: str = "") -> Tuple[bool, Any]:
+                protocol_version: str = "") -> tuple[bool, Any]:
         """返回 (ok, binding_or_error)。匹配不唯一/无匹配 → 失败（不猜）。"""
         matches = [b for b in self._bindings if self._match(b.compat, vendor, model,
                                                              firmware, protocol_version)]

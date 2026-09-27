@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Prometheus 指标（SRE 可观测性）。
 
 设计取舍
@@ -13,10 +12,12 @@
 """
 from __future__ import annotations
 
-from typing import Optional
-
 from prometheus_client import (
-    CollectorRegistry, Counter, Gauge, Histogram, generate_latest,
+    CollectorRegistry,
+    Counter,
+    Gauge,
+    Histogram,
+    generate_latest,
 )
 
 # 用独立注册表，避免与进程内其它库（如 gunicorn）的默认注册表冲突，
@@ -61,6 +62,14 @@ telemetry_rejected_by_reason = Counter(
 candidates_created_total = Counter(
     "data_dog_candidates_created_total",
     "产出的候选异常总数",
+    registry=registry,
+)
+
+# 调查（Agent）执行结果：result ∈ {ok, not_found, timeout, failed}
+investigations_total = Counter(
+    "data_dog_investigations_total",
+    "调查任务总数（按结果分类）",
+    labelnames=("result",),
     registry=registry,
 )
 

@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Go2 合成遥测生成器核心：物理模型 + 故障注入 + ground truth。
 
 纯 NumPy 实现，无 MuJoCo 依赖。接口与"未来 MuJoCo 数据源"对齐：
@@ -7,12 +6,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
 # ---- Go2 公开参数（近似，量级来自 Unitree Go2 官方资料）----
-DEFAULT_PARAMS: Dict[str, float] = {
+DEFAULT_PARAMS: dict[str, float] = {
     # 关节电机座参数：扭矩常数 / 电阻 / 热容 / 热阻（一阶热模型）
     "kt": 0.25,            # N·m/A，扭矩常数
     "R": 0.35,             # Ohm，绕组电阻
@@ -29,7 +27,7 @@ DEFAULT_PARAMS: Dict[str, float] = {
 }
 
 # 5 类故障定义：名称 + 默认严重度 + 说明（用于 ground truth）
-FAULT_DEFS: Dict[str, Dict[str, str]] = {
+FAULT_DEFS: dict[str, dict[str, str]] = {
     "F1_stall":       {"severity": "critical", "desc": "卡死/堵转，扭矩电流骤升到限幅"},
     "F2_temp_rise":   {"severity": "warning",  "desc": "热退化，温度爬升越阈值"},
     "F3_packet_loss": {"severity": "warning",  "desc": "通信丢包，观测随机缺失"},
@@ -46,13 +44,13 @@ TEMP_HI_CRIT = 90.0
 class SynthGenConfig:
     """一次生成的配置。"""
     n_joints: int = 4                       # 生成几个关节
-    joints: List[str] = field(default_factory=list)  # 部件名（默认自动命名）
+    joints: list[str] = field(default_factory=list)  # 部件名（默认自动命名）
     n_seconds: float = 120.0                # 时长（秒）
     dt: float = 0.01                        # 采样间隔
     seed: int = 0                           # 随机种子
     noise_scale: float = 0.02               # 观测高斯噪声相对幅度
     base_load_torque: float = 3.0           # 基底负载扭矩（N·m）
-    active_fault: Optional[str] = None      # 注入哪类故障（None=正常）
+    active_fault: str | None = None      # 注入哪类故障（None=正常）
     fault_component: str = ""               # 故障作用在哪个关节名
     fault_start_frac: float = 0.4           # 故障开始时间占比
     fault_end_frac: float = 0.9             # 故障结束时间占比
@@ -69,7 +67,7 @@ class SynthGenConfig:
 class SynthSample:
     """一条合成的遥测样本。"""
     sample_id: str
-    joints: List[str]
+    joints: list[str]
     dt: float
     # 时间序列（每关节一列）
     torque: np.ndarray      # shape (n_steps, n_joints)  N·m
@@ -78,14 +76,14 @@ class SynthSample:
     # 丢包掩码：1=观测正常，0=丢包（观测缺失）
     valid_mask: np.ndarray  # shape (n_steps, n_joints)
     # ground truth：One 段标签（部件, 起止时刻, 故障类型, 严重度）；正常样本为 None
-    ground_truth: Optional[Dict] = None
+    ground_truth: dict | None = None
 
     @property
     def n_steps(self) -> int:
         return int(self.torque.shape[0])
 
     def telemetry(self, joint: str, hour: int = 9, minute: int = 55,
-                  sample_count: int = 300) -> Dict:
+                  sample_count: int = 300) -> dict:
         """把这份遥测转成 EvidenceStore 认识的窗口查询结果。
 
         取该关节时间序列的中间 sample_count 个点，做窗口统计，
@@ -97,11 +95,7 @@ class SynthSample:
         tor = self.torque[:, idx]
         v = self.valid_mask[:, idx]
         # 窗口：覆盖"整段样本"（每条样本=一个故障场景，时间窗即故障活跃期）。
-        # 取 fault 窗口或整段，保证 Agent 能看到故障期间的抬升/丢包，而非只看末尾 3 秒。
-        if self.ground_truth and "window" in self.ground_truth:
-            n = len(arr)
-        else:
-            n = len(arr)
+        # 取整段，保证 Agent 能看到故障期间的抬升/丢包，而非只看末尾 3 秒。
         seg_t = arr
         seg_i = cur
         seg_tor = tor
@@ -129,7 +123,7 @@ class SynthSample:
             "fault_ground_truth": self.ground_truth,
         }
 
-    def to_dict(self) -> Dict:
+    def to_dict(self) -> dict:
         return {
             "sample_id": self.sample_id,
             "joints": self.joints,
@@ -146,7 +140,7 @@ class SynthSample:
 class Go2MotorModel:
     """一阶电机热 + 电机电流模型：给定负载扭矩/速度 → 电流 + 温度演化。"""
 
-    def __init__(self, params: Optional[Dict[str, float]] = None):
+    def __init__(self, params: dict[str, float] | None = None):
         p = {**DEFAULT_PARAMS, **(params or {})}
         self.kt = p["kt"]
         self.R = p["R"]
@@ -165,7 +159,7 @@ class Go2MotorModel:
         return temp + (heat - cool) * dt / self.Cth
 
 
-def _fault_time_window(t_total: float, start_frac: float, end_frac: float) -> Tuple[int, int]:
+def _fault_time_window(t_total: float, start_frac: float, end_frac: float) -> tuple[int, int]:
     """把故障起止比例换算成样本时间窗字符串。"""
     s = int(t_total * start_frac)
     e = int(t_total * end_frac)
@@ -179,7 +173,7 @@ def _fmt_time(sec: int) -> str:
 
 def generate_sample(
     config: SynthGenConfig,
-    params: Optional[Dict[str, float]] = None,
+    params: dict[str, float] | None = None,
 ) -> SynthSample:
     """生成一条合成遥测样本，注入 config.active_fault 指定的故障。"""
     p = {**DEFAULT_PARAMS, **(params or {})}
@@ -241,7 +235,7 @@ def generate_sample(
 
     # F3 通信丢包：随机把一部分观测置为无效（NaN）
     if config.active_fault == "F3_packet_loss":
-        for j, comp in enumerate(config.joints):
+        for j in range(len(config.joints)):
             if config.fault_component and config.joints[j] != config.fault_component:
                 continue
             drop = rng.random(n_steps) < 0.15
@@ -290,7 +284,7 @@ def generate_sample(
     )
 
 
-def synthesize_batch(cfgs: List[SynthGenConfig],
-                     params: Optional[Dict[str, float]] = None) -> List[SynthSample]:
+def synthesize_batch(cfgs: list[SynthGenConfig],
+                     params: dict[str, float] | None = None) -> list[SynthSample]:
     """批量生成多条样本（正常 + 各类故障，便于评估对比）。"""
     return [generate_sample(cfg, params) for cfg in cfgs]

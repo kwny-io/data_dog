@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """P3 幂等 Outbox + 幂等键构成规则（对齐架构 §16.1 / 缺口 E-7）。
 
 架构 §16.1：接入与内部流"至少一次投递"，外部副作用必须通过**幂等键**实现一次逻辑效果。
@@ -16,10 +15,11 @@
 """
 from __future__ import annotations
 
+import builtins
 import hashlib
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 
 def make_idempotency_key(device_ref: str, event_type: str, episode_key: str) -> str:
@@ -38,7 +38,7 @@ def episode_key_from(investigation_id: str = "", component_ref: str = "") -> str
 class OutboxEntry:
     idempotency_key: str
     revision: int
-    payload: Dict[str, Any]
+    payload: dict[str, Any]
     status: str = "pending"          # pending | delivered | failed | dead
     attempts: int = 0
     receipt: str = ""
@@ -57,12 +57,12 @@ class AlertOutbox:
 
     def __init__(self, max_attempts: int = 3):
         self.max_attempts = max_attempts
-        self._entries: Dict[str, OutboxEntry] = {}
+        self._entries: dict[str, OutboxEntry] = {}
         self.stats = {"enqueued": 0, "duplicate": 0, "delivered": 0,
                       "failed": 0, "dead": 0}
 
     def enqueue(self, idempotency_key: str, revision: int,
-                payload: Dict[str, Any]) -> OutboxEntry:
+                payload: dict[str, Any]) -> OutboxEntry:
         e = OutboxEntry(idempotency_key=idempotency_key, revision=revision,
                         payload=payload)
         if e.dedup_id in self._entries:
@@ -72,10 +72,10 @@ class AlertOutbox:
         self.stats["enqueued"] += 1
         return e
 
-    def pending(self) -> List[OutboxEntry]:
+    def pending(self) -> builtins.list[OutboxEntry]:
         return [e for e in self._entries.values() if e.status == "pending"]
 
-    def deliver(self, adapter) -> Dict[str, int]:
+    def deliver(self, adapter) -> dict[str, int]:
         """向适配器投递所有 pending；失败重试到上限后进死信。"""
         result = {"delivered": 0, "failed": 0, "dead": 0}
         for e in list(self.pending()):
@@ -98,7 +98,7 @@ class AlertOutbox:
                     result["failed"] += 1
         return result
 
-    def list(self) -> List[Dict[str, Any]]:
+    def list(self) -> builtins.list[dict[str, Any]]:
         return [e.__dict__ for e in self._entries.values()]
 
     def __len__(self) -> int:

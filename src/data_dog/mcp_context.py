@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """A4 配套客户端：从自研 context-injector MCP 获取可信运行时上下文。
 
 连接策略：**常驻复用**（spare-spawn-per-request 的升级版）。
@@ -14,13 +13,13 @@ from __future__ import annotations
 
 import atexit
 import json
-import os
 import subprocess
 import sys
 import threading
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any
 
+from . import settings
 from .context import RuntimeContext
 
 EXPECTED_SOURCE = "trusted_context_injector:v1"
@@ -39,7 +38,7 @@ def _default_server_path() -> Path:
 
 def _server_path() -> Path:
     """允许用 DD_CTX_MCP_SERVER 覆盖 server 路径（如桌面学习副本）。"""
-    override = os.environ.get("DD_CTX_MCP_SERVER", "").strip()
+    override = settings.ctx_mcp_server()
     if override:
         return Path(override)
     return _default_server_path()
@@ -54,7 +53,7 @@ class ContextInjectorClient:
 
     def __init__(self, server_path: Path):
         self.server_path = server_path
-        self.proc: Optional[subprocess.Popen] = None
+        self.proc: subprocess.Popen | None = None
         self._next_id = 1
 
     # ---- 生命周期 ----
@@ -115,12 +114,12 @@ class ContextInjectorClient:
         return _payload_to_context(_payload_of(result))
 
     # ---- JSON-RPC 基元 ----
-    def _send(self, msg: Dict[str, Any]) -> None:
+    def _send(self, msg: dict[str, Any]) -> None:
         assert self.proc is not None and self.proc.stdin is not None
         self.proc.stdin.write(json.dumps(msg, ensure_ascii=False) + "\n")
         self.proc.stdin.flush()
 
-    def _recv(self, req_id: int) -> Dict[str, Any]:
+    def _recv(self, req_id: int) -> dict[str, Any]:
         assert self.proc is not None and self.proc.stdout is not None
         while True:
             line = self.proc.stdout.readline()
@@ -142,9 +141,9 @@ class ContextInjectorClient:
         self._send({"jsonrpc": "2.0", "method": method})
 
     def _request(
-        self, method: str, params: Dict[str, Any],
+        self, method: str, params: dict[str, Any],
         timeout_s: float = REQUEST_TIMEOUT_S,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """发一个带看门狗超时的请求（超时杀进程 → 后续必然失败关闭）。"""
         req_id = self._next_id
         self._next_id += 1
@@ -159,7 +158,7 @@ class ContextInjectorClient:
 
 
 # ---- 响应解析与校验 ----
-def _payload_of(result: Dict[str, Any]) -> Dict[str, Any]:
+def _payload_of(result: dict[str, Any]) -> dict[str, Any]:
     texts = [c.get("text", "") for c in result.get("content", [])]
     try:
         return json.loads("".join(texts))
@@ -167,7 +166,7 @@ def _payload_of(result: Dict[str, Any]) -> Dict[str, Any]:
         raise McpContextError(f"响应不是合法 JSON: {e}") from None
 
 
-def _payload_to_context(payload: Dict[str, Any]) -> RuntimeContext:
+def _payload_to_context(payload: dict[str, Any]) -> RuntimeContext:
     """校验 ok / source 标注 / 必填字段，构造 RuntimeContext。"""
     if payload.get("ok") is not True:
         raise McpContextError(f"server 返回失败: {payload}")
@@ -187,7 +186,7 @@ def _payload_to_context(payload: Dict[str, Any]) -> RuntimeContext:
 
 
 # ---- 常驻单例管理 ----
-_PERSISTENT: Optional[ContextInjectorClient] = None
+_PERSISTENT: ContextInjectorClient | None = None
 
 
 def close_persistent_context_server() -> None:

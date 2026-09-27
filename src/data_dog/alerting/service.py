@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """P3 上报服务：把 Agent 调查结论走完"策略门 → 事件 → 投递 SaaS"闭环。
 
     InvestigationReport + signals
@@ -13,12 +12,12 @@ Episode 语义（§14.3）：同一逻辑故障用**同一 event_id** 与**同�
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass, field
-from typing import Any, Dict, Optional, Tuple
+from dataclasses import dataclass
+from typing import Any
 
-from .lifecycle import ACTIVE_STATES, AlertEvent, AlertLifecycle
+from .lifecycle import AlertEvent, AlertLifecycle
 from .outbox import AlertOutbox, episode_key_from, make_idempotency_key
-from .policy import POLICY_VERSION, PolicyDecision, ReportPolicyGate
+from .policy import PolicyDecision, ReportPolicyGate
 from .saas import SaaSTestAdapter
 
 
@@ -30,12 +29,12 @@ def _event_id(device_ref: str, event_type: str, episode_key: str) -> str:
 @dataclass
 class ReportOutcome:
     decision: PolicyDecision
-    event: Optional[AlertEvent] = None
+    event: AlertEvent | None = None
     delivered: bool = False
     receipt: str = ""
     duplicate: bool = False
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "decision": self.decision.to_dict(),
             "event_id": self.event.event_id if self.event else None,
@@ -48,20 +47,20 @@ class ReportOutcome:
 
 
 class AlertReportingService:
-    def __init__(self, *, gate: Optional[ReportPolicyGate] = None,
-                 outbox: Optional[AlertOutbox] = None,
-                 adapter: Optional[SaaSTestAdapter] = None):
+    def __init__(self, *, gate: ReportPolicyGate | None = None,
+                 outbox: AlertOutbox | None = None,
+                 adapter: SaaSTestAdapter | None = None):
         self.gate = gate or ReportPolicyGate()
         self.outbox = outbox or AlertOutbox()
         self.adapter = adapter or SaaSTestAdapter()
-        self._episodes: Dict[str, AlertLifecycle] = {}      # 幂等键 → 生命周期
+        self._episodes: dict[str, AlertLifecycle] = {}      # 幂等键 → 生命周期
 
     # ---- 主流程 ----
-    def process(self, report: Dict[str, Any],
-                signals: Optional[Dict[str, Any]] = None,
+    def process(self, report: dict[str, Any],
+                signals: dict[str, Any] | None = None,
                 *, device_ref: str = "device-opaque",
-                event_type: Optional[str] = None,
-                component_ref: Optional[str] = None) -> ReportOutcome:
+                event_type: str | None = None,
+                component_ref: str | None = None) -> ReportOutcome:
         s = dict(signals or {})
         event_type = event_type or report.get("event_type") or "unknown_event"
         component_ref = component_ref or (report.get("candidate_refs") or ["unknown"])[0]
@@ -108,7 +107,7 @@ class AlertReportingService:
         entry = self.outbox.enqueue(event.idempotency_key, event.event_revision,
                                     self._payload(event, decision))
         was_new = entry.status == "pending" and entry.attempts == 0
-        res = self.outbox.deliver(self.adapter)
+        self.outbox.deliver(self.adapter)
         entry = self.outbox._entries[entry.dedup_id]     # 取回更新后的状态
         return ReportOutcome(
             decision=decision, event=event,
@@ -124,11 +123,11 @@ class AlertReportingService:
             raise KeyError(f"未知 Episode: {idempotency_key}")
         return lc.transition(to_state, reason=reason)
 
-    def active_events(self) -> Dict[str, str]:
+    def active_events(self) -> dict[str, str]:
         return {k: v.event.state for k, v in self._episodes.items() if v.is_active()}
 
     @staticmethod
-    def _payload(event: AlertEvent, decision: PolicyDecision) -> Dict[str, Any]:
+    def _payload(event: AlertEvent, decision: PolicyDecision) -> dict[str, Any]:
         return {
             "event_id": event.event_id,
             "event_revision": event.event_revision,

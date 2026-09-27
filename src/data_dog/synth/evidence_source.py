@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """合成遥测数据源：把 Go2 合成生成器的输出接进现有 Agent 链路。
 
 对接方式：实现与 EvidenceStore 相同的查询接口（query_telemetry /
@@ -12,24 +11,20 @@ query_vendor_knowledge / query_neighbor_events / query_recent_changes），
 """
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
-
-import numpy as np
-
 from ..errors import ToolErrorCode, err
-from ..evidence.store import ALLOWED_COMPONENTS, VENDOR_KNOWLEDGE, RECENT_CHANGES
+from ..evidence.store import ALLOWED_COMPONENTS, RECENT_CHANGES, VENDOR_KNOWLEDGE
 from .generator import SynthSample
 
 
 class SyntheticEvidenceSource:
     """基于合成样本的证据库。兼容 EvidenceStore 查询接口。"""
 
-    def __init__(self, samples: List[SynthSample],
-                 known_faults: Optional[Dict[str, str]] = None):
+    def __init__(self, samples: list[SynthSample],
+                 known_faults: dict[str, str] | None = None):
         # 按 (joint, sample) 存，便于按部件查
         self.samples = samples
         # 每个部件 → 它的样本（用于查询）
-        self._by_joint: Dict[str, SynthSample] = {}
+        self._by_joint: dict[str, SynthSample] = {}
         for s in samples:
             for j in s.joints:
                 self._by_joint.setdefault(j, s)
@@ -50,8 +45,8 @@ class SyntheticEvidenceSource:
         } for item in VENDOR_KNOWLEDGE.get(component_type, [])]
 
     def query_neighbor_events(self, device_sn, component, window_start, window_end):
-        # 简化：返回空（合成单样本调查不需要邻居关联）
-        return {"device_sn": device_sn, "events": []}
+        # 简化：返回空列表（合成单样本调查不需要邻居关联）
+        return []
 
     def query_recent_changes(self, device_sn, component, since):
         if component not in ALLOWED_COMPONENTS:

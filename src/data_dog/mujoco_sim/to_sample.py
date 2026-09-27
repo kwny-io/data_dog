@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """把 MuJoCo 仿真结果转成 synth 接口的 SynthSample，供现有 Agent 评估消费。
 
 对接原理：
@@ -11,18 +10,22 @@
 """
 from __future__ import annotations
 
-from typing import Dict, List, Optional
+from collections.abc import Sequence
+from typing import TYPE_CHECKING
 
 import numpy as np
 
 from .simulate import SimResult
+
+if TYPE_CHECKING:                          # 仅供类型检查；运行期在函数内惰性导入
+    from data_dog.synth.generator import SynthSample
 
 # mujoco 执行器名 → Agent 认识的部件名。
 # 选择依据（物理）：站立四足的 calf(≈knee) 因承重电流饱和(~90A)，无法体现"正常 vs 故障"的
 # 差异；hip 偏摆几乎不发热。front thigh(大腿/屈髋) 有真实负载但不过饱和（基线 ~6A、有裕量），
 # 是让"健康=正常电流、故障=异常"能被 Agent 判出的诚实关节。这里把 front thigh 映射到
 # Agent 认识的 joint_motor.front_left_knee / front_right_knee。
-_MUJOCO_TO_COMPONENT: Dict[str, str] = {
+_MUJOCO_TO_COMPONENT: dict[str, str] = {
     "FL_thigh": "joint_motor.front_left_knee",
     "FR_thigh": "joint_motor.front_right_knee",
 }
@@ -31,9 +34,9 @@ _MUJOCO_TO_COMPONENT: Dict[str, str] = {
 def to_synth_sample(
     sim: SimResult,
     sample_id: str = "mj_go2",
-    active_fault: Optional[str] = None,
+    active_fault: str | None = None,
     fault_component: str = "joint_motor.front_left_hip",
-) -> "SynthSample":
+) -> SynthSample:
     """从 SimResult 抽取出 Agent 认识的 4 个部件，构造一个 SynthSample。
 
     可选注入故障（配合 fault_component 制造异常遥测）：
@@ -43,9 +46,8 @@ def to_synth_sample(
     from data_dog.synth.generator import FAULT_DEFS, SynthSample
 
     components = list(_MUJOCO_TO_COMPONENT.values())  # 顺序固定
-    idx_of_comp = [_MUJOCO_TO_COMPONENT[a] for a in _MUJOCO_TO_COMPONENT]
     # 找出这些部件在 sim.joints 里的列下标
-    col = [sim.joints.index(a) for a, c in _MUJOCO_TO_COMPONENT.items()]
+    col = [sim.joints.index(a) for a, _ in _MUJOCO_TO_COMPONENT.items()]
 
     torque = sim.torque[:, col].copy()
     current = sim.current[:, col].copy()
@@ -71,7 +73,7 @@ def to_synth_sample(
         start_t = int(n_steps * 0.4)
         end_t = int(n_steps * 0.9)
         sl = slice(start_t, end_t)
-        from data_dog.synth.generator import Go2MotorModel, DEFAULT_PARAMS
+        from data_dog.synth.generator import DEFAULT_PARAMS, Go2MotorModel
         model = Go2MotorModel(DEFAULT_PARAMS)
 
         if active_fault == "F1_stall":
@@ -103,7 +105,7 @@ def to_synth_sample(
                      / (DEFAULT_PARAMS["Rth"] * 1.6)) * dt / DEFAULT_PARAMS["Cth"]
         elif active_fault == "F3_packet_loss":
             rng = np.random.default_rng(0)
-            drop = rng.random(n_steps) < 0.15
+            drop: np.ndarray = np.asarray(rng.random(n_steps) < 0.15)
             drop[:start_t] = False
             drop[end_t:] = False
             valid[drop, j] = 0.0
@@ -140,12 +142,12 @@ def to_synth_sample(
 
 
 def make_mujoco_batch(
-    faults: Optional[List[Optional[str]]] = None,
+    faults: Sequence[str | None] | None = None,
     fault_component: str = "joint_motor.front_left_hip",
     duration_s: float = 2.0,
     dt: float = 0.01,
     seed: int = 0,
-) -> List["SynthSample"]:
+) -> list[SynthSample]:
     """跑多段 mujoco 仿真，产出 normal + 各故障 的样本批，供评估直接用。"""
     from .simulate import simulate
 
@@ -154,7 +156,7 @@ def make_mujoco_batch(
                   "F4_current_bias", "F5_load_spike"]
 
     sim = simulate(duration_s=duration_s, dt=dt, seed=seed)
-    samples: List[SynthSample] = []
+    samples: list[SynthSample] = []
     for i, f in enumerate(faults):
         s = to_synth_sample(
             sim, sample_id=f"mj_{f or 'normal'}_{i}",

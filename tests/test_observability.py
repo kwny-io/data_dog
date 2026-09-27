@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """可观测性：token 消耗 / 每步耗时 / 成本统计（后端采集 + 前端展示）。
 
 验证：
@@ -8,14 +7,14 @@
 """
 import json
 
-from data_dog.observability import (
-    UsageTracker,
-    CallStat,
-    lookup_price,
-    fmt_cost,
-)
 from data_dog.agent.loop import AgentLoop
 from data_dog.evidence.store import EvidenceStore
+from data_dog.observability import (
+    CallStat,
+    UsageTracker,
+    fmt_cost,
+    lookup_price,
+)
 from data_dog.schemas.events import CandidateEvent
 from data_dog.tools.investigation import InvestigationTools
 

@@ -1,12 +1,11 @@
-# -*- coding: utf-8 -*-
 """离线端到端测试：用假 Provider 跑通完整调查链路，不依赖网络/API。"""
 import json
 
 from data_dog.agent.loop import AgentLoop
+from data_dog.errors import ToolErrorCode, err, ok
 from data_dog.evidence.store import EvidenceStore
 from data_dog.schemas.events import CandidateEvent, EvidenceSummary
 from data_dog.tools.investigation import InvestigationTools
-from data_dog.errors import ToolErrorCode, err, ok
 
 
 class FakeProvider:

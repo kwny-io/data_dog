@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """P2 在线数据面测试：网关 / 绑定 / 处理链 / 候选 / SSRF 安全。
 
 覆盖重点：
@@ -21,7 +20,9 @@ from data_dog.data_plane.fetch import validate_url
 from data_dog.data_plane.gateway import TelemetryGateway
 from data_dog.data_plane.pipeline import DataPlane, build_demo_resolver
 from data_dog.data_plane.resolver import (
-    Compatibility, CompatibilityResolver, OperatorBinding,
+    Compatibility,
+    CompatibilityResolver,
+    OperatorBinding,
 )
 from data_dog.operator_factory.knowledge import build_knowledge_package
 from data_dog.operator_factory.p1_demo import build_motor_operator

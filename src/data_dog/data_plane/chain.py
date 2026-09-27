@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """P2 在线处理链（对齐架构 §9.3）。
 
     Parser → Normalizer → Enricher → Window/Feature → Detector → (候选)
@@ -14,22 +13,21 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from ..schemas.operator_config import DetectorConfig, FieldSpec
-
 
 # ---------------------------------------------------------------- Parser
 
 class Parser:
     """按算子声明的 FieldSpec 把原始键映射为标准字段名 + 类型转换。"""
 
-    def __init__(self, fields: List[FieldSpec], *, strict: bool = False):
+    def __init__(self, fields: list[FieldSpec], *, strict: bool = False):
         self.fields = fields
         self.strict = strict
 
-    def parse(self, raw: Dict[str, Any]) -> Dict[str, Any]:
-        out: Dict[str, Any] = {}
+    def parse(self, raw: dict[str, Any]) -> dict[str, Any]:
+        out: dict[str, Any] = {}
         for spec in self.fields:
             if spec.source not in raw:
                 if not spec.optional:
@@ -64,24 +62,24 @@ _UNIT_CONV = {
 class Normalizer:
     """单位/量纲规范化。声明式 ->标准化声明（本层只做**有来源**的换算，不猜）。"""
 
-    def __init__(self, unit_rules: Optional[Dict[str, str]] = None):
+    def __init__(self, unit_rules: dict[str, str] | None = None):
         # {field: standard_unit}
         self.unit_rules = unit_rules or {}
 
-    def normalize(self, metrics: Dict[str, Any]) -> Dict[str, Any]:
+    def normalize(self, metrics: dict[str, Any]) -> dict[str, Any]:
         return dict(metrics)      # 无声明换算时原样返回（不擅自换算，避免"猜单位"）
 
 
 class StatusCodeNormalizer:
     """把厂商错误码/状态位映射为标准错误码（来源：P1 抽取的 MError 枚举）。"""
 
-    def __init__(self, mapping: Optional[Dict[int, str]] = None):
+    def __init__(self, mapping: dict[int, str] | None = None):
         self.mapping = mapping or {
             0: "OK", 1: "OVERHEAT", 2: "OVERCURRENT", 3: "OVERVOLTAGE",
             4: "ENCODER_FAULT",
         }
 
-    def codes_for(self, merror: Any) -> List[str]:
+    def codes_for(self, merror: Any) -> list[str]:
         try:
             m = int(merror)
         except (TypeError, ValueError):
@@ -95,15 +93,15 @@ class StatusCodeNormalizer:
 @dataclass
 class Enricher:
     """补运行工况与同工况基线。基线按 (component, condition) 维护。"""
-    baselines: Dict[str, float] = field(default_factory=dict)   # "comp|field|condition" -> 基线
+    baselines: dict[str, float] = field(default_factory=dict)   # "comp|field|condition" -> 基线
 
     def add_baseline(self, component: str, field_name: str, condition: str, value: float) -> None:
         self.baselines[f"{component}|{field_name}|{condition}"] = value
 
-    def baseline_for(self, component: str, field_name: str, condition: str) -> Optional[float]:
+    def baseline_for(self, component: str, field_name: str, condition: str) -> float | None:
         return self.baselines.get(f"{component}|{field_name}|{condition}")
 
-    def condition_from(self, raw: Dict[str, Any]) -> str:
+    def condition_from(self, raw: dict[str, Any]) -> str:
         return str(raw.get("operating_condition") or "unknown")
 
 
@@ -112,10 +110,10 @@ class Enricher:
 @dataclass
 class WindowFeature:
     """一个事件的窗口特征（只依赖事件时间序列，确定性）。"""
-    mean: Dict[str, float] = field(default_factory=dict)
-    slope: Dict[str, float] = field(default_factory=dict)
-    last: Dict[str, float] = field(default_factory=dict)
-    max: Dict[str, float] = field(default_factory=dict)
+    mean: dict[str, float] = field(default_factory=dict)
+    slope: dict[str, float] = field(default_factory=dict)
+    last: dict[str, float] = field(default_factory=dict)
+    max: dict[str, float] = field(default_factory=dict)
     count: int = 0
 
 
@@ -124,9 +122,9 @@ class WindowBuffer:
 
     def __init__(self, size: int = 30):
         self.size = size
-        self._series: Dict[str, Dict[str, List[float]]] = {}
+        self._series: dict[str, dict[str, list[float]]] = {}
 
-    def push(self, key: str, metrics: Dict[str, Any]) -> None:
+    def push(self, key: str, metrics: dict[str, Any]) -> None:
         s = self._series.setdefault(key, {})
         for k, v in metrics.items():
             if isinstance(v, bool) or not isinstance(v, (int, float)):
@@ -149,7 +147,7 @@ class WindowBuffer:
         return f
 
 
-def _slope(vals: List[float]) -> float:
+def _slope(vals: list[float]) -> float:
     n = len(vals)
     if n < 2:
         return 0.0
@@ -168,8 +166,8 @@ class Detector:
     def __init__(self, config: DetectorConfig):
         self.config = config
 
-    def detect(self, metrics: Dict[str, Any]) -> List[Dict[str, Any]]:
-        hits: List[Dict[str, Any]] = []
+    def detect(self, metrics: dict[str, Any]) -> list[dict[str, Any]]:
+        hits: list[dict[str, Any]] = []
         for rule in self.config.rules:
             if rule.field not in metrics:
                 continue

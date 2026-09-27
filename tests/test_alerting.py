@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """P3 上报闭环测试：策略门 / 生命周期 / 幂等 outbox / SaaS 适配器 / 端到端。
 
 覆盖：
@@ -13,15 +12,18 @@ from __future__ import annotations
 import pytest
 
 from data_dog.alerting.lifecycle import (
-    AlertEvent, AlertLifecycle, AlertTransitionError,
+    AlertEvent,
+    AlertLifecycle,
+    AlertTransitionError,
 )
 from data_dog.alerting.outbox import (
-    AlertOutbox, episode_key_from, make_idempotency_key,
+    AlertOutbox,
+    episode_key_from,
+    make_idempotency_key,
 )
 from data_dog.alerting.policy import ReportPolicyGate
 from data_dog.alerting.saas import SaaSTestAdapter
 from data_dog.alerting.service import AlertReportingService
-
 
 # ---------------------------------------------------------------- 策略门
 
@@ -141,9 +143,8 @@ def test_outbox_retry_then_dead():
     ad = SaaSTestAdapter(fail_times=99)
     ob = AlertOutbox(max_attempts=3)
     ob.enqueue("k", 1, {"x": 1})
-    last = None
     for _ in range(3):
-        last = ob.deliver(ad)
+        ob.deliver(ad)
     entry = ob.list()[0]
     assert entry["status"] == "dead" and entry["attempts"] == 3
 

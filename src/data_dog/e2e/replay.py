@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """E2E 编排：厂商文档 →[P1]→ 算子 →[P2]→ 候选 →[Agent]→ 报告 →[P3]→ isSaaS 事件。
 
 一条命令跑通整链，产出可核对的中间产物（算子数、候选数、报告、事件、Receipt）。
@@ -8,13 +7,11 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from ..alerting.saas import SaaSTestAdapter
 from ..alerting.service import AlertReportingService
 from ..data_plane.pipeline import DataPlane, build_demo_resolver
-from ..evidence.store import ALLOWED_COMPONENTS
 from ..mujoco_sim.mujoco_eval import MujocoDeterministicProvider
 from ..operator_factory.knowledge import build_knowledge_package
 from ..operator_factory.p1_demo import build_motor_operator
@@ -32,13 +29,13 @@ class E2EResult:
     ingested: int = 0
     resolved: int = 0
     rejected: int = 0
-    candidates: List[Any] = field(default_factory=list)
-    reports: List[Any] = field(default_factory=list)
-    decisions: List[Any] = field(default_factory=list)
+    candidates: list[Any] = field(default_factory=list)
+    reports: list[Any] = field(default_factory=list)
+    decisions: list[Any] = field(default_factory=list)
     alerts_delivered: int = 0
-    feedback: List[Dict[str, Any]] = field(default_factory=list)
+    feedback: list[dict[str, Any]] = field(default_factory=list)
 
-    def summary(self) -> Dict[str, Any]:
+    def summary(self) -> dict[str, Any]:
         return {
             "operator": {"id": self.operator_id, "fields": self.operator_fields,
                          "rules": self.operator_rules},
@@ -112,7 +109,7 @@ def _raw(event_id: str, **kw):
     return base
 
 
-def _telemetry_for(metrics: Dict[str, Any], peak: float, current: float) -> Dict[str, Any]:
+def _telemetry_for(metrics: dict[str, Any], peak: float, current: float) -> dict[str, Any]:
     """把 P2 规范化后的 metrics 转成 Agent 证据源认识的窗口查询结果。"""
     return {
         "device_sn": "device-go2-0001",
@@ -124,7 +121,7 @@ def _telemetry_for(metrics: Dict[str, Any], peak: float, current: float) -> Dict
     }
 
 
-def run_e2e(*, auth: Optional[Dict[str, Any]] = None) -> E2EResult:
+def run_e2e(*, auth: dict[str, Any] | None = None) -> E2EResult:
     auth = auth or {"tenant_id": "tenant-real", "device_sn": "device-go2-0001"}
     result = E2EResult()
 
@@ -201,7 +198,7 @@ def run_e2e(*, auth: Optional[Dict[str, Any]] = None) -> E2EResult:
             device_ref="device-opaque-001", component_ref=cand.component_ref,
         )
         result.decisions.append(outcome.decision)
-        if outcome.delivered:
+        if outcome.delivered and outcome.event is not None:
             result.alerts_delivered += 1
             # 人工反馈回填示例
             kind = "repaired" if report.disposition == "confirmed" else "false_positive"

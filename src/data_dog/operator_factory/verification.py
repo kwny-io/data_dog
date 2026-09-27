@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """P1：Fuzz 与新旧版本差分回放（对齐架构 §8.4）。
 
 §8.4 要求的验证门里，本模块补齐两项（Fixture 黄金回放已在 pipeline.py）：
@@ -13,11 +12,9 @@ from __future__ import annotations
 
 import random
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any
 
-from .dsl import DSLError
 from .pipeline import Operator
-
 
 # ---------------------------------------------------------------- Fuzz
 
@@ -25,7 +22,7 @@ from .pipeline import Operator
 class FuzzResult:
     n: int
     crashes: int
-    detail: List[str] = field(default_factory=list)
+    detail: list[str] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -58,11 +55,11 @@ def fuzz_operator(op: Operator, *, iterations: int = 200, seed: int = 20260913) 
     """
     rng = random.Random(seed)
     fields = [f["name"] for f in op.fields] or ["temperature", "current", "mode"]
-    detail: List[str] = []
+    detail: list[str] = []
     crashes = 0
-    cases: List[Dict[str, Any]] = list(_MALFORMED)
+    cases: list[Any] = list(_MALFORMED)
     for _ in range(iterations):
-        ev: Dict[str, Any] = {}
+        ev: dict[str, Any] = {}
         for name in fields:
             r = rng.random()
             if r < 0.2:
@@ -90,23 +87,23 @@ def fuzz_operator(op: Operator, *, iterations: int = 200, seed: int = 20260913) 
 @dataclass
 class DiffEntry:
     fixture_id: str
-    only_old: List[str]
-    only_new: List[str]
+    only_old: list[str]
+    only_new: list[str]
     accepted: bool
     reason: str = ""
 
 
 @dataclass
 class DiffResult:
-    entries: List[DiffEntry] = field(default_factory=list)
+    entries: list[DiffEntry] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
         return all(e.accepted for e in self.entries)
 
 
-def diff_replay(old: Operator, new: Operator, fixtures: List[Any],
-                *, expected_new_hits: Optional[Dict[str, List[str]]] = None
+def diff_replay(old: Operator, new: Operator, fixtures: list[Any],
+                *, expected_new_hits: dict[str, list[str]] | None = None
                 ) -> DiffResult:
     """逐 Fixture 比较新旧算子输出差异。
 

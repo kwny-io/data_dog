@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """仓储层：领域对象 ↔ 持久化行的转换与读写。
 
 供 P2（候选）与 P3（Alert / Outbox / 反馈）调用，实现"重启不丢"。
@@ -10,8 +9,9 @@
 """
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import asdict, is_dataclass
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any
 
 from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
@@ -20,22 +20,22 @@ from sqlalchemy.orm import Session
 from . import models as M
 
 
-def _as_dict(obj: Any) -> Dict[str, Any]:
+def _as_dict(obj: Any) -> dict[str, Any]:
     if isinstance(obj, dict):
         return dict(obj)
-    if is_dataclass(obj):
+    if is_dataclass(obj) and not isinstance(obj, type):
         return asdict(obj)
     if hasattr(obj, "to_dict"):
         return obj.to_dict()
     return dict(vars(obj))
 
 
-def _row_dict(r: Any) -> Dict[str, Any]:
+def _row_dict(r: Any) -> dict[str, Any]:
     """ORM 行 → 普通 dict（只取真实列）。"""
     return {c.name: getattr(r, c.name) for c in r.__table__.columns}
 
 
-def _upsert(session: Session, model: Any, pk: Any, pk_kwargs: Dict[str, Any],
+def _upsert(session: Session, model: Any, pk: Any, pk_kwargs: dict[str, Any],
             apply_fn: Callable[[Any], None]) -> bool:
     """并发安全的按主键 upsert。返回 True=新建，False=更新。
 
@@ -78,7 +78,7 @@ def _upsert(session: Session, model: Any, pk: Any, pk_kwargs: Dict[str, Any],
 
 # ---------------------------------------------------------------- 候选
 
-def _apply_candidate(row: Any, d: Dict[str, Any]) -> None:
+def _apply_candidate(row: Any, d: dict[str, Any]) -> None:
     row.device_sn = d.get("device_sn", "")
     row.component_ref = d.get("component_ref", "")
     row.signal = d.get("signal", "")
@@ -94,7 +94,7 @@ def _apply_candidate(row: Any, d: Dict[str, Any]) -> None:
     row.detector_provenance = d.get("detector_provenance", "")
 
 
-def save_candidates(session: Session, candidates: List[Any], *, tenant_id: str) -> int:
+def save_candidates(session: Session, candidates: list[Any], *, tenant_id: str) -> int:
     """保存候选（幂等：已存在则更新）。返回写入条数。并发安全。
 
     主键是 (tenant_id, candidate_id)：candidate_id 由设备/部件/信号派生、
@@ -104,14 +104,17 @@ def save_candidates(session: Session, candidates: List[Any], *, tenant_id: str) 
     for c in candidates:
         d = _as_dict(c)
         cid = d["candidate_id"]
+
+        def apply_fn(row: Any, _d: dict[str, Any] = d) -> None:  # noqa: B023
+            _apply_candidate(row, _d)
+
         _upsert(session, M.CandidateRow, (tenant_id, cid),
-                {"tenant_id": tenant_id, "candidate_id": cid},
-                lambda row, _d=d: _apply_candidate(row, _d))
+                {"tenant_id": tenant_id, "candidate_id": cid}, apply_fn)
         n += 1
     return n
 
 
-def _page(q: Any, limit: Optional[int], offset: int) -> List[Dict[str, Any]]:
+def _page(q: Any, limit: int | None, offset: int) -> list[dict[str, Any]]:
     """分页执行查询。limit=None 表示不分页（保持旧行为，供内部调用）。"""
     if offset:
         q = q.offset(max(0, int(offset)))
@@ -133,10 +136,10 @@ def count_rows(session: Session, model: Any, **filters: Any) -> int:
 
 
 def list_candidates(session: Session, *, tenant_id: str,
-                    device_sn: Optional[str] = None,
-                    component_ref: Optional[str] = None,
-                    limit: Optional[int] = None,
-                    offset: int = 0) -> List[Dict[str, Any]]:
+                    device_sn: str | None = None,
+                    component_ref: str | None = None,
+                    limit: int | None = None,
+                    offset: int = 0) -> list[dict[str, Any]]:
     q = session.query(M.CandidateRow).filter(
         M.CandidateRow.tenant_id == tenant_id)
     if device_sn is not None:
@@ -149,7 +152,7 @@ def list_candidates(session: Session, *, tenant_id: str,
 
 
 def get_candidate(session: Session, candidate_id: str, *,
-                  tenant_id: str) -> Optional[Dict[str, Any]]:
+                  tenant_id: str) -> dict[str, Any] | None:
     """取单个候选。跨租户（或不存在）→ None，供路由返回 404、不泄露存在性。"""
     r = session.get(M.CandidateRow, (tenant_id, candidate_id))
     return _row_dict(r) if r else None
@@ -179,15 +182,15 @@ def save_report(session: Session, report: Any, *, tenant_id: str) -> None:
 
 
 def get_report(session: Session, investigation_id: str, *,
-               tenant_id: str) -> Optional[Dict[str, Any]]:
+               tenant_id: str) -> dict[str, Any] | None:
     """取单份报告。跨租户（或不存在）→ None（路由返回 404）。"""
     r = session.get(M.ReportRow, (tenant_id, investigation_id))
     return _row_dict(r) if r else None
 
 
 def list_reports(session: Session, *, tenant_id: str,
-                 limit: Optional[int] = None,
-                 offset: int = 0) -> List[Dict[str, Any]]:
+                 limit: int | None = None,
+                 offset: int = 0) -> list[dict[str, Any]]:
     q = (session.query(M.ReportRow)
          .filter(M.ReportRow.tenant_id == tenant_id)
          .order_by(M.ReportRow.created_at, M.ReportRow.investigation_id))
@@ -204,7 +207,7 @@ def save_alert(session: Session, event: Any, *, tenant_id: str) -> None:
             lambda row: _apply_alert(row, d))
 
 
-def _apply_alert(row: Any, d: Dict[str, Any]) -> None:
+def _apply_alert(row: Any, d: dict[str, Any]) -> None:
     row.idempotency_key = d.get("idempotency_key", "")
     row.device_ref = d.get("device_ref", "")
     row.component_ref = d.get("component_ref", "")
@@ -222,14 +225,14 @@ def _apply_alert(row: Any, d: Dict[str, Any]) -> None:
 
 
 def get_alert(session: Session, event_id: str, *,
-              tenant_id: str) -> Optional[Dict[str, Any]]:
+              tenant_id: str) -> dict[str, Any] | None:
     r = session.get(M.AlertRow, (tenant_id, event_id))
     return _row_dict(r) if r else None
 
 
 def list_alerts(session: Session, *, tenant_id: str,
-                limit: Optional[int] = None,
-                offset: int = 0) -> List[Dict[str, Any]]:
+                limit: int | None = None,
+                offset: int = 0) -> list[dict[str, Any]]:
     q = (session.query(M.AlertRow)
          .filter(M.AlertRow.tenant_id == tenant_id)
          .order_by(M.AlertRow.created_at, M.AlertRow.event_id))
@@ -239,7 +242,7 @@ def list_alerts(session: Session, *, tenant_id: str,
 # ---------------------------------------------------------------- Outbox
 
 def upsert_outbox(session: Session, *, tenant_id: str, idempotency_key: str,
-                  revision: int, payload: Dict[str, Any]) -> bool:
+                  revision: int, payload: dict[str, Any]) -> bool:
     """写入 outbox 条目。已存在 → 返回 False（幂等，不重复入队）。并发安全。
 
     主键 (tenant_id, idempotency_key, revision)：幂等键跨租户可能重名。
@@ -277,9 +280,9 @@ def mark_outbox_delivered(session: Session, *, tenant_id: str, idempotency_key: 
 
 
 def list_outbox(session: Session, *, tenant_id: str,
-                status: Optional[str] = None,
-                limit: Optional[int] = None,
-                offset: int = 0) -> List[Dict[str, Any]]:
+                status: str | None = None,
+                limit: int | None = None,
+                offset: int = 0) -> list[dict[str, Any]]:
     q = session.query(M.AlertOutboxRow).filter(
         M.AlertOutboxRow.tenant_id == tenant_id)
     if status is not None:
@@ -298,7 +301,7 @@ def save_feedback(session: Session, *, tenant_id: str, event_id: str, kind: str,
     session.flush()
 
 
-def list_feedback(session: Session, *, tenant_id: str) -> List[Dict[str, Any]]:
+def list_feedback(session: Session, *, tenant_id: str) -> list[dict[str, Any]]:
     q = (session.query(M.AlertFeedbackRow)
          .filter(M.AlertFeedbackRow.tenant_id == tenant_id)
          .order_by(M.AlertFeedbackRow.created_at))
@@ -307,21 +310,24 @@ def list_feedback(session: Session, *, tenant_id: str) -> List[Dict[str, Any]]:
 
 # ---------------------------------------------------------------- 遥测事件
 
-def save_telemetry(session: Session, events: List[Any], *, tenant_id: str) -> int:
+def save_telemetry(session: Session, events: list[Any], *, tenant_id: str) -> int:
     """保存规范化遥测。**租户来自调用方（认证上下文），忽略事件正文里的 tenant_id**
     ——与「身份只在网关注入、正文自称一律丢弃」的规则一致。主键 (tenant_id, event_id)。"""
     n = 0
     for e in events:
         d = _as_dict(e)
         eid = d["event_id"]
+
+        def apply_fn(row: Any, _d: dict[str, Any] = d) -> None:  # noqa: B023
+            _apply_telemetry(row, _d)
+
         _upsert(session, M.TelemetryEventRow, (tenant_id, eid),
-                {"tenant_id": tenant_id, "event_id": eid},
-                lambda row, _d=d: _apply_telemetry(row, _d))
+                {"tenant_id": tenant_id, "event_id": eid}, apply_fn)
         n += 1
     return n
 
 
-def _apply_telemetry(row: Any, d: Dict[str, Any]) -> None:
+def _apply_telemetry(row: Any, d: dict[str, Any]) -> None:
     # tenant_id 不在此设置：它来自认证上下文（save_telemetry 的显式入参），
     # 绝不从事件正文取——正文的身份声明是不可信的。
     row.device_sn = d.get("device_sn", "")
@@ -339,7 +345,7 @@ def _apply_telemetry(row: Any, d: Dict[str, Any]) -> None:
 
 
 def list_telemetry(session: Session, *, tenant_id: str,
-                   device_sn: Optional[str] = None) -> List[Dict[str, Any]]:
+                   device_sn: str | None = None) -> list[dict[str, Any]]:
     q = session.query(M.TelemetryEventRow).filter(
         M.TelemetryEventRow.tenant_id == tenant_id)
     if device_sn is not None:

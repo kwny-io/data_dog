@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """数据库引擎 / 会话管理（SQLAlchemy 2.0）。
 
 - 默认 SQLite（本地零安装）；设 `DD_DATABASE_URL` 切 PostgreSQL，代码不改。
@@ -7,10 +6,9 @@
 """
 from __future__ import annotations
 
-import os
+from collections.abc import Iterator
 from contextlib import contextmanager
-from pathlib import Path
-from typing import Iterator, Optional
+from typing import Any
 
 from sqlalchemy import create_engine
 from sqlalchemy.engine import Engine
@@ -23,8 +21,8 @@ def _default_sqlite_url() -> str:
     """本地 SQLite 默认位置（运行时解析，可用 DD_DATA_DIR 覆盖）。"""
     return f"sqlite:///{(data_dir() / 'data_dog.db').as_posix()}"
 
-_engine: Optional[Engine] = None
-_SessionLocal: Optional[sessionmaker] = None
+_engine: Engine | None = None
+_SessionLocal: sessionmaker | None = None
 
 
 class Base(DeclarativeBase):
@@ -33,15 +31,16 @@ class Base(DeclarativeBase):
 
 def database_url() -> str:
     """数据库连接串：优先环境变量 `DD_DATABASE_URL`，否则本地 SQLite。"""
-    return os.environ.get("DD_DATABASE_URL", "").strip() or _default_sqlite_url()
+    from .. import settings
+    return settings.database_url() or _default_sqlite_url()
 
 
-def get_engine(url: Optional[str] = None) -> Engine:
+def get_engine(url: str | None = None) -> Engine:
     """获取（并缓存）引擎。传入 url 可覆盖（测试用内存库）。"""
     global _engine, _SessionLocal
     target = url or database_url()
     if _engine is None or url is not None:
-        kwargs = {"future": True}
+        kwargs: dict[str, Any] = {"future": True}
         if target.startswith("sqlite"):
             # SQLite：允许跨线程 + 不要求严格类型
             kwargs["connect_args"] = {"check_same_thread": False}
@@ -65,7 +64,7 @@ def get_sessionmaker() -> sessionmaker:
 
 
 @contextmanager
-def session_scope(url: Optional[str] = None) -> Iterator[Session]:
+def session_scope(url: str | None = None) -> Iterator[Session]:
     """事务作用域：异常回滚，正常提交，最后关闭。
 
     传 url 时用临时引擎（测试用内存库，不污染全局）。
@@ -86,7 +85,7 @@ def session_scope(url: Optional[str] = None) -> Iterator[Session]:
         session.close()
 
 
-def init_db(url: Optional[str] = None) -> None:
+def init_db(url: str | None = None) -> None:
     """建表（幂等）。应用启动或测试前调用。"""
     from . import models  # noqa: F401  确保模型已注册到 Base.metadata
     engine = get_engine(url)

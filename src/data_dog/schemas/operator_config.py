@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """声明式算子配置（A1 后半段：从文档 → 低风险声明式算子，对齐架构 §8.3）。
 
 架构原则：**配置优先、代码兜底**。能用声明式映射/受限DSL表达时，不生成通用代码。
@@ -10,8 +9,8 @@
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field, asdict
-from typing import Any, Dict, List, Optional
+from dataclasses import asdict, dataclass, field
+from typing import Any
 
 
 @dataclass
@@ -20,7 +19,7 @@ class FieldSpec:
     name: str                       # 标准字段名，如 temperature_c
     source: str                     # 原始字段名/来源
     type: str                       # uint8/float32/int16 等（来自 IDL 或文档）
-    unit: Optional[str] = None      # celsius / ampere / rpm ...
+    unit: str | None = None      # celsius / ampere / rpm ...
     optional: bool = False
 
 
@@ -43,9 +42,9 @@ class DetectorConfig:
     component: str                  # 如 joint_motor.front_left_hip
     input_schema: str
     output_schema: str
-    fields: List[FieldSpec] = field(default_factory=list)
-    rules: List[ThresholdRule] = field(default_factory=list)
+    fields: list[FieldSpec] = field(default_factory=list)
+    rules: list[ThresholdRule] = field(default_factory=list)
     generator_provenance: str = ""  # 生成依据的知识来源
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return asdict(self)

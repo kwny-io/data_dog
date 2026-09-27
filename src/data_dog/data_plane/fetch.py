@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """P2 受控引用解析（受架构 §9.1 大载荷外置 + 安全约束）。
 
 安全约束（必须遵守）：
@@ -15,7 +14,6 @@ from __future__ import annotations
 import ipaddress
 import socket
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
 from urllib.parse import urlparse
 
 from ..errors import ToolErrorCode, err
@@ -31,7 +29,7 @@ class FetchDecision:
     allowed: bool
     url: str = ""
     reason: str = ""
-    resolved_ips: Tuple[str, ...] = ()
+    resolved_ips: tuple[str, ...] = ()
 
 
 def _is_public_ip(ip: str) -> bool:
@@ -73,7 +71,7 @@ def validate_url(url: str, *, resolver=None) -> FetchDecision:
     return FetchDecision(True, url=url, resolved_ips=tuple(ips))
 
 
-def _resolve(host: str, resolver) -> Optional[List[str]]:
+def _resolve(host: str, resolver) -> list[str] | None:
     # 若 host 本身就是 IP 字面量
     try:
         ipaddress.ip_address(host)
@@ -87,12 +85,12 @@ def _resolve(host: str, resolver) -> Optional[List[str]]:
             return None
     try:
         infos = socket.getaddrinfo(host, None)
-        return sorted({info[4][0] for info in infos})
+        return sorted({str(info[4][0]) for info in infos})
     except Exception:
         return None
 
 
-def safe_get_allowed(url: str, *, resolver=None) -> Tuple[bool, object]:
+def safe_get_allowed(url: str, *, resolver=None) -> tuple[bool, object]:
     """对外统一入口：返回 (ok, url) 或 (False, err)。调用方在**真正发请求前**必须先过它。"""
     d = validate_url(url, resolver=resolver)
     if not d.allowed:

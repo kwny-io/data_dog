@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """P2 候选异常构建（对齐架构 §9.3 第 6 步 + §12.3）。
 
 把 Detector 的命中合并、去重成**少量** CandidateEvent：
@@ -13,7 +12,7 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from ..schemas.events import CandidateEvent, EvidenceSummary
 
@@ -21,7 +20,7 @@ _SEV_RANK = {"info": 0, "warning": 1, "critical": 2}
 _SEV_SCORE = {"info": 0.3, "warning": 0.7, "critical": 1.0}
 
 
-def _parse_time(value: Any) -> Optional[datetime]:
+def _parse_time(value: Any) -> datetime | None:
     """尽量把 occurred_at 解析成带时区的 datetime；解析不了返回 None。
 
     支持 "2026-09-13T10:00:00Z" / "...+08:00" / 纯 epoch 秒。解析失败时
@@ -53,14 +52,14 @@ class _Group:
     signal: str
     window_start: str
     window_end: str
-    rule_ids: List[str] = field(default_factory=list)
+    rule_ids: list[str] = field(default_factory=list)
     severity: str = "info"
     sample_count: int = 0
-    evidence: List[EvidenceSummary] = field(default_factory=list)
-    evidence_refs: List[str] = field(default_factory=list)
+    evidence: list[EvidenceSummary] = field(default_factory=list)
+    evidence_refs: list[str] = field(default_factory=list)
     operator_id: str = ""
     # 该组最近一次命中/创建的时间（用于判断是否还在合并窗口内）
-    last_dt: Optional[datetime] = None
+    last_dt: datetime | None = None
 
 
 class CandidateBuilder:
@@ -69,9 +68,9 @@ class CandidateBuilder:
     def __init__(self, *, merge_window_s: float = 5.0):
         self.merge_window_s = merge_window_s
         # 所有已形成的组（含已关闭的）；key 唯一，支持同一信号多段事件
-        self._groups: Dict[str, _Group] = {}
+        self._groups: dict[str, _Group] = {}
         # (device, component, signal) → 当前"打开中"的组 key
-        self._open: Dict[str, str] = {}
+        self._open: dict[str, str] = {}
         self._seq = 0
 
     @staticmethod
@@ -104,9 +103,9 @@ class CandidateBuilder:
         self._open[base] = key
         return g
 
-    def add(self, *, device_sn: str, component_ref: str, metrics: Dict[str, Any],
-            hits: List[Dict[str, Any]], occurred_at: str, received_at: str,
-            raw_ref: str = "", baseline: Optional[Dict[str, float]] = None) -> None:
+    def add(self, *, device_sn: str, component_ref: str, metrics: dict[str, Any],
+            hits: list[dict[str, Any]], occurred_at: str, received_at: str,
+            raw_ref: str = "", baseline: dict[str, float] | None = None) -> None:
         """加入一个事件的所有命中（同一事件多规则命中 → 归到各自的 signal）。"""
         for h in hits:
             rule_id = h["rule_id"]
@@ -134,9 +133,9 @@ class CandidateBuilder:
             if raw_ref and raw_ref not in g.evidence_refs:
                 g.evidence_refs.append(raw_ref)
 
-    def build(self) -> List[CandidateEvent]:
+    def build(self) -> list[CandidateEvent]:
         """产出候选列表（确定性排序：设备→部件→信号→首见时间）。"""
-        out: List[CandidateEvent] = []
+        out: list[CandidateEvent] = []
         for key in sorted(self._groups):
             g = self._groups[key]
             cid = "cand_" + hashlib.sha256(key.encode("utf-8")).hexdigest()[:12]

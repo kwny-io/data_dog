@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """P3 Alert 生命周期状态机（对齐架构 §14.3）。
 
     Detected → Confirmed / Suppressed / Rejected
@@ -18,10 +17,10 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 # 允许的状态转移表（from → 可去的 to 集合）
-TRANSITIONS: Dict[str, set] = {
+TRANSITIONS: dict[str, set] = {
     "detected":   {"confirmed", "suppressed", "rejected"},
     "confirmed":  {"escalated", "recovering", "closed"},
     "escalated":  {"recovering", "closed"},
@@ -56,13 +55,13 @@ class AlertEvent:
     detected_at: str = ""
     event_revision: int = 1
     summary: str = ""
-    recommended_actions: List[str] = field(default_factory=list)
+    recommended_actions: list[str] = field(default_factory=list)
     evidence_receipt: str = ""
     investigation_id: str = ""
     policy_version: str = ""
-    history: List[Dict[str, Any]] = field(default_factory=list)
+    history: list[dict[str, Any]] = field(default_factory=list)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         d = dict(self.__dict__)
         return d
 

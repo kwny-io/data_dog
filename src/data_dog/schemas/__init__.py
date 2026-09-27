@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """标准事件 Schema。"""
 from .events import (
     CandidateEvent,

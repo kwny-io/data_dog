@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """降级路径演示（对齐架构 §9.4）。
 
 跑法：
@@ -21,6 +20,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
 from ..schemas.events import CandidateEvent
 from .degradation import (
@@ -84,7 +84,7 @@ def main() -> int:
             severity_hint="critical", window_start="09:58",
             window_end="10:00", sample_count=100, rule_matches=["FAULT"]))
 
-    steps = []
+    steps: list[dict[str, Any]] = []
 
     # --- 1. Agent 在线 ---
     up = DegradationPolicy(agent_available=True)

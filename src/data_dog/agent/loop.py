@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """AgentLoop：把「候选异常 → 受控 Tool → 证据 → 裁决」串成一次调查任务。
 
 流程（对齐架构 13.1 Agent 调查流程）：
@@ -16,13 +15,13 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, List
+from typing import Any
 
 from ..providers.client import (
+    ChatProvider,
     LLMCallError,
     LLMChatMessage,
     LLMToolParam,
-    Provider,
 )
 from ..schemas.events import (
     CandidateEvent,
@@ -62,7 +61,7 @@ SYSTEM_PROMPT = """你是 data_dog 设备健康调查 Agent，负责复核机器
 class AgentLoop:
     def __init__(
         self,
-        provider: Provider,
+        provider: ChatProvider,
         tools: InvestigationTools,
         max_steps: int = 8,
         model: str | None = None,
@@ -75,7 +74,7 @@ class AgentLoop:
         self.model = model
         self.trace_cb = trace_cb  # 每步工具调用的回调（供前端渲染 ReAct 轨迹）
         self.propose_outbox = propose_outbox  # A3：可注入本地 outbox（默认全局单例）
-        self._current_tracker = None   # 可观测性：正在进行的调查的用量累计器
+        self._current_tracker: Any = None   # 可观测性：正在进行的调查的用量累计器
 
     def _trace(self, event: dict) -> None:
         if self.trace_cb is not None:
@@ -94,9 +93,9 @@ class AgentLoop:
         # 1) DD_CTX_MCP=1 → 从 context-injector MCP 获取（拿不到=失败关闭）
         # 2) 候选设备与可信上下文设备不一致 → 失败关闭（不信任候选自报身份）
         # 3) 未启用 MCP → 按候选设备绑定（单机学习模式）
-        import os
+        from .. import settings
         trusted, ctx_err = None, None
-        if os.environ.get("DD_CTX_MCP") == "1":
+        if settings.ctx_mcp() == "1":
             try:
                 from ..mcp_context import fetch_trusted_context
                 trusted = fetch_trusted_context()
@@ -120,7 +119,7 @@ class AgentLoop:
         tool_specs = tools.specs()
         tool_params = [LLMToolParam(**s) for s in tool_specs]
 
-        messages: List[LLMChatMessage] = [
+        messages: list[LLMChatMessage] = [
             LLMChatMessage(role="system", content=SYSTEM_PROMPT),
             LLMChatMessage(
                 role="user",
@@ -138,7 +137,10 @@ class AgentLoop:
             steps += 1
             try:
                 if _chat_accepts_usage:
-                    resp = self.provider.chat(
+                    # usage_tracker 不在 ChatProvider 契约里：只有真 Provider 接受它，
+                    # 确定性 provider 不接受。这里已用 _accepts_kwarg 做运行期探测，
+                    # 是刻意的动态调用，故显式忽略类型检查。
+                    resp = self.provider.chat(  # type: ignore[call-arg]
                         messages, tools=tool_params, model=self.model,
                         usage_tracker=tracker,
                     )
@@ -220,8 +222,8 @@ class AgentLoop:
         )
 
     def investigate_batch(
-        self, candidates: List[CandidateEvent]
-    ) -> tuple[List[InvestigationReport], List[dict]]:
+        self, candidates: list[CandidateEvent]
+    ) -> tuple[list[InvestigationReport], list[dict]]:
         """一次调查多个候选：逐条复核 → 自动关联 → 把关联信息回填进报告。
 
         对应架构 6.2 里 Agent 的「复核候选 + 多事件关联 + 解释」：
@@ -236,17 +238,17 @@ class AgentLoop:
 
         reports = [self.investigate(c) for c in candidates]
         groups = Correlator().correlate(candidates)
-        report_by_cid = {}
-        for r, c in zip(reports, candidates):
+        report_by_cid: dict[str, InvestigationReport] = {}
+        for r, c in zip(reports, candidates, strict=False):
             report_by_cid.setdefault(c.candidate_id, r)
 
         # 把关联信息回填：一份报告知道它被分到哪个组、同组还有谁
         for g in groups:
             for cid in g.candidate_ids:
-                r = report_by_cid.get(cid)
-                if r is not None:
-                    r.correlation_group_id = g.group_id
-                    r.linked_candidate_refs = [
+                hit = report_by_cid.get(cid)
+                if hit is not None:
+                    hit.correlation_group_id = g.group_id
+                    hit.linked_candidate_refs = [
                         o for o in g.candidate_ids if o != cid
                     ]
         return reports, [g.to_dict() for g in groups]

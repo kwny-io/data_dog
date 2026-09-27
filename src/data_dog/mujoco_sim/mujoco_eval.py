@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """MuJoCo 数据源下的 Agent 评估：把 Go2 仿真遥测喂给调查 Agent，算准确率。
 
 与 `synth/synth_eval.py` 完全同构，唯一区别是"样本从哪来"：
@@ -17,24 +16,22 @@ from __future__ import annotations
 
 import json
 import sys
+from collections.abc import Callable
 from pathlib import Path
-from typing import Dict, List, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
+from data_dog.agent.loop import AgentLoop
 from data_dog.mujoco_sim.to_sample import make_mujoco_batch
+from data_dog.providers.client import ChatProvider
+from data_dog.synth.evidence_source import SyntheticEvidenceSource
 from data_dog.synth.synth_eval import (
     DeterministicSynthProvider,
     _make_candidate,
     expected_vs_actual,
     summarize_synth,
 )
-from data_dog.evidence.store import ALLOWED_COMPONENTS
-from data_dog.synth.evidence_source import SyntheticEvidenceSource
-from data_dog.agent.loop import AgentLoop
 from data_dog.tools.investigation import InvestigationTools
-from data_dog.schemas.events import CandidateEvent
-
 
 # ground truth 期望（与 synth_eval 一致）：正常→rejected，各故障→需复核/确认
 _FAULT_EXPECTED = {
@@ -105,14 +102,14 @@ class MujocoDeterministicProvider(DeterministicSynthProvider):
         }
 
 
-def run_mujoco_eval(provider=None, model=None,
+def run_mujoco_eval(provider: ChatProvider | Callable[[], ChatProvider] | None = None,
+                    model=None,
                     duration_s: float = 2.0, dt: float = 0.01,
-                    seed: int = 0) -> List[Dict]:
-    from data_dog.cli import _FakeProvider
+                    seed: int = 0) -> list[dict]:
     samples, labels = build_mujoco_samples(duration_s, dt, seed)
 
     results = []
-    for sample, label in zip(samples, labels):
+    for sample, label in zip(samples, labels, strict=False):
         cand = _make_candidate(sample, label)
         source = SyntheticEvidenceSource([sample])
         tools = InvestigationTools(source)

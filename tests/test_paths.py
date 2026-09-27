@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """资源路径解析回归测试。
 
 背景（真实 bug）：各模块曾用 `Path(__file__).resolve().parents[3]` 推"仓库根"。
@@ -15,7 +14,6 @@ from __future__ import annotations
 from pathlib import Path
 
 from data_dog.paths import operators_dir, project_root, vendor_docs_dir
-
 
 # ---------------------------------------------------------------- 路径解析
 

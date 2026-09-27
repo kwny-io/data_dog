@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Mock 证据库：给调查 Agent 查询的受控证据。
 
 生产环境里，这些数据来自真实的遥测时间序库、厂商知识库和事件流；
@@ -7,10 +6,43 @@
 """
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Protocol
 
 from ..errors import ToolErrorCode, err
 from .detectors import load_detector
+
+
+class EvidenceSource(Protocol):
+    """`InvestigationTools` 依赖的最小证据查询接口（结构化类型）。
+
+    本仓有多个**同形**证据源：`EvidenceStore`（内置假数据）、
+    `SyntheticEvidenceSource`（合成样本）、`CandidateEvidenceBridge`（E2E 回放）、
+    以及阶段 D 的 `RepoEvidenceBridge`（真实落库遥测）。它们刻意不继承同一个
+    基类——各自的构造与依赖差异很大——但都实现下列四个只读查询。
+    用 Protocol 把这份契约显式化，让 mypy 能校验"换数据源不改 Agent"。
+
+    返回约定（与实现一致）：
+    - query_telemetry：命中返回 dict；无数据返回 None；越权返回统一错误 dict。
+    - query_vendor_knowledge：返回知识条目列表。
+    - query_neighbor_events：返回邻居事件**列表**（工具层再包上 device_sn/events）。
+    - query_recent_changes：返回 {"changes": [...]}（越权时返回统一错误 dict）。
+    """
+
+    def query_telemetry(
+        self, device_sn: str, component: str, window_start: str, window_end: str
+    ) -> dict[str, Any] | None: ...
+
+    def query_vendor_knowledge(
+        self, component_type: str, question: str | None = None
+    ) -> list[dict[str, Any]]: ...
+
+    def query_neighbor_events(
+        self, device_sn: str, component: str, window_start: str, window_end: str
+    ) -> list[dict[str, Any]]: ...
+
+    def query_recent_changes(
+        self, device_sn: str, component: str, since: str
+    ) -> dict[str, Any]: ...
 
 # 可查询的部件范围白名单（模拟权限控制）
 ALLOWED_COMPONENTS = {
@@ -23,7 +55,7 @@ ALLOWED_COMPONENTS = {
 
 # ---- 同设备、同部件在不同时间窗的遥测 ----#
 # 结构：component -> window_key -> metrics dict
-TELEMETRY: Dict[str, Dict[str, Dict[str, float]]] = {
+TELEMETRY: dict[str, dict[str, dict[str, float]]] = {
     "joint_motor.front_left_hip": {
         # 一整段真实的升温过程（现场感）：09:40 起温度/电流随负载逐步爬升，
         # 到 09:50 已达 58°C（稳态偏热），09:55~10:00 突破 75°C 告警阈。
@@ -53,7 +85,7 @@ TELEMETRY: Dict[str, Dict[str, Dict[str, float]]] = {
 }
 
 # ---- 厂商知识条目（阈值、错误码、建议）----#
-VENDOR_KNOWLEDGE: Dict[str, List[Dict[str, str]]] = {
+VENDOR_KNOWLEDGE: dict[str, list[dict[str, str]]] = {
     "joint_motor": [
         {
             "id": "KD-01",
@@ -91,7 +123,7 @@ VENDOR_KNOWLEDGE: Dict[str, List[Dict[str, str]]] = {
 }
 
 # ---- 同设备其他部件的"邻居事件"（用于关联）----#
-NEIGHBOR_EVENTS: Dict[str, List[Dict[str, Any]]] = {
+NEIGHBOR_EVENTS: dict[str, list[dict[str, Any]]] = {
     "joint_motor.front_left_hip": [
         {
             "event": "temp_rising",
@@ -103,7 +135,7 @@ NEIGHBOR_EVENTS: Dict[str, List[Dict[str, Any]]] = {
 }
 
 # ---- 近期变更（固件/算子/配置），供 Agent 调查时排查"变更新引入的异常" ----#
-RECENT_CHANGES: Dict[str, List[Dict[str, Any]]] = {
+RECENT_CHANGES: dict[str, list[dict[str, Any]]] = {
     "joint_motor.front_left_hip": [
         {
             "type": "firmware",
@@ -146,7 +178,7 @@ class EvidenceStore:
 
     def query_telemetry(
         self, device_sn: str, component: str, window_start: str, window_end: str
-    ) -> Optional[Dict[str, Any]]:
+    ) -> dict[str, Any] | None:
         if component not in ALLOWED_COMPONENTS:
             return err(ToolErrorCode.DENIED, component)
         win = f"{window_start}-{window_end}"
@@ -170,12 +202,12 @@ class EvidenceStore:
         }
 
     def query_vendor_knowledge(
-        self, component_type: str, question: Optional[str] = None
-    ) -> List[Dict[str, str]]:
+        self, component_type: str, question: str | None = None
+    ) -> list[dict[str, str]]:
         # A7：DD_KB_CHROMA=1 → 走真 RAG（chroma-mcp 查询真实厂商语料）；
         # 失败则降级到内置条目并标注 retriever，不冒充 RAG 结果。
-        import os
-        if os.environ.get("DD_KB_CHROMA") == "1":
+        from .. import settings
+        if settings.kb_chroma() == "1":
             try:
                 from ..knowledge import query_knowledge
                 hits = query_knowledge(question or component_type, n_results=3)
@@ -198,7 +230,7 @@ class EvidenceStore:
 
     def query_neighbor_events(
         self, device_sn: str, component: str, window_start: str, window_end: str
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         win = f"{window_start}-{window_end}"
         events = []
         for cmp, evs in NEIGHBOR_EVENTS.items():
@@ -210,7 +242,7 @@ class EvidenceStore:
 
     def query_recent_changes(
         self, device_sn: str, component: str, since: str
-    ) -> List[Dict[str, Any]]:
+    ) -> dict[str, Any]:
         """查某部件近期固件/算子/配置变更（用于排查'变更新引入异常'）。"""
         # 存在部件即检查权限；变更表里无条目的部件返回空列表
         allowed = component in ALLOWED_COMPONENTS

@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """A2: 多事件确定性关联的雏形测试。"""
 from data_dog.correlation import Correlator, signal_family
 from data_dog.schemas.events import CandidateEvent

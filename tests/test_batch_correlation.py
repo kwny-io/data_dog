@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Agent 核心：一次调查多个候选 → 自动关联 → 合并解释（架构 6.2 的复核+关联+解释）。
 
 用一个只查证据就返回结论的假 Provider，喂进多个候选：
@@ -10,7 +9,7 @@
 import json
 
 from data_dog.agent.loop import AgentLoop
-from data_dog.correlation import Correlator, explain_episode
+from data_dog.correlation import explain_episode
 from data_dog.evidence.store import EvidenceStore
 from data_dog.schemas.events import CandidateEvent
 from data_dog.tools.investigation import InvestigationTools

@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """供应商客户端：统一封装各家 LLM 的 chat 调用。
 
 所有供应商都通过 OpenAI 兼容协议访问，因此这里只有一个实现。
@@ -6,9 +5,8 @@
 """
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Protocol
 
 from ..errors import ToolErrorCode
 from .registry import VendorSpec, get_vendor
@@ -46,24 +44,18 @@ def _is_timeout(e: BaseException) -> bool:
 _DEFAULT_TIMEOUT_S = 60.0
 
 
-def _default_timeout() -> Optional[float]:
-    raw = os.environ.get("DD_LLM_TIMEOUT_S", "").strip()
-    if not raw:
-        return _DEFAULT_TIMEOUT_S
-    try:
-        v = float(raw)
-    except ValueError:
-        return _DEFAULT_TIMEOUT_S
-    return v if v > 0 else None
+def _default_timeout() -> float | None:
+    from .. import settings
+    return settings.llm_timeout_s()
 
 
 @dataclass
 class LLMChatMessage:
     role: str          # "system" | "user" | "assistant" | "tool"
     content: str
-    name: Optional[str] = None   # tool 调用名（用于把工具结果喂回模型）
-    tool_call_id: Optional[str] = None
-    tool_calls: Optional[list] = None  # 仅 assistant 回显用：模型先前发出的原始 tool_calls
+    name: str | None = None   # tool 调用名（用于把工具结果喂回模型）
+    tool_call_id: str | None = None
+    tool_calls: list | None = None  # 仅 assistant 回显用：模型先前发出的原始 tool_calls
 
 
 @dataclass
@@ -74,11 +66,32 @@ class LLMToolParam:
     parameters: dict   # JSON Schema 形态
 
 
+class ChatProvider(Protocol):
+    """`AgentLoop` 依赖的最小 chat 接口（结构化类型，非名义继承）。
+
+    之所以用 Protocol 而不是要求各实现继承 `Provider`：本仓有多套**确定性
+    provider**（offline_demo / synth_eval / mujoco_eval / e2e.replay），
+    它们刻意不继承以保证离线可复现、零 SDK 依赖；但它们都实现了同形的
+    `chat(...)`。用 Protocol 把这份"鸭子契约"显式化——既能被 mypy 校验，
+    又不强迫它们建立继承关系。
+    """
+
+    def chat(
+        self,
+        messages: list[LLMChatMessage],
+        *,
+        tools: list[LLMToolParam] | None = ...,
+        model: str | None = ...,
+        temperature: float = ...,
+        max_tokens: int = ...,
+    ) -> dict: ...
+
+
 class Provider:
     """一个具体的 LLM 供应商客户端。"""
 
     def __init__(self, vendor: VendorSpec, api_key: str,
-                 timeout: Optional[float] = None):
+                 timeout: float | None = None):
         self.vendor = vendor
         self._api_key = api_key
         # 单次请求超时：上游挂起时必须能退出，否则永久占用 worker。
@@ -89,19 +102,19 @@ class Provider:
         self._client = OpenAI(api_key=api_key, base_url=vendor.base_url)
 
     @classmethod
-    def from_config(cls, vendor_id: str, api_key: str) -> "Provider":
+    def from_config(cls, vendor_id: str, api_key: str) -> Provider:
         return cls(get_vendor(vendor_id), api_key)
 
     def chat(
         self,
-        messages: List[LLMChatMessage],
+        messages: list[LLMChatMessage],
         *,
-        tools: Optional[List[LLMToolParam]] = None,
-        model: Optional[str] = None,
+        tools: list[LLMToolParam] | None = None,
+        model: str | None = None,
         temperature: float = 0.2,
         max_tokens: int = 2048,
         usage_tracker=None,
-    ) -> Dict:
+    ) -> dict:
         """调一次 chat；若传了 tools 且模型决定调工具，返回含 tool_calls 的结果。
 
         usage_tracker：可选，传入 UsageTracker 时记录本次调用的 token / 耗时（可观测性）。
@@ -190,7 +203,7 @@ class Provider:
                     "duration_ms": round(duration_ms, 1),
                 }}
 
-    def ping(self, model: Optional[str] = None) -> bool:
+    def ping(self, model: str | None = None) -> bool:
         """连通性/凭据校验，供交互式接入时使用。"""
         try:
             self.chat(
@@ -206,7 +219,7 @@ class Provider:
 def _to_api(m: LLMChatMessage) -> dict:
     if m.role == "tool":
         return {"role": "tool", "tool_call_id": m.tool_call_id, "content": m.content}
-    d = {"role": m.role, "content": m.content}
+    d: dict = {"role": m.role, "content": m.content}
     if m.tool_calls is not None:
         # 回显模型先前发出的 tool_calls，协议要求保留
         d["tool_calls"] = m.tool_calls

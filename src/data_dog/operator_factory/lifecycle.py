@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """P1：算子发布状态机（对齐架构 §8.5）。
 
 覆盖 `Draft → Generated → Building → Validating → AwaitingApproval → Signed →
@@ -17,7 +16,7 @@ Registered → Shadow → Canary → Active`，以及分支：
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 
 class TransitionError(RuntimeError):
@@ -34,7 +33,7 @@ STATES = [
 TERMINAL = {"Retired"}
 
 # 允许的转移（确定性台账）
-_ALLOWED: Dict[str, List[str]] = {
+_ALLOWED: dict[str, list[str]] = {
     "Draft": ["Generated"],
     "Generated": ["Building"],
     "Building": ["Validating", "Rejected"],            # 编译/扫描失败
@@ -69,8 +68,8 @@ class OperatorLifecycle:
     version: str
     state: str = "Draft"
     has_state: bool = False            # 是否为有状态算子（Window/Detector/Correlator）
-    state_policy: Optional[str] = None  # reset | migrate | dual_run（有状态必填）
-    history: List[Dict[str, Any]] = field(default_factory=list)
+    state_policy: str | None = None  # reset | migrate | dual_run（有状态必填）
+    history: list[dict[str, Any]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if self.state not in STATES:
@@ -78,7 +77,7 @@ class OperatorLifecycle:
         self.history.append({"from": None, "to": self.state, "event": "init", "ok": True})
 
     # -- 门控：进入某状态前的前置检查 --
-    def _gate(self, target: str, evidence: Optional[Dict[str, Any]]) -> GateResult:
+    def _gate(self, target: str, evidence: dict[str, Any] | None) -> GateResult:
         ev = evidence or {}
         if target == "Validating":
             # 编译/扫描必须通过（这里以 evidence 表达，不接真实扫描器）
@@ -111,7 +110,7 @@ class OperatorLifecycle:
         return target in _ALLOWED.get(self.state, [])
 
     def transition(self, target: str,
-                   evidence: Optional[Dict[str, Any]] = None) -> str:
+                   evidence: dict[str, Any] | None = None) -> str:
         """执行一次状态转移；非法转移或门控失败 → 抛 TransitionError（确定性拒绝）。"""
         if target not in STATES:
             raise TransitionError(f"未知目标状态: {target}")
@@ -137,9 +136,9 @@ class OperatorLifecycle:
         return self.transition("RolledBack", {"reason": reason})
 
 
-def run_happy_path(operator_id: str, version: str, *, replay: Dict[str, Any],
+def run_happy_path(operator_id: str, version: str, *, replay: dict[str, Any],
                    signature: str, has_state: bool = False,
-                   state_policy: Optional[str] = None) -> OperatorLifecycle:
+                   state_policy: str | None = None) -> OperatorLifecycle:
     """走一遍完整发布：Draft→…→Active（每步用合法证据）。"""
     lc = OperatorLifecycle(operator_id, version, has_state=has_state,
                            state_policy=state_policy)

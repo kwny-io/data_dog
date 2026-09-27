@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """在线服务层测试（FastAPI + TestClient）。
 
 覆盖：存活/就绪探针、指标、鉴权失败关闭、接入→候选→落库、身份只认请求头、
@@ -307,12 +306,61 @@ def test_request_id_honors_client_supplied(client):
     assert r.headers.get("X-Request-Id") == "upstream-abc-123"
 
 
+def test_traceparent_inherited_from_upstream(client):
+    """上游 traceparent 的 trace-id 被沿用，且响应回传合法 traceparent。"""
+    from data_dog.core.tracing import parse_traceparent
+    trace = "e" * 32
+    r2 = client.get("/v1/candidates",
+                    headers={**_Q, "traceparent": f"00-{trace}-{'f' * 16}-01"})
+    out = r2.headers.get("traceparent")
+    assert out, "响应必须回传 traceparent"
+    parsed = parse_traceparent(out)
+    assert parsed is not None and parsed[0] == trace
+
+
+def test_traceparent_generated_when_absent(client):
+    """没带 traceparent 也要生成一个合法的回传。"""
+    from data_dog.core.tracing import parse_traceparent
+    r = client.get("/v1/candidates", headers=_Q)
+    parsed = parse_traceparent(r.headers.get("traceparent", ""))
+    assert parsed is not None
+
+
+def test_cors_absent_by_default(client):
+    """未设 DD_CORS_ORIGINS → 不挂 CORS 中间件，不带跨源头。"""
+    r = client.get("/v1/candidates", headers=_Q)
+    assert "access-control-allow-origin" not in {k.lower() for k in r.headers}
+
+
+def test_cors_enabled_when_configured(monkeypatch, tmp_path):
+    """设了 DD_CORS_ORIGINS → 预检带上 allow-origin（仅限白名单来源）。"""
+    from fastapi.testclient import TestClient
+
+    from data_dog.storage.db import init_db, reset_engine
+    url = f"sqlite:///{(tmp_path / 'cors.db').as_posix()}"
+    monkeypatch.setenv("DD_DATABASE_URL", url)
+    monkeypatch.setenv("DD_CORS_ORIGINS", "https://app.example.com")
+    reset_engine()
+    init_db(url)
+    from data_dog.service.app import create_app
+    with TestClient(create_app()) as c:
+        r = c.options("/v1/candidates", headers={
+            "Origin": "https://app.example.com",
+            "Access-Control-Request-Method": "GET",
+        })
+        assert r.headers.get("access-control-allow-origin") == "https://app.example.com"
+    reset_engine()
+
+
 def test_json_logging_emits_parseable_lines(capsys):
     """结构化日志必须是可解析的 JSON 行，且带 request_id。"""
     import json as _json
 
     from data_dog.core.logging import (
-        clear_request_id, get_logger, set_request_id, setup_logging,
+        clear_request_id,
+        get_logger,
+        set_request_id,
+        setup_logging,
     )
     setup_logging(level="INFO", json_output=True, service="test-svc")
     log = get_logger("test.logger")

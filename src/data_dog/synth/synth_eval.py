@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """合成数据 + ground truth 的 Agent 评估：产出简历可写的准确率数字。
 
 做法：
@@ -14,28 +13,26 @@ from __future__ import annotations
 
 import json
 import sys
+from collections.abc import Callable
 from pathlib import Path
-from typing import Dict, List, Optional
-
-import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from data_dog.agent.loop import AgentLoop
+from data_dog.providers.client import ChatProvider
+from data_dog.schemas.events import CandidateEvent
 from data_dog.synth import (
+    FAULT_DEFS,
     SynthGenConfig,
     synthesize_batch,
-    FAULT_DEFS,
 )
 from data_dog.synth.evidence_source import SyntheticEvidenceSource
-from data_dog.agent.loop import AgentLoop
 from data_dog.tools.investigation import InvestigationTools
-from data_dog.schemas.events import CandidateEvent
-
 
 # 每条合成样本 → 期望的 Agent 裁决（ground truth 的"评估口径"）
 # 正常→rejected；堵转/温度/负载等高危故障→needs_human_review;
 # 丢包/电流偏置等数据质量问题 → needs_human_review（证据不完整）
-_FAULT_EXPECTED: Dict[str, Optional[str]] = {
+_FAULT_EXPECTED: dict[str, str | None] = {
     "normal": "rejected",
     "F1_stall": "needs_human_review",
     "F2_temp_rise": "needs_human_review",
@@ -105,7 +102,7 @@ def _make_candidate(sample, label, joint_idx: int = 0) -> CandidateEvent:
     )
 
 
-def expected_vs_actual(disposition: str, label: Dict) -> bool:
+def expected_vs_actual(disposition: str, label: dict) -> bool:
     """评估：Agent 裁决是否命中 ground truth 期望。宽松集合命中即对。"""
     return disposition in _ACCEPTABLE[label["fault"]]
 
@@ -209,19 +206,19 @@ class DeterministicSynthProvider:
                 "hypotheses": [], "missing_evidence": []}
 
 
-def run_synth_eval(provider=None, model=None, n_joints: int = 2,
-                   n_seconds: float = 120.0, seed: int = 0) -> List[Dict]:
+def run_synth_eval(provider: ChatProvider | Callable[[], ChatProvider] | None = None,
+                   model=None, n_joints: int = 2,
+                   n_seconds: float = 120.0, seed: int = 0) -> list[dict]:
     """对每条合成样本用 Agent 调查，返回每样本结果 + 是否命中 ground truth。
 
     provider 默认给一个"会真读合成遥测、按物理规则裁决"的确定性 provider，
     这样准确率是"数据驱动"的：正常样本该 reject、温度/电流越阈该告警。
     若传入 provider（如真实 LLM），则用它调查。
     """
-    from data_dog.cli import _FakeProvider
     samples, labels = build_samples(n_joints, n_seconds, seed)
 
     results = []
-    for sample, label in zip(samples, labels):
+    for sample, label in zip(samples, labels, strict=False):
         cand = _make_candidate(sample, label)
         # 每个候选用"只含自己这份样本"的数据源，避免多样本同部件覆盖
         source = SyntheticEvidenceSource([sample])
@@ -250,7 +247,7 @@ def run_synth_eval(provider=None, model=None, n_joints: int = 2,
     return results
 
 
-def summarize_synth(results: List[Dict]) -> Dict:
+def summarize_synth(results: list[dict]) -> dict:
     n = len(results)
     hit = sum(1 for r in results if r["hit"])
     return {"n": n, "hit": hit,
@@ -269,8 +266,8 @@ def main():
 
     provider = None
     if args.mode == "real":
-        from data_dog.providers.config import load_config
         from data_dog.providers.client import Provider
+        from data_dog.providers.config import load_config
         cfg = load_config()
         if not cfg["api_key"]:
             print("real 模式需要 data-dog init 先配 key")

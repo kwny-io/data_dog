@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """A4 接入测试：Agent 通过自研 context-injector MCP 获取可信上下文。
 
 覆盖四条路径：

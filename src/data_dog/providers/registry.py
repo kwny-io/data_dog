@@ -1,11 +1,9 @@
-# -*- coding: utf-8 -*-
 """内置供应商注册表：各家 LLM 供应商的元数据。
 
 目前所有供应商都走 OpenAI 兼容协议，只是 base_url 和一个示例模型名不同。
 因此「接一个新供应商」通常只需要在这里加一行注册，不用再写一份接入代码。
 """
 from dataclasses import dataclass
-from typing import Dict, List
 
 
 @dataclass(frozen=True)
@@ -19,7 +17,7 @@ class VendorSpec:
     doc: str             # 一句话说明，用于交互式引导
 
 
-BUILTIN_VENDORS: List[VendorSpec] = [
+BUILTIN_VENDORS: list[VendorSpec] = [
     VendorSpec(
         id="deepseek",
         label="DeepSeek（推荐，便宜 + 国内直连）",
@@ -46,10 +44,10 @@ BUILTIN_VENDORS: List[VendorSpec] = [
     ),
 ]
 
-BY_ID: Dict[str, VendorSpec] = {v.id: v for v in BUILTIN_VENDORS}
+BY_ID: dict[str, VendorSpec] = {v.id: v for v in BUILTIN_VENDORS}
 
 
-def vendor_ids() -> List[str]:
+def vendor_ids() -> list[str]:
     return [v.id for v in BUILTIN_VENDORS]
 
 

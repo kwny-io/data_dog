@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """P3 确定性上报策略门（对齐架构 §14.2）。
 
 把 §14.2 的 OR 触发条件做成**可穷举、无歧义**的决策表：
@@ -22,7 +21,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 POLICY_VERSION = "report-policy-v1"
 
@@ -46,11 +45,11 @@ class PolicyThresholds:
 class PolicyDecision:
     report: bool
     severity: str = "info"
-    reasons: List[str] = field(default_factory=list)
+    reasons: list[str] = field(default_factory=list)
     policy_version: str = POLICY_VERSION
     suppressed_reason: str = ""
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "report": self.report, "severity": self.severity,
             "reasons": self.reasons, "policy_version": self.policy_version,
@@ -61,11 +60,11 @@ class PolicyDecision:
 class ReportPolicyGate:
     """确定性上报门。evaluate(report, signals) → PolicyDecision。"""
 
-    def __init__(self, thresholds: Optional[PolicyThresholds] = None):
+    def __init__(self, thresholds: PolicyThresholds | None = None):
         self.t = thresholds or PolicyThresholds()
 
-    def evaluate(self, report: Dict[str, Any],
-                 signals: Optional[Dict[str, Any]] = None) -> PolicyDecision:
+    def evaluate(self, report: dict[str, Any],
+                 signals: dict[str, Any] | None = None) -> PolicyDecision:
         """report：InvestigationReport 的 dict；signals：来自候选/关联的补充信号。
 
         signals 可含：
@@ -78,7 +77,7 @@ class ReportPolicyGate:
         s = signals or {}
         disposition = str(report.get("disposition", ""))
         confidence = float(report.get("confidence", 0.0) or 0.0)
-        reasons: List[str] = []
+        reasons: list[str] = []
 
         # ---- 门控（失败关闭）：证据完整性 ----
         evidence_refs = list(s.get("evidence_refs") or report.get("counter_evidence_refs") or [])
@@ -124,7 +123,7 @@ class ReportPolicyGate:
         return PolicyDecision(True, severity=_resolve_severity(report, s), reasons=reasons)
 
 
-def _resolve_severity(report: Dict[str, Any], signals: Dict[str, Any]) -> str:
+def _resolve_severity(report: dict[str, Any], signals: dict[str, Any]) -> str:
     """severity 冲突消解：取所有来源里的**最高**严重度。"""
     candidates = [str(report.get("severity") or "info")]
     candidates += [str(x) for x in (signals.get("candidate_severities") or [])]

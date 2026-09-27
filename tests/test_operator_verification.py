@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """P1 收尾测试：发布状态机 + Fuzz 健壮性 + 新旧差分。
 
 覆盖：
@@ -17,7 +16,9 @@ import pytest
 
 from data_dog.operator_factory.knowledge import build_knowledge_package
 from data_dog.operator_factory.lifecycle import (
-    OperatorLifecycle, TransitionError, run_happy_path,
+    OperatorLifecycle,
+    TransitionError,
+    run_happy_path,
 )
 from data_dog.operator_factory.p1_demo import build_motor_operator
 from data_dog.operator_factory.pipeline import Fixture
@@ -131,8 +132,9 @@ def test_diff_same_operator_no_difference(op, fixtures):
 
 def test_diff_unexplained_difference_rejected(op, fixtures):
     """新版多了个"永远命中"的规则 → 差分必须判为不可接受（行为漂移）。"""
-    from data_dog.operator_factory.pipeline import DeclarativeRule
     import copy
+
+    from data_dog.operator_factory.pipeline import DeclarativeRule
     new = copy.deepcopy(op)
     new.rules.append(DeclarativeRule(
         rule_id="ALWAYS_TRUE", field="temperature", operator="ge", value=-1e9,
