@@ -42,6 +42,8 @@ def _raw(event_id="e1", temperature=95, **kw):
 
 
 _AUTH = {"X-Tenant-Id": "tenant-real", "X-Device-Sn": "device-go2-0001"}
+# 查询端点的租户头（读也失败关闭：无租户头 → 401）
+_Q = {"X-Tenant-Id": "tenant-real"}
 
 
 def _auth_enabled(client, headers=None) -> str:
@@ -129,7 +131,7 @@ def test_body_identity_is_ignored(client):
     spoofed = _raw("e1", tenant_id="FAKE", device_sn="FAKE")
     r = client.post("/v1/telemetry", headers=_AUTH, json={"events": [spoofed]})
     assert r.status_code == 200
-    items = client.get("/v1/candidates").json()["items"]
+    items = client.get("/v1/candidates", headers=_Q).json()["items"]
     assert len(items) == 1
     assert items[0]["device_sn"] == "device-go2-0001"
 
@@ -146,8 +148,10 @@ def test_fail_closed_on_bad_firmware(client):
 
 def test_candidates_filter_by_device(client):
     client.post("/v1/telemetry", headers=_AUTH, json={"events": [_raw("e1")]})
-    hit = client.get("/v1/candidates", params={"device_sn": "device-go2-0001"}).json()
-    miss = client.get("/v1/candidates", params={"device_sn": "nope"}).json()
+    hit = client.get("/v1/candidates", headers=_Q,
+                     params={"device_sn": "device-go2-0001"}).json()
+    miss = client.get("/v1/candidates", headers=_Q,
+                      params={"device_sn": "nope"}).json()
     assert hit["count"] == 1 and miss["count"] == 0
 
 
@@ -155,7 +159,7 @@ def test_ingest_is_idempotent_across_repeats(client):
     """同一条日志重复接入，候选按 ID 幂等 upsert，不产生重复行。"""
     for _ in range(3):
         client.post("/v1/telemetry", headers=_AUTH, json={"events": [_raw("e1")]})
-    assert client.get("/v1/candidates").json()["count"] == 1
+    assert client.get("/v1/candidates", headers=_Q).json()["count"] == 1
 
 
 # ---------------------------------------------------------------- 可选 API Key
@@ -163,7 +167,7 @@ def test_ingest_is_idempotent_across_repeats(client):
 def test_api_key_disabled_by_default(client):
     """不设 DD_API_KEY → 不校验（本地开发/评测行为不变）。"""
     assert _auth_enabled(client) == "0"
-    assert client.get("/v1/candidates").status_code == 200
+    assert client.get("/v1/candidates", headers=_Q).status_code == 200
 
 
 def test_api_key_enforced_when_set(client, monkeypatch):
@@ -177,14 +181,16 @@ def test_api_key_enforced_when_set(client, monkeypatch):
     assert client.get("/readyz").status_code == 200
 
     # 业务端点：缺密钥 / 错密钥 → 401
-    assert client.get("/v1/candidates").status_code == 401
-    assert client.get("/v1/candidates", headers={"X-API-Key": wrong}).status_code == 401
+    assert client.get("/v1/candidates", headers=_Q).status_code == 401
+    assert client.get("/v1/candidates",
+                      headers={**_Q, "X-API-Key": wrong}).status_code == 401
     assert client.post("/v1/telemetry", headers=_AUTH,
                        json={"events": [_raw()]}).status_code == 401
 
     # 正确密钥 → 放行（业务头仍需齐全）
-    ok = client.get("/v1/candidates", headers={"X-API-Key": key})
+    ok = client.get("/v1/candidates", headers={**_Q, "X-API-Key": key})
     assert ok.status_code == 200
+
     ingest = client.post("/v1/telemetry",
                          headers={**_AUTH, "X-API-Key": key},
                          json={"events": [_raw()]})
@@ -199,7 +205,7 @@ def test_blank_api_key_counts_as_unset(client, monkeypatch):
     """仅空白不算"已配置"——否则会误判为已开启鉴权。"""
     monkeypatch.setenv("DD_API_KEY", "   ")
     assert _auth_enabled(client) == "0"
-    assert client.get("/v1/candidates").status_code == 200
+    assert client.get("/v1/candidates", headers=_Q).status_code == 200
 
 
 # ---------------------------------------------------------------- 限流（跨请求）
@@ -288,7 +294,7 @@ def test_auth_rejection_uses_unified_contract(client, monkeypatch):
 
 def test_request_id_returned_and_propagated(client):
     """每个请求都有 request_id，并回传响应头（便于与上游链路对齐）。"""
-    r = client.get("/v1/candidates")
+    r = client.get("/v1/candidates", headers=_Q)
     rid = r.headers.get("X-Request-Id")
     assert rid, "响应必须带 X-Request-Id"
     assert len(rid) >= 8
@@ -296,7 +302,8 @@ def test_request_id_returned_and_propagated(client):
 
 def test_request_id_honors_client_supplied(client):
     """客户端透传的 X-Request-Id 应被沿用（跨服务链路对齐）。"""
-    r = client.get("/v1/candidates", headers={"X-Request-Id": "upstream-abc-123"})
+    r = client.get("/v1/candidates",
+                   headers={**_Q, "X-Request-Id": "upstream-abc-123"})
     assert r.headers.get("X-Request-Id") == "upstream-abc-123"
 
 
@@ -341,20 +348,21 @@ def test_candidates_pagination(client):
         client.post("/v1/telemetry",
                     headers={"X-Tenant-Id": "t1", "X-Device-Sn": f"dev-{i}"},
                     json={"events": [_raw(event_id=f"pg{i}")]})
+    q = {"X-Tenant-Id": "t1"}
 
-    r = client.get("/v1/candidates", params={"limit": 2, "offset": 0})
+    r = client.get("/v1/candidates", headers=q, params={"limit": 2, "offset": 0})
     assert r.status_code == 200
     b = r.json()
     assert b["count"] == 2 and b["limit"] == 2 and b["offset"] == 0
     assert b["total"] == 5 and b["has_more"] is True
 
     # 最后一页：has_more=False
-    r2 = client.get("/v1/candidates", params={"limit": 10, "offset": 4})
+    r2 = client.get("/v1/candidates", headers=q, params={"limit": 10, "offset": 4})
     b2 = r2.json()
     assert b2["count"] == 1 and b2["has_more"] is False
 
     # 分页不重叠：offset=2 拿到的与 offset=0 不同
-    r3 = client.get("/v1/candidates", params={"limit": 2, "offset": 2})
+    r3 = client.get("/v1/candidates", headers=q, params={"limit": 2, "offset": 2})
     ids0 = {c["candidate_id"] for c in b["items"]}
     ids2 = {c["candidate_id"] for c in r3.json()["items"]}
     assert not (ids0 & ids2), "分页结果不应重叠"
@@ -362,9 +370,12 @@ def test_candidates_pagination(client):
 
 def test_pagination_limit_is_capped(client):
     """limit 超上限应被拒（不得允许一次拉全表）。"""
-    assert client.get("/v1/candidates", params={"limit": 99999}).status_code == 422
-    assert client.get("/v1/candidates", params={"limit": 0}).status_code == 422
-    assert client.get("/v1/candidates", params={"offset": -1}).status_code == 422
+    assert client.get("/v1/candidates", headers=_Q,
+                      params={"limit": 99999}).status_code == 422
+    assert client.get("/v1/candidates", headers=_Q,
+                      params={"limit": 0}).status_code == 422
+    assert client.get("/v1/candidates", headers=_Q,
+                      params={"offset": -1}).status_code == 422
 
 
 # ---------------------------------------------------------------- 指标
@@ -387,7 +398,7 @@ def test_ingest_increments_business_metrics(client):
 
 def test_metrics_path_label_is_route_template(client):
     """指标 path 标签必须是**路由模板**，不是实际 URL（控制标签基数）。"""
-    client.get("/v1/candidates", params={"limit": 1})
+    client.get("/v1/candidates", headers=_Q, params={"limit": 1})
     body = client.get("/metrics").text
     # 应出现路由模板
     assert 'path="/v1/candidates"' in body
@@ -411,3 +422,36 @@ def test_metrics_rejected_reason_labeled(client):
         assert "data_dog_rate_limited_total" in body
     finally:
         svc._state.gateway = old
+
+
+# ---------------------------------------------------------------- 多租户隔离
+
+def test_query_requires_tenant_header(client):
+    """读路径失败关闭：无 X-Tenant-Id → 401（租户是访问控制的一部分）。"""
+    assert client.get("/v1/candidates").status_code == 401
+    assert client.get("/v1/alerts").status_code == 401
+    assert client.get("/v1/outbox").status_code == 401
+
+
+def test_query_ignores_tenant_query_param(client):
+    """`?tenant_id=` 一律被忽略：租户只能来自请求头。
+
+    查询串可被链接/日志/浏览器历史携带与篡改，不是可信身份来源。这里用 A 租户
+    写入、再以 A 头 + 谎报 `?tenant_id=B` 读取——必须仍读到 A 的数据（参数无效）。
+    """
+    client.post("/v1/telemetry", headers=_AUTH, json={"events": [_raw("e1")]})
+    r = client.get("/v1/candidates", headers=_Q,
+                   params={"tenant_id": "other-tenant"})
+    assert r.status_code == 200
+    assert r.json()["count"] == 1, "查询参数覆盖了租户（应按请求头取租户）"
+    assert r.json()["items"][0]["tenant_id"] == "tenant-real"
+
+
+def test_tenant_lists_are_isolated(client):
+    """A 租户写入的候选/告警，B 租户查询时看不到。"""
+    client.post("/v1/telemetry", headers=_AUTH, json={"events": [_raw("e1")]})
+    # A 能看到
+    assert client.get("/v1/candidates", headers=_Q).json()["count"] == 1
+    # B 看不到（空列表，而非报错——不泄露"另一端有数据"）
+    b = client.get("/v1/candidates", headers={"X-Tenant-Id": "tenant-other"}).json()
+    assert b["count"] == 0 and b["total"] == 0 and b["items"] == []

@@ -24,6 +24,11 @@ def db_url(tmp_path):
     return url
 
 
+# 本文件所有往返测试使用同一租户；跨租户隔离另见下方专门用例。
+T1 = "t1"
+T2 = "t2"
+
+
 def _cand(cid="cand_1"):
     return CandidateEvent(
         candidate_id=cid, device_sn="dev-1", component_ref="joint_motor.front_left_hip",
@@ -38,10 +43,10 @@ def _cand(cid="cand_1"):
 
 def test_candidate_roundtrip(db_url):
     with session_scope(db_url) as s:
-        assert repo.save_candidates(s, [_cand()]) == 1
+        assert repo.save_candidates(s, [_cand()], tenant_id=T1) == 1
     # 新会话（模拟重启）能读到，且字段完整
     with session_scope(db_url) as s:
-        rows = repo.list_candidates(s)
+        rows = repo.list_candidates(s, tenant_id=T1)
     assert len(rows) == 1
     r = rows[0]
     assert r["candidate_id"] == "cand_1"
@@ -51,21 +56,22 @@ def test_candidate_roundtrip(db_url):
 
 def test_candidate_save_is_idempotent(db_url):
     with session_scope(db_url) as s:
-        repo.save_candidates(s, [_cand()])
-        repo.save_candidates(s, [_cand()])      # 同 id 再存 → 更新而非重复
+        repo.save_candidates(s, [_cand()], tenant_id=T1)
+        repo.save_candidates(s, [_cand()], tenant_id=T1)  # 同 id 再存 → 更新而非重复
     with session_scope(db_url) as s:
-        assert len(repo.list_candidates(s)) == 1
+        assert len(repo.list_candidates(s, tenant_id=T1)) == 1
 
 
 def test_candidate_filter(db_url):
     with session_scope(db_url) as s:
-        repo.save_candidates(s, [_cand("c1")])
+        repo.save_candidates(s, [_cand("c1")], tenant_id=T1)
         c2 = _cand("c2")
         c2.device_sn = "dev-2"
-        repo.save_candidates(s, [c2])
+        repo.save_candidates(s, [c2], tenant_id=T1)
     with session_scope(db_url) as s:
-        assert len(repo.list_candidates(s, device_sn="dev-1")) == 1
-        assert len(repo.list_candidates(s, component_ref="joint_motor.front_left_hip")) == 2
+        assert len(repo.list_candidates(s, tenant_id=T1, device_sn="dev-1")) == 1
+        assert len(repo.list_candidates(
+            s, tenant_id=T1, component_ref="joint_motor.front_left_hip")) == 2
 
 
 # ---------------------------------------------------------------- 调查报告
@@ -76,9 +82,9 @@ def test_report_roundtrip(db_url):
                               candidate_refs=["cand_1"],
                               recommended_actions=["降载"])
     with session_scope(db_url) as s:
-        repo.save_report(s, rep)
+        repo.save_report(s, rep, tenant_id=T1)
     with session_scope(db_url) as s:
-        rows = repo.list_reports(s)
+        rows = repo.list_reports(s, tenant_id=T1)
     assert len(rows) == 1 and rows[0]["disposition"] == "confirmed"
     assert rows[0]["recommended_actions"] == ["降载"]
 
@@ -91,30 +97,35 @@ def test_alert_roundtrip(db_url):
                     event_type="motor_thermal", state="confirmed", severity="critical",
                     event_revision=2, summary="s")
     with session_scope(db_url) as s:
-        repo.save_alert(s, ev)
+        repo.save_alert(s, ev, tenant_id=T1)
     with session_scope(db_url) as s:
-        got = repo.get_alert(s, "alert_1")
+        got = repo.get_alert(s, "alert_1", tenant_id=T1)
     assert got and got["state"] == "confirmed" and got["event_revision"] == 2
 
 
 def test_outbox_idempotent_and_deliver(db_url):
     with session_scope(db_url) as s:
-        assert repo.upsert_outbox(s, idempotency_key="k", revision=1, payload={"a": 1}) is True
-        assert repo.upsert_outbox(s, idempotency_key="k", revision=1, payload={"a": 1}) is False
-        assert repo.upsert_outbox(s, idempotency_key="k", revision=2, payload={"a": 2}) is True
+        assert repo.upsert_outbox(s, tenant_id=T1, idempotency_key="k",
+                                  revision=1, payload={"a": 1}) is True
+        assert repo.upsert_outbox(s, tenant_id=T1, idempotency_key="k",
+                                  revision=1, payload={"a": 1}) is False
+        assert repo.upsert_outbox(s, tenant_id=T1, idempotency_key="k",
+                                  revision=2, payload={"a": 2}) is True
     with session_scope(db_url) as s:
-        assert len(repo.list_outbox(s)) == 2
-        assert len(repo.list_outbox(s, status="pending")) == 2
-        repo.mark_outbox_delivered(s, idempotency_key="k", revision=1, receipt="r1")
+        assert len(repo.list_outbox(s, tenant_id=T1)) == 2
+        assert len(repo.list_outbox(s, tenant_id=T1, status="pending")) == 2
+        repo.mark_outbox_delivered(s, tenant_id=T1, idempotency_key="k",
+                                   revision=1, receipt="r1")
     with session_scope(db_url) as s:
-        assert len(repo.list_outbox(s, status="delivered")) == 1
+        assert len(repo.list_outbox(s, tenant_id=T1, status="delivered")) == 1
 
 
 def test_feedback_roundtrip(db_url):
     with session_scope(db_url) as s:
-        repo.save_feedback(s, event_id="alert_1", kind="repaired", note="换轴承")
+        repo.save_feedback(s, tenant_id=T1, event_id="alert_1", kind="repaired",
+                           note="换轴承")
     with session_scope(db_url) as s:
-        fb = repo.list_feedback(s)
+        fb = repo.list_feedback(s, tenant_id=T1)
     assert fb and fb[0]["kind"] == "repaired"
 
 
@@ -131,13 +142,15 @@ def test_p3_reporting_persisted(db_url):
     assert outcome.delivered
 
     with session_scope(db_url) as s:
-        repo.save_alert(s, outcome.event)
-        repo.upsert_outbox(s, idempotency_key=outcome.event.idempotency_key,
+        repo.save_alert(s, outcome.event, tenant_id=T1)
+        repo.upsert_outbox(s, tenant_id=T1,
+                           idempotency_key=outcome.event.idempotency_key,
                            revision=outcome.event.event_revision,
                            payload={"event_id": outcome.event.event_id})
     with session_scope(db_url) as s:
-        assert repo.get_alert(s, outcome.event.event_id)["severity"] == "critical"
-        assert len(repo.list_outbox(s)) == 1
+        assert repo.get_alert(s, outcome.event.event_id,
+                              tenant_id=T1)["severity"] == "critical"
+        assert len(repo.list_outbox(s, tenant_id=T1)) == 1
 
 
 # ---------------------------------------------------------------- 遥测
@@ -159,11 +172,16 @@ def test_telemetry_roundtrip(db_url):
             self.binding_revision = "b1"
             self.raw_log_ref = "rawlog://x"
     with session_scope(db_url) as s:
-        assert repo.save_telemetry(s, [_E()]) == 1
+        # 租户来自调用方（认证上下文），正文里的 tenant_id="t1" 被忽略
+        assert repo.save_telemetry(s, [_E()], tenant_id=T2) == 1
     with session_scope(db_url) as s:
-        rows = repo.list_telemetry(s)
+        rows = repo.list_telemetry(s, tenant_id=T2)
     assert rows[0]["component_ref"] == "joint_motor.front_left_hip"
     assert rows[0]["metrics"]["temperature"] == 95
+    # 正文自称 t1，但落库归属 t2；t1 查不到（正文身份不可信）
+    assert rows[0]["tenant_id"] == T2
+    with session_scope(db_url) as s:
+        assert repo.list_telemetry(s, tenant_id=T1) == []
 
 
 # ---------------------------------------------------------------- 数据库切换
@@ -195,7 +213,7 @@ def test_concurrent_upsert_same_id_is_idempotent(db_url):
         try:
             with session_scope(db_url) as s:
                 # 8 个线程写**同一个** candidate_id，制造主键竞争
-                repo.save_candidates(s, [_cand("cand-race-same")])
+                repo.save_candidates(s, [_cand("cand-race-same")], tenant_id=T1)
             ok.append(i)
         except Exception as e:                      # noqa: BLE001
             errs.append(f"{type(e).__name__}: {e}")
@@ -209,5 +227,41 @@ def test_concurrent_upsert_same_id_is_idempotent(db_url):
     assert errs == [], f"并发 upsert 不应抛异常，实际: {errs}"
     assert len(ok) == 8
     with session_scope(db_url) as s:
-        rows = repo.list_candidates(s)
+        rows = repo.list_candidates(s, tenant_id=T1)
     assert len(rows) == 1, "同一主键并发写入应只留一条记录"
+
+
+# ---------------------------------------------------------------- 多租户隔离
+
+def test_tenant_isolation_reads(db_url):
+    """t1 写入的数据，t2 读不到（行级隔离）。"""
+    with session_scope(db_url) as s:
+        repo.save_candidates(s, [_cand("c1")], tenant_id=T1)
+        repo.save_alert(s, AlertEvent(
+            event_id="alert_1", idempotency_key="k", device_ref="dev-1",
+            component_ref="c", event_type="e", state="detected"), tenant_id=T1)
+    with session_scope(db_url) as s:
+        assert len(repo.list_candidates(s, tenant_id=T1)) == 1
+        assert repo.list_candidates(s, tenant_id=T2) == []
+        assert repo.get_candidate(s, "c1", tenant_id=T1) is not None
+        assert repo.get_candidate(s, "c1", tenant_id=T2) is None
+        assert repo.get_alert(s, "alert_1", tenant_id=T2) is None
+
+
+def test_tenant_isolation_no_pk_collision(db_url):
+    """同一 candidate_id 在两个租户下各存一行，互不覆盖。
+
+    这是复合主键的核心意义：确定性 candidate_id 不含租户，若主键只有
+    candidate_id，后写入的租户会静默覆盖前一个租户的行。
+    """
+    with session_scope(db_url) as s:
+        repo.save_candidates(s, [_cand("same")], tenant_id=T1)
+    c2 = _cand("same")
+    c2.device_sn = "dev-2"
+    with session_scope(db_url) as s:
+        repo.save_candidates(s, [c2], tenant_id=T2)
+    with session_scope(db_url) as s:
+        r1 = repo.get_candidate(s, "same", tenant_id=T1)
+        r2 = repo.get_candidate(s, "same", tenant_id=T2)
+    assert r1["device_sn"] == "dev-1"
+    assert r2["device_sn"] == "dev-2", "t2 的写入覆盖了 t1 的行（主键未含租户）"

@@ -94,13 +94,18 @@ def _apply_candidate(row: Any, d: Dict[str, Any]) -> None:
     row.detector_provenance = d.get("detector_provenance", "")
 
 
-def save_candidates(session: Session, candidates: List[Any]) -> int:
-    """保存候选（幂等：已存在则更新）。返回写入条数。并发安全。"""
+def save_candidates(session: Session, candidates: List[Any], *, tenant_id: str) -> int:
+    """保存候选（幂等：已存在则更新）。返回写入条数。并发安全。
+
+    主键是 (tenant_id, candidate_id)：candidate_id 由设备/部件/信号派生、
+    不含租户，故必须用复合主键，否则跨租户同名 id 会互相覆盖。
+    """
     n = 0
     for c in candidates:
         d = _as_dict(c)
         cid = d["candidate_id"]
-        _upsert(session, M.CandidateRow, cid, {"candidate_id": cid},
+        _upsert(session, M.CandidateRow, (tenant_id, cid),
+                {"tenant_id": tenant_id, "candidate_id": cid},
                 lambda row, _d=d: _apply_candidate(row, _d))
         n += 1
     return n
@@ -118,8 +123,8 @@ def _page(q: Any, limit: Optional[int], offset: int) -> List[Dict[str, Any]]:
 def count_rows(session: Session, model: Any, **filters: Any) -> int:
     """按条件计数（用 COUNT(*) 聚合，**不把全表拉进内存**）。
 
-    此前 /metrics 用 `len(list_candidates(s))` 之类取总数，数据一多就会把整表
-    加载到内存再取长度，指标端点反而成了瓶颈。
+    **不做租户过滤**：这是全局运维指标（/metrics 用），故意跨租户。
+    租户作用域的计数请传 `tenant_id=` 作为 filter。
     """
     q = session.query(func.count()).select_from(model)
     for col, val in filters.items():
@@ -127,11 +132,13 @@ def count_rows(session: Session, model: Any, **filters: Any) -> int:
     return int(q.scalar() or 0)
 
 
-def list_candidates(session: Session, *, device_sn: Optional[str] = None,
+def list_candidates(session: Session, *, tenant_id: str,
+                    device_sn: Optional[str] = None,
                     component_ref: Optional[str] = None,
                     limit: Optional[int] = None,
                     offset: int = 0) -> List[Dict[str, Any]]:
-    q = session.query(M.CandidateRow)
+    q = session.query(M.CandidateRow).filter(
+        M.CandidateRow.tenant_id == tenant_id)
     if device_sn is not None:
         q = q.filter(M.CandidateRow.device_sn == device_sn)
     if component_ref is not None:
@@ -141,12 +148,21 @@ def list_candidates(session: Session, *, device_sn: Optional[str] = None,
     return _page(q, limit, offset)
 
 
+def get_candidate(session: Session, candidate_id: str, *,
+                  tenant_id: str) -> Optional[Dict[str, Any]]:
+    """取单个候选。跨租户（或不存在）→ None，供路由返回 404、不泄露存在性。"""
+    r = session.get(M.CandidateRow, (tenant_id, candidate_id))
+    return _row_dict(r) if r else None
+
+
 # ---------------------------------------------------------------- 调查报告
 
-def save_report(session: Session, report: Any) -> None:
+def save_report(session: Session, report: Any, *, tenant_id: str) -> None:
     d = _as_dict(report)
     rid = d["investigation_id"]
-    row = session.get(M.ReportRow, rid) or M.ReportRow(investigation_id=rid)
+    pk = (tenant_id, rid)
+    row = session.get(M.ReportRow, pk) or M.ReportRow(
+        tenant_id=tenant_id, investigation_id=rid)
     session.add(row)
     row.disposition = d.get("disposition", "")
     row.severity = d.get("severity")
@@ -162,17 +178,29 @@ def save_report(session: Session, report: Any) -> None:
     session.flush()
 
 
-def list_reports(session: Session) -> List[Dict[str, Any]]:
-    q = session.query(M.ReportRow).order_by(M.ReportRow.created_at)
-    return [_row_dict(r) for r in q.all()]
+def get_report(session: Session, investigation_id: str, *,
+               tenant_id: str) -> Optional[Dict[str, Any]]:
+    """取单份报告。跨租户（或不存在）→ None（路由返回 404）。"""
+    r = session.get(M.ReportRow, (tenant_id, investigation_id))
+    return _row_dict(r) if r else None
+
+
+def list_reports(session: Session, *, tenant_id: str,
+                 limit: Optional[int] = None,
+                 offset: int = 0) -> List[Dict[str, Any]]:
+    q = (session.query(M.ReportRow)
+         .filter(M.ReportRow.tenant_id == tenant_id)
+         .order_by(M.ReportRow.created_at, M.ReportRow.investigation_id))
+    return _page(q, limit, offset)
 
 
 # ---------------------------------------------------------------- Alert
 
-def save_alert(session: Session, event: Any) -> None:
+def save_alert(session: Session, event: Any, *, tenant_id: str) -> None:
     d = _as_dict(event)
     eid = d["event_id"]
-    _upsert(session, M.AlertRow, eid, {"event_id": eid},
+    _upsert(session, M.AlertRow, (tenant_id, eid),
+            {"tenant_id": tenant_id, "event_id": eid},
             lambda row: _apply_alert(row, d))
 
 
@@ -193,24 +221,30 @@ def _apply_alert(row: Any, d: Dict[str, Any]) -> None:
     row.history = list(d.get("history", []))
 
 
-def get_alert(session: Session, event_id: str) -> Optional[Dict[str, Any]]:
-    r = session.get(M.AlertRow, event_id)
+def get_alert(session: Session, event_id: str, *,
+              tenant_id: str) -> Optional[Dict[str, Any]]:
+    r = session.get(M.AlertRow, (tenant_id, event_id))
     return _row_dict(r) if r else None
 
 
-def list_alerts(session: Session, *, limit: Optional[int] = None,
+def list_alerts(session: Session, *, tenant_id: str,
+                limit: Optional[int] = None,
                 offset: int = 0) -> List[Dict[str, Any]]:
-    q = session.query(M.AlertRow).order_by(
-        M.AlertRow.created_at, M.AlertRow.event_id)
+    q = (session.query(M.AlertRow)
+         .filter(M.AlertRow.tenant_id == tenant_id)
+         .order_by(M.AlertRow.created_at, M.AlertRow.event_id))
     return _page(q, limit, offset)
 
 
 # ---------------------------------------------------------------- Outbox
 
-def upsert_outbox(session: Session, *, idempotency_key: str, revision: int,
-                  payload: Dict[str, Any]) -> bool:
-    """写入 outbox 条目。已存在 → 返回 False（幂等，不重复入队）。并发安全。"""
-    pk = (idempotency_key, revision)
+def upsert_outbox(session: Session, *, tenant_id: str, idempotency_key: str,
+                  revision: int, payload: Dict[str, Any]) -> bool:
+    """写入 outbox 条目。已存在 → 返回 False（幂等，不重复入队）。并发安全。
+
+    主键 (tenant_id, idempotency_key, revision)：幂等键跨租户可能重名。
+    """
+    pk = (tenant_id, idempotency_key, revision)
 
     def _apply(row: Any) -> None:
         # 已存在时不覆盖 payload（保留首次写入的语义），仅在竞态分支被调用
@@ -219,8 +253,8 @@ def upsert_outbox(session: Session, *, idempotency_key: str, revision: int,
     row = session.get(M.AlertOutboxRow, pk)
     if row is not None:
         return False
-    new_row = M.AlertOutboxRow(idempotency_key=idempotency_key, revision=revision,
-                               payload=payload, status="pending")
+    new_row = M.AlertOutboxRow(tenant_id=tenant_id, idempotency_key=idempotency_key,
+                               revision=revision, payload=payload, status="pending")
     try:
         with session.begin_nested():          # SAVEPOINT
             session.add(new_row)
@@ -233,19 +267,21 @@ def upsert_outbox(session: Session, *, idempotency_key: str, revision: int,
         return False
 
 
-def mark_outbox_delivered(session: Session, *, idempotency_key: str, revision: int,
-                          receipt: str) -> None:
-    row = session.get(M.AlertOutboxRow, (idempotency_key, revision))
+def mark_outbox_delivered(session: Session, *, tenant_id: str, idempotency_key: str,
+                          revision: int, receipt: str) -> None:
+    row = session.get(M.AlertOutboxRow, (tenant_id, idempotency_key, revision))
     if row is not None:
         row.status = "delivered"
         row.receipt = receipt
         session.flush()
 
 
-def list_outbox(session: Session, *, status: Optional[str] = None,
+def list_outbox(session: Session, *, tenant_id: str,
+                status: Optional[str] = None,
                 limit: Optional[int] = None,
                 offset: int = 0) -> List[Dict[str, Any]]:
-    q = session.query(M.AlertOutboxRow)
+    q = session.query(M.AlertOutboxRow).filter(
+        M.AlertOutboxRow.tenant_id == tenant_id)
     if status is not None:
         q = q.filter(M.AlertOutboxRow.status == status)
     q = q.order_by(M.AlertOutboxRow.created_at, M.AlertOutboxRow.idempotency_key,
@@ -255,31 +291,39 @@ def list_outbox(session: Session, *, status: Optional[str] = None,
 
 # ---------------------------------------------------------------- 反馈
 
-def save_feedback(session: Session, *, event_id: str, kind: str, note: str = "") -> None:
-    session.add(M.AlertFeedbackRow(event_id=event_id, kind=kind, note=note))
+def save_feedback(session: Session, *, tenant_id: str, event_id: str, kind: str,
+                  note: str = "") -> None:
+    session.add(M.AlertFeedbackRow(tenant_id=tenant_id, event_id=event_id,
+                                   kind=kind, note=note))
     session.flush()
 
 
-def list_feedback(session: Session) -> List[Dict[str, Any]]:
-    q = session.query(M.AlertFeedbackRow).order_by(M.AlertFeedbackRow.created_at)
+def list_feedback(session: Session, *, tenant_id: str) -> List[Dict[str, Any]]:
+    q = (session.query(M.AlertFeedbackRow)
+         .filter(M.AlertFeedbackRow.tenant_id == tenant_id)
+         .order_by(M.AlertFeedbackRow.created_at))
     return [_row_dict(r) for r in q.all()]
 
 
 # ---------------------------------------------------------------- 遥测事件
 
-def save_telemetry(session: Session, events: List[Any]) -> int:
+def save_telemetry(session: Session, events: List[Any], *, tenant_id: str) -> int:
+    """保存规范化遥测。**租户来自调用方（认证上下文），忽略事件正文里的 tenant_id**
+    ——与「身份只在网关注入、正文自称一律丢弃」的规则一致。主键 (tenant_id, event_id)。"""
     n = 0
     for e in events:
         d = _as_dict(e)
         eid = d["event_id"]
-        _upsert(session, M.TelemetryEventRow, eid, {"event_id": eid},
+        _upsert(session, M.TelemetryEventRow, (tenant_id, eid),
+                {"tenant_id": tenant_id, "event_id": eid},
                 lambda row, _d=d: _apply_telemetry(row, _d))
         n += 1
     return n
 
 
 def _apply_telemetry(row: Any, d: Dict[str, Any]) -> None:
-    row.tenant_id = d.get("tenant_id", "")
+    # tenant_id 不在此设置：它来自认证上下文（save_telemetry 的显式入参），
+    # 绝不从事件正文取——正文的身份声明是不可信的。
     row.device_sn = d.get("device_sn", "")
     row.occurred_at = d.get("occurred_at", "")
     ctype = d.get("component_type", "")
@@ -294,8 +338,10 @@ def _apply_telemetry(row: Any, d: Dict[str, Any]) -> None:
     row.raw_log_ref = d.get("raw_log_ref", "")
 
 
-def list_telemetry(session: Session, *, device_sn: Optional[str] = None) -> List[Dict[str, Any]]:
-    q = session.query(M.TelemetryEventRow)
+def list_telemetry(session: Session, *, tenant_id: str,
+                   device_sn: Optional[str] = None) -> List[Dict[str, Any]]:
+    q = session.query(M.TelemetryEventRow).filter(
+        M.TelemetryEventRow.tenant_id == tenant_id)
     if device_sn is not None:
         q = q.filter(M.TelemetryEventRow.device_sn == device_sn)
     q = q.order_by(M.TelemetryEventRow.created_at)

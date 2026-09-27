@@ -33,8 +33,10 @@ def _now() -> float:
 class TelemetryEventRow(Base):
     __tablename__ = "telemetry_events"
 
+    # tenant_id 必须进主键：event_id 由原始日志信封给出，跨租户可能重名，
+    # 若只做普通列，两个租户同 event_id 会撞同一 PK、后者静默覆盖前者。
+    tenant_id: Mapped[str] = mapped_column(String(80), primary_key=True)
     event_id: Mapped[str] = mapped_column(String(80), primary_key=True)
-    tenant_id: Mapped[str] = mapped_column(String(80), index=True)
     device_sn: Mapped[str] = mapped_column(String(80), index=True)
     occurred_at: Mapped[str] = mapped_column(String(40))
     component_ref: Mapped[str] = mapped_column(String(120), index=True)
@@ -51,6 +53,9 @@ class TelemetryEventRow(Base):
 class CandidateRow(Base):
     __tablename__ = "candidates"
 
+    # tenant_id 进主键：candidate_id = cand_<sha256(device_sn|component|signal#seq)>，
+    # 不含租户 → 两租户同 device_sn 会生成相同 id，只加列+过滤会被静默覆盖。
+    tenant_id: Mapped[str] = mapped_column(String(80), primary_key=True, index=True)
     candidate_id: Mapped[str] = mapped_column(String(80), primary_key=True)
     device_sn: Mapped[str] = mapped_column(String(80), index=True)
     component_ref: Mapped[str] = mapped_column(String(120), index=True)
@@ -74,6 +79,8 @@ class CandidateRow(Base):
 class ReportRow(Base):
     __tablename__ = "reports"
 
+    # tenant_id 进主键：investigation_id = inv_<candidate_id>，跨租户同名同 id。
+    tenant_id: Mapped[str] = mapped_column(String(80), primary_key=True, index=True)
     investigation_id: Mapped[str] = mapped_column(String(120), primary_key=True)
     disposition: Mapped[str] = mapped_column(String(30), index=True)
     severity: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
@@ -92,6 +99,9 @@ class ReportRow(Base):
 class AlertRow(Base):
     __tablename__ = "alerts"
 
+    # tenant_id 进主键：event_id = alert_<sha256(device_ref:event_type:episode)>，
+    # 跨租户同设备号会生成相同 id。
+    tenant_id: Mapped[str] = mapped_column(String(80), primary_key=True, index=True)
     event_id: Mapped[str] = mapped_column(String(80), primary_key=True)
     idempotency_key: Mapped[str] = mapped_column(String(200), index=True)
     device_ref: Mapped[str] = mapped_column(String(120), index=True)
@@ -114,7 +124,9 @@ class AlertRow(Base):
 class AlertOutboxRow(Base):
     __tablename__ = "alert_outbox"
 
-    # 幂等去重键：同 (幂等键, revision) 唯一 → 用复合主键
+    # 幂等去重键：同 (幂等键, revision) 唯一 → 用复合主键。
+    # tenant_id 进主键：幂等键由设备/事件派生，跨租户可能重名。
+    tenant_id: Mapped[str] = mapped_column(String(80), primary_key=True, index=True)
     idempotency_key: Mapped[str] = mapped_column(String(200), primary_key=True)
     revision: Mapped[int] = mapped_column(Integer, primary_key=True)
     payload: Mapped[Dict[str, Any]] = mapped_column(JSON, default=dict)
@@ -129,6 +141,8 @@ class AlertFeedbackRow(Base):
     __tablename__ = "alert_feedback"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    # 反馈保留代理主键（一条事件可有多条反馈），租户只作普通列 + 索引。
+    tenant_id: Mapped[str] = mapped_column(String(80), index=True)
     event_id: Mapped[str] = mapped_column(String(80), index=True)
     kind: Mapped[str] = mapped_column(String(30))
     note: Mapped[str] = mapped_column(Text, default="")

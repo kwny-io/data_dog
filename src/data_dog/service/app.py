@@ -121,6 +121,19 @@ def _auth_from_headers(tenant_id: Optional[str], device_sn: Optional[str]
     return {"tenant_id": tenant_id, "device_sn": device_sn, "principal": "http-gateway"}
 
 
+def _tenant_required(tenant_id: Optional[str]) -> str:
+    """读路径的租户上下文：只认 `X-Tenant-Id`，缺失/空 → 401（失败关闭）。
+
+    为什么不接受 `?tenant_id=` 查询参数：查询串可被链接、日志、浏览器历史携带与
+    篡改，不是可信身份来源。租户只能来自请求头（认证主体注入的位置）——查询参数
+    里的 tenant_id 一律被忽略（有测试断言这一点）。
+    """
+    if not tenant_id:
+        raise HTTPException(status_code=401,
+                            detail="缺少可信租户：需要请求头 X-Tenant-Id")
+    return tenant_id
+
+
 def _db_reachable() -> Dict[str, Any]:
     """探测数据库连通性：直接建立一条连接（拿到即通，不做任何查询）。"""
     try:
@@ -357,8 +370,10 @@ def create_app() -> FastAPI:
         persisted = {"telemetry": 0, "candidates": 0}
         try:
             with session_scope() as s:
-                persisted["telemetry"] = repo.save_telemetry(s, result.normalized)
-                persisted["candidates"] = repo.save_candidates(s, result.candidates)
+                persisted["telemetry"] = repo.save_telemetry(
+                    s, result.normalized, tenant_id=auth["tenant_id"])
+                persisted["candidates"] = repo.save_candidates(
+                    s, result.candidates, tenant_id=auth["tenant_id"])
         except Exception as e:                        # noqa: BLE001
             # 落库失败不吞掉已算出的结果，但要在响应里标明（不静默降级）
             response.status_code = 207
@@ -380,41 +395,48 @@ def create_app() -> FastAPI:
 
     @app.get("/v1/candidates", tags=["query"])
     def list_candidates(
+        x_tenant_id: Optional[str] = Header(default=None, alias="X-Tenant-Id"),
         device_sn: Optional[str] = Query(default=None),
         component_ref: Optional[str] = Query(default=None),
         limit: int = Query(default=_DEFAULT_PAGE_SIZE, ge=1, le=_MAX_PAGE_SIZE),
         offset: int = Query(default=0, ge=0),
     ) -> Dict[str, Any]:
+        tenant = _tenant_required(x_tenant_id)
         with session_scope() as s:
-            rows = repo.list_candidates(s, device_sn=device_sn,
+            rows = repo.list_candidates(s, tenant_id=tenant, device_sn=device_sn,
                                         component_ref=component_ref,
                                         limit=limit, offset=offset)
-            total = repo.count_rows(s, M.CandidateRow)
+            total = repo.count_rows(s, M.CandidateRow, tenant_id=tenant)
         return {"ok": True, "count": len(rows), "total": total,
                 "limit": limit, "offset": offset,
                 "has_more": offset + len(rows) < total, "items": rows}
 
     @app.get("/v1/alerts", tags=["query"])
     def list_alerts(
+        x_tenant_id: Optional[str] = Header(default=None, alias="X-Tenant-Id"),
         limit: int = Query(default=_DEFAULT_PAGE_SIZE, ge=1, le=_MAX_PAGE_SIZE),
         offset: int = Query(default=0, ge=0),
     ) -> Dict[str, Any]:
+        tenant = _tenant_required(x_tenant_id)
         with session_scope() as s:
-            rows = repo.list_alerts(s, limit=limit, offset=offset)
-            total = repo.count_rows(s, M.AlertRow)
+            rows = repo.list_alerts(s, tenant_id=tenant, limit=limit, offset=offset)
+            total = repo.count_rows(s, M.AlertRow, tenant_id=tenant)
         return {"ok": True, "count": len(rows), "total": total,
                 "limit": limit, "offset": offset,
                 "has_more": offset + len(rows) < total, "items": rows}
 
     @app.get("/v1/outbox", tags=["query"])
     def list_outbox(
+        x_tenant_id: Optional[str] = Header(default=None, alias="X-Tenant-Id"),
         status: Optional[str] = Query(default=None),
         limit: int = Query(default=_DEFAULT_PAGE_SIZE, ge=1, le=_MAX_PAGE_SIZE),
         offset: int = Query(default=0, ge=0),
     ) -> Dict[str, Any]:
+        tenant = _tenant_required(x_tenant_id)
         with session_scope() as s:
-            rows = repo.list_outbox(s, status=status, limit=limit, offset=offset)
-            total = repo.count_rows(s, M.AlertOutboxRow)
+            rows = repo.list_outbox(s, tenant_id=tenant, status=status,
+                                    limit=limit, offset=offset)
+            total = repo.count_rows(s, M.AlertOutboxRow, tenant_id=tenant)
         return {"ok": True, "count": len(rows), "total": total,
                 "limit": limit, "offset": offset,
                 "has_more": offset + len(rows) < total, "items": rows}
