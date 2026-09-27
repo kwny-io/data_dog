@@ -1,0 +1,15 @@
+node_modules
+.next
+out
+build
+coverage
+.git
+.gitignore
+.env.local
+.env*.local
+*.tsbuildinfo
+next-env.d.ts
+Dockerfile
+.dockerignore
+tests
+vitest.config.ts

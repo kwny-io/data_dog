@@ -1,0 +1,288 @@
+@import "tailwindcss";
+
+/* ------------------------------------------------------------------ *
+ * Fonts — self-hosted (public/fonts), not fetched at build or run time.
+ *
+ * IBM Plex, chosen deliberately: it comes from a computing/industrial
+ * heritage rather than being a generic UI face, and it ships a true
+ * monospace sibling so sans and mono read as one family. Mono is not
+ * decoration — IDs, timestamps and measurements are evidence, and the
+ * mono face signals that.
+ *
+ * Self-hosting (rather than next/font/google) keeps the build hermetic and
+ * the app usable offline / behind an air-gapped network, and removes a
+ * runtime dependency on Google's CDN.
+ * ------------------------------------------------------------------ */
+
+/* Sans: variable font, one file covering the 400–700 range. */
+@font-face {
+  font-family: "IBM Plex Sans";
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+  src: url("/fonts/IBMPlexSans.woff2") format("woff2");
+}
+
+/* Mono: static weights, one file each. */
+@font-face {
+  font-family: "IBM Plex Mono";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("/fonts/IBMPlexMono-400.woff2") format("woff2");
+}
+@font-face {
+  font-family: "IBM Plex Mono";
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("/fonts/IBMPlexMono-500.woff2") format("woff2");
+}
+@font-face {
+  font-family: "IBM Plex Mono";
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("/fonts/IBMPlexMono-600.woff2") format("woff2");
+}
+@font-face {
+  font-family: "IBM Plex Mono";
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("/fonts/IBMPlexMono-700.woff2") format("woff2");
+}
+
+:root {
+  --font-plex-sans: "IBM Plex Sans";
+  --font-plex-mono: "IBM Plex Mono";
+}
+
+/* Theme is switched by a `.dark` class on <html> (see ThemeProvider). */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* ------------------------------------------------------------------ *
+ * data_dog design tokens
+ *
+ * Visual direction: an ENGINEERING DRAWING, not a marketing dashboard.
+ * The subject is industrial telemetry fault investigation — the audience is
+ * an equipment-reliability engineer. The one memorable device is the
+ * "evidence rail": a from→to value rendered as a real dimension line
+ * (extension lines, arrowheads, a tolerance band). Everything else stays
+ * quiet so that device reads.
+ *
+ * Deliberately NOT: warm cream + serif + terracotta, near-black + one neon,
+ * the SaaS rounded-card kit (one radius + one soft shadow on everything),
+ * gradient washes. Panel borders are drawing-sheet rules, not shadows.
+ * ------------------------------------------------------------------ */
+
+:root {
+  /* Neutrals — cool blueprint slate, never pure black, never warm. */
+  --paper: #edf1f6; /* app background: drafting paper */
+  --paper-sunken: #e2e8f0; /* recessed wells */
+  --panel: #ffffff; /* sheet/panel face */
+  --rule: #d3dce6; /* hairline: default border */
+  --rule-strong: #a9b7c6; /* emphasis rule: panel frame */
+  --grid: #dce4ed; /* graph-paper grid */
+  --ink: #0f1b2a; /* primary text */
+  --ink-muted: #5a6b7e; /* secondary text, labels */
+  --ink-faint: #8b9aab; /* tertiary, axis ticks */
+
+  /* Primary — instrument blue (engineering trust, not SaaS marketing blue). */
+  --primary: #14548f;
+  --primary-hover: #0f4272;
+  --primary-soft: #e1ebf6; /* tinted background for selected/active */
+  --on-primary: #ffffff;
+
+  /* Semantics. The brief pins four named roles; the hexes borrow the
+   * existing Streamlit palette so operators don't re-learn the colours.
+   * Consistency across the app matters more than prettiness here, because
+   * the alert state machine is read through them. */
+  --critical: #dc2626;
+  --critical-soft: #fde8e8;
+  --warning: #d97706;
+  --warning-soft: #fdf1e0;
+  --confirmed: #059669; /* the "good/closed" slot */
+  --confirmed-soft: #e2f5ee;
+  --suppressed: #64748b; /* muted/void slot */
+  --suppressed-soft: #eef1f5;
+
+  --focus: #2563eb;
+  --radius: 3px; /* one small radius: drawings have square corners */
+}
+
+.dark {
+  --paper: #0a141e; /* blueprint at night */
+  --paper-sunken: #060f18;
+  --panel: #101e2c;
+  --rule: #22384c;
+  --rule-strong: #38566f;
+  --grid: #16283a;
+  --ink: #dce7f2;
+  --ink-muted: #8fa6bc;
+  --ink-faint: #61798f;
+
+  --primary: #6ba6dc;
+  --primary-hover: #8abae6;
+  --primary-soft: #12314e;
+  --on-primary: #04101b;
+
+  --critical: #f87171;
+  --critical-soft: #2a1414;
+  --warning: #fbbf24;
+  --warning-soft: #2a2010;
+  --confirmed: #34d399;
+  --confirmed-soft: #0f2620;
+  --suppressed: #94a3b8;
+  --suppressed-soft: #1a2430;
+
+  --focus: #7cb2ee;
+}
+
+/* Expose the tokens to Tailwind utilities: bg-panel, text-ink, border-rule… */
+@theme inline {
+  --color-paper: var(--paper);
+  --color-paper-sunken: var(--paper-sunken);
+  --color-panel: var(--panel);
+  --color-rule: var(--rule);
+  --color-rule-strong: var(--rule-strong);
+  --color-grid: var(--grid);
+  --color-ink: var(--ink);
+  --color-ink-muted: var(--ink-muted);
+  --color-ink-faint: var(--ink-faint);
+  --color-primary: var(--primary);
+  --color-primary-hover: var(--primary-hover);
+  --color-primary-soft: var(--primary-soft);
+  --color-on-primary: var(--on-primary);
+  --color-critical: var(--critical);
+  --color-critical-soft: var(--critical-soft);
+  --color-warning: var(--warning);
+  --color-warning-soft: var(--warning-soft);
+  --color-confirmed: var(--confirmed);
+  --color-confirmed-soft: var(--confirmed-soft);
+  --color-suppressed: var(--suppressed);
+  --color-suppressed-soft: var(--suppressed-soft);
+  --color-focus: var(--focus);
+
+  --font-sans: var(--font-plex-sans), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-plex-mono), ui-monospace, "SFMono-Regular", monospace;
+
+  --radius-token: var(--radius);
+}
+
+/* ------------------------------------------------------------------ base */
+
+@layer base {
+  * {
+    border-color: var(--rule);
+  }
+
+  html {
+    color-scheme: light;
+  }
+  html.dark {
+    color-scheme: dark;
+  }
+
+  body {
+    background-color: var(--paper);
+    color: var(--ink);
+    font-family: var(--font-sans);
+    font-feature-settings: "tnum" 1; /* tabular figures: columns line up */
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* Graph paper: the page itself is a drafting surface. Kept very faint. */
+  body::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    z-index: -1;
+    pointer-events: none;
+    background-image:
+      linear-gradient(var(--grid) 1px, transparent 1px),
+      linear-gradient(90deg, var(--grid) 1px, transparent 1px);
+    background-size: 24px 24px;
+    opacity: 0.55;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: 2px;
+    border-radius: 1px;
+  }
+
+  ::selection {
+    background: var(--primary-soft);
+    color: var(--ink);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.001ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.001ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+}
+
+/* ------------------------------------------------------------ utilities */
+
+@utility tnum {
+  font-variant-numeric: tabular-nums;
+}
+
+/* A datum read-out: monospace, tabular, right-aligned — instrument style. */
+@utility reading {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+}
+
+/* ------------------------------------------------------- interaction strata *
+ *
+ * The problem: with a flat blueprint palette, a clickable row and a static
+ * row look identical at rest — the only cue is a hover background, which
+ * keyboard and touch users never get, and which everyone else learns only by
+ * guessing wrong once.
+ *
+ * The fix is to give the three interaction planes a signature that is visible
+ * WITHOUT hover, and let hover only intensify it:
+ *
+ *   static data   → no marker
+ *   control/select→ a persistent disclosure chevron + a left tick
+ *   navigation    → a persistent left rule that fills on hover/active
+ *
+ * `.row-tick` draws the persistent left indicator; hover strengthens it.
+ */
+@utility row-tick {
+  border-left: 2px solid transparent;
+  border-left-color: color-mix(in srgb, var(--rule-strong) 55%, transparent);
+}
+
+/* The disclosure chevron: always drawn, slides a hair on hover. Reduced-motion
+   users get no slide but still see the glyph. */
+@utility affordance-chevron {
+  opacity: 0.55;
+  transition: transform 120ms ease, opacity 120ms ease;
+}
+
+/* Hatched fill used inside the evidence rail's over-threshold zone.
+   Hatched = "beyond tolerance" on a drawing; it also survives greyscale. */
+@utility hatch-critical {
+  background-image: repeating-linear-gradient(
+    45deg,
+    var(--critical) 0 1.5px,
+    transparent 1.5px 5px
+  );
+}
+@utility hatch-warning {
+  background-image: repeating-linear-gradient(
+    45deg,
+    var(--warning) 0 1.5px,
+    transparent 1.5px 5px
+  );
+}
