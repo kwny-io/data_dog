@@ -4,7 +4,7 @@
 PY ?= .venv/Scripts/python.exe
 PORT ?= 8000
 
-.PHONY: help install test lint typecheck cov serve probe ingest e2e ui up down logs ps health clean
+.PHONY: help install test lint typecheck cov serve probe ingest e2e ui bench up down logs ps health clean
 
 help:            ## 显示所有命令
 	@echo "make install  安装依赖(含服务)"
@@ -14,6 +14,7 @@ help:            ## 显示所有命令
 	@echo "make cov      带覆盖率跑测试"
 	@echo "make serve    本机起服务(不用 Docker)"
 	@echo "make probe    探存活/就绪/指标"
+	@echo "make bench    P4-8 软实时基准(起服务→压测→出报告)"
 	@echo "make ingest   发一条演示日志(过温)"
 	@echo "make up       Docker 起整套(应用+PostgreSQL)"
 	@echo "make down     停 Docker 整套"
@@ -54,6 +55,9 @@ ingest:          ## 发一条演示日志(96°C 过温 → 应产出 critical �
 
 e2e:             ## 端到端整链回放
 	$(PY) -m data_dog.e2e.replay_demo
+
+bench:           ## P4-8 软实时基准（一键：起服务→loadgen→报告）
+	bash tools/bench.sh
 
 ui:              ## 起 Streamlit 演示台
 	$(PY) -m streamlit run ui/app.py

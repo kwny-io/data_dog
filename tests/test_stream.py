@@ -283,6 +283,28 @@ def test_runner_survives_poll_error():
     assert runner.stats["poll_errors"] == 1     # 掉线被记数，未中断循环
 
 
+def test_runner_observes_consume_latency(plane_factory):
+    """落库后要记消费延迟（收到→落库完成）——否则积压不可观测（P4-8 §3.3）。"""
+    from data_dog.core import metrics
+
+    def hist_count():
+        fam = metrics.stream_consume_latency_seconds
+        return sum(s.value for m in fam.collect() for s in m.samples
+                   if s.name.endswith("_count"))
+
+    before = hist_count()
+    # 入队时刻设成"100ms 前"，保证观测到的是正延迟而非 0
+    past = time.monotonic() - 0.1
+    runner = StreamRunner(
+        plane_factory(),
+        _scripted_source([StreamMessage(
+            payload=json.loads(_raw_line("lat1")),
+            auth={"tenant_id": "t1", "device_sn": "d1"}, enqueued_at=past)]),
+        persist=lambda *a: None)
+    runner.run(stop=threading.Event(), poll_timeout=0.0, max_iters=2)
+    assert hist_count() == before + 1, "每次 flush 应观测一次消费延迟"
+
+
 # ---------------------------------------------------------------- 工厂
 
 def test_factory_builds_file_source(monkeypatch, tmp_path):

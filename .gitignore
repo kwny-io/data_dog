@@ -60,3 +60,6 @@ htmlcov/
 
 # 本地 agent/编辑器工具配置（非项目代码）
 .claude/
+
+# P4-8 基准运行报告（每次跑的临时产物；结论沉淀进 benchmarks/baseline.md）
+benchmarks/last_run.txt

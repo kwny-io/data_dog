@@ -145,6 +145,14 @@ stream_up = Gauge(
     registry=registry,
 )
 
+# 消费延迟：消息进入消费循环 → 落库完成（含解析+检测+落库的整段端到端）
+stream_consume_latency_seconds = Histogram(
+    "data_dog_stream_consume_latency_seconds",
+    "流式消息消费延迟（收到→落库完成，秒）",
+    buckets=(0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0),
+    registry=registry,
+)
+
 # ---------------------------------------------------------------- 进程信息（SRE 关注）
 
 info = Gauge(
