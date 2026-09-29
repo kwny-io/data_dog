@@ -31,6 +31,21 @@ venv/
 /t.html
 /tri.html
 
+# 接口调试响应残留（curl / 手测接口的产物，不是项目文件）
+/a.json
+/a2.json
+/e.json
+/ef.json
+/ef2.json
+/ef3.json
+/fb.json
+/fb2.json
+/fb_body.json
+/inv_out.json
+/o.json
+/r.json
+/rf.json
+
 # 本地工作记录 / 基线快照（过程产物，保留在本地即可）
 .replica_baseline.txt
 .replica_log.md

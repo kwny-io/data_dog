@@ -45,6 +45,17 @@ rag = [
 postgres = [
     "psycopg[binary]>=3.1",
 ]
+# Redis 共享状态后端（限流/候选归并跨副本一致时装）
+redis = [
+    "redis>=5.0",
+]
+# 流式接入的可选传输（file/http 用标准库，无需装；mqtt/kafka 需客户端）
+mqtt = [
+    "paho-mqtt>=2.0",
+]
+kafka = [
+    "kafka-python>=2.0",
+]
 
 [project.scripts]
 data-dog = "data_dog.cli:app"
