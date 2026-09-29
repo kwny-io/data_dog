@@ -130,3 +130,48 @@ POST /v1/operators/{id}/canary     {percent} 启动/调整灰度
 
 - **P4-1 沙箱**：验签通过仅代表"来源可信"，执行仍需沙箱——两者合起来才是完整信任链。
 - **lifecycle.py** 已有状态机复用，本项主要补持久化 + 真签名 + 路由 + API。
+
+## 8. 实现与验收（已完成）
+
+**状态：✅ 已交付**（分支 `feat/p4-orchestration`；430 passed / 4 skipped，ruff clean）。
+
+### 8.1 落地清单（对照 §4）
+
+| 文件 | 动作 | 说明 |
+|---|---|---|
+| `src/data_dog/operator_factory/signing.py` | 新建 | `SignedPackage`、`sign_package`/`verify_package`/`verify_or_raise`、`canonical_payload`、`source_hash` |
+| `src/data_dog/storage/models.py` | 改 | `OperatorRegistryRow`（复合主键）+ `OperatorRolloutEventRow`（代理主键台账） |
+| `alembic/versions/20260930_0800_a1_operator_registry.py` | 新建 | 两表 + 索引 + RLS（仅 PostgreSQL；SQLite 跳过） |
+| `src/data_dog/storage/repository.py` | 改 | 8 个函数：upsert/get/list（含聚合）/set_state/record_event/list_events/find_previous_signed |
+| `src/data_dog/operator_factory/registry.py` | 新建 | 注册/转移/灰度/回滚/看门狗/确定性路由，包住 `lifecycle` |
+| `src/data_dog/service/app.py` | 改 | 6 个 `/v1/operators*` 端点（文末新分节） |
+| `src/data_dog/settings.py` | 改 | 签名密钥/算法 + 4 个 canary 阈值 |
+| `tests/test_signing.py` `test_operator_registry.py` `test_operators_api.py` | 新建 | 51 个用例 |
+
+### 8.2 算法取舍（相对 §3.2 的偏离，已核实）
+
+- **默认 HMAC-SHA256 而非 Ed25519**：`cryptography` 不是本项目依赖，项目风格偏好**零新增必需依赖**。
+  Ed25519 作为**可选**（`[signing]` extra）保留，`_try_ed25519()` 探测；未装时对 Ed25519 请求
+  **明确报错**（`SigningError`），**绝不静默降级**成 HMAC。
+- 签名对象确为**内容绑定**：`canonical_payload` 对 `(operator_id, version, dsl_hash)` 做
+  JSON `sort_keys` 规范化编码再签——`"a"+"b|c"` 与 `"a|b"+"c"` 产出不同签名串（防移位拼接）。
+
+### 8.3 验收对照（§5）
+
+| # | 验收项 | 证据 |
+|---|---|---|
+| 1 | 验签：改一字节 → 拒 | `test_tamper_one_byte_rejected` / `test_register_tampered_source_rejected`（422）|
+| 2 | 状态机持久化 + 重启可读 | `test_transition_happy_and_persist`（4 条台账，新会话读 Active）|
+| 3 | Canary 确定性 | `test_pick_version_deterministic_same_device`（20 次同侧）/ `pct_0`=全 stable / `pct_100`=全 canary |
+| 4 | 自动回滚越限触发 | `test_evaluate_watchdog_auto_rolls_back` / `test_watchdog_auto_rollback`（→ RolledBack）|
+| 5 | 租户隔离 404 | `test_get_cross_tenant_404` / `test_cross_tenant_isolated` |
+| 6 | 零回归 | 全量 430 passed（含既有 `test_lifecycle`/`test_operator_factory`）|
+
+额外覆盖：无钥匙 **失败关闭**（`verify_package` 返 False；注册端点 503）、样本不足**保守不判**
+（`test_should_rollback_min_samples_conservative`）、看门狗**仅 Canary 态生效**。
+
+### 8.4 诚实边界（对照 §6，已落实）
+
+- 密钥托管仍是运营职责：本项只提供机制，环境变量注入（`DD_OPERATOR_SIGNING_KEY` / `DD_OPERATOR_PUBKEY`）。
+- 冷启动样本不足 → 看门狗不自动判定（`min_samples`，默认 50；API 测试置 10）。
+- 回滚 = 停用当前版本（→ RolledBack，非删除），并回报 `fallback_to` 上一签名版本。

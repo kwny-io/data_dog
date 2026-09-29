@@ -305,6 +305,44 @@ def sandbox_policy():
     )
 
 
+# ---------------------------------------------------------------- 算子控制面（P4-2）
+
+def operator_signing_key() -> str:
+    """算子制品签名密钥（HMAC 对称密钥）。**不进仓库**，生产环境变量注入。
+
+    空 = 未配置：注册端点将拒绝带签名的注册（失败关闭）。本项提供签名机制，
+    **不提供 KMS/HSM**——密钥托管是运营职责（见 docs/p4/02_control_plane.md §6）。
+    """
+    return _get("DD_OPERATOR_SIGNING_KEY")
+
+
+def operator_pubkey() -> str:
+    """Ed25519 公钥（hex）。与签名密钥二选一：配了它则用非对称验签（验签方无需私钥）。"""
+    return _get("DD_OPERATOR_PUBKEY")
+
+
+def operator_sign_alg() -> str:
+    """签名算法：hmac-sha256（默认，零依赖）/ ed25519（需可选依赖 cryptography）。"""
+    return _get("DD_OPERATOR_SIGN_ALG", default="hmac-sha256").lower()
+
+
+def canary_min_samples() -> int:
+    """看门狗最小样本数：低于此值**不自动判定**（冷启动保守，见 P4-2 §6）。"""
+    return max(1, _get_int("DD_CANARY_MIN_SAMPLES", default=50))
+
+
+def canary_max_crash_rate() -> float:
+    return _get_float("DD_CANARY_MAX_CRASH_RATE", default=0.02)
+
+
+def canary_max_parse_drop() -> float:
+    return _get_float("DD_CANARY_MAX_PARSE_DROP", default=0.05)
+
+
+def canary_max_candidate_multiple() -> float:
+    return _get_float("DD_CANARY_MAX_CANDIDATE_MULTIPLE", default=3.0)
+
+
 # ---------------------------------------------------------------- 路径
 
 def project_root() -> str | None:
