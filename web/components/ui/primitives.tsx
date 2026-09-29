@@ -1,6 +1,7 @@
 import clsx from "clsx";
 
 import { TONE_CLASS, type Tone } from "@/lib/domain";
+import { HScroll } from "@/components/ui/hscroll";
 
 /* ------------------------------------------------------------------ Panel *
  * A drawing sheet: square corners, a hairline rule, a stronger frame, and
@@ -44,7 +45,7 @@ export function Panel({
         <header className="flex items-baseline justify-between gap-4 border-b border-rule px-4 py-2.5">
           <div className="min-w-0">
             {title && (
-              <h2 className="truncate text-[13px] font-semibold tracking-wide text-ink">
+              <h2 className="text-[13px] font-semibold tracking-wide text-ink">
                 {title}
               </h2>
             )}
@@ -415,25 +416,28 @@ export function DataTable({
   className?: string;
 }) {
   return (
-    <div className={clsx("overflow-x-auto", className)}>
+    <HScroll className={className}>
       <table className="w-full border-collapse text-sm">
         <thead>
           <tr className="border-b border-rule-strong text-left text-xs text-ink-muted">{head}</tr>
         </thead>
         <tbody>{children}</tbody>
       </table>
-    </div>
+    </HScroll>
   );
 }
 
 export function Th({
   children,
   numeric,
+  sticky,
   className,
   scope = "col",
 }: {
   children?: React.ReactNode;
   numeric?: boolean;
+  /** Pin this header cell while the table scrolls horizontally. */
+  sticky?: boolean;
   className?: string;
   scope?: "col" | "row";
 }) {
@@ -443,6 +447,7 @@ export function Th({
       className={clsx(
         "whitespace-nowrap px-3 py-2 font-medium",
         numeric && "text-right",
+        sticky && "sticky left-0 z-20 border-r border-rule bg-panel",
         className,
       )}
     >
@@ -454,10 +459,15 @@ export function Th({
 export function Td({
   children,
   numeric,
+  sticky,
   className,
 }: {
   children?: React.ReactNode;
   numeric?: boolean;
+  /** Pin this cell while the table scrolls horizontally. Needs an opaque
+   *  background or rows scroll *under* it; `group-hover` keeps the row-hover
+   *  cue alive for the pinned column too. */
+  sticky?: boolean;
   className?: string;
 }) {
   return (
@@ -465,6 +475,7 @@ export function Td({
       className={clsx(
         "px-3 py-2 align-middle text-ink",
         numeric && "reading text-right",
+        sticky && "sticky left-0 z-10 border-r border-rule bg-panel group-hover:bg-paper-sunken",
         className,
       )}
     >

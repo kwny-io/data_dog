@@ -51,19 +51,25 @@ export function CandidateList({
         <>
           <ul className="divide-y divide-rule">
             {q.data.items.map((c) => (
-              <li key={c.candidate_id}>
+              // The row is selectable, but it also contains its own control
+              // (CopyId renders a <button>). A <button> may not contain a
+              // <button> — that is invalid HTML and React fails hydration on
+              // it. So the select affordance is a full-bleed button *behind*
+              // the content (z-0), and the content sits above it (z-10) with
+              // pointer events off, re-enabled only on the copy control. Tab
+              // lands on the row button; the copy button is its own tab stop.
+              <li key={c.candidate_id} className="group/row relative">
                 <button
                   type="button"
                   onClick={() => onSelect(c)}
                   aria-current={selectedId === c.candidate_id ? "true" : undefined}
+                  aria-label={`查看候选 ${componentLabel(c.component_ref)} 详情`}
                   className={clsx(
-                    // A selectable row carries a persistent left tick and a
-                    // chevron so it reads as clickable without hover; the tint
-                    // is the hover/selected enhancement, not the only cue.
-                    "row-tick group/row flex w-full items-center gap-2 px-3 py-2.5 text-left transition-colors hover:bg-paper-sunken",
+                    "row-tick absolute inset-0 z-0 transition-colors group-hover/row:bg-paper-sunken",
                     selectedId === c.candidate_id && "border-l-primary bg-primary-soft",
                   )}
-                >
+                />
+                <div className="pointer-events-none relative z-10 flex w-full items-center gap-2 px-3 py-2.5 text-left">
                   <span className="flex min-w-0 flex-1 flex-col gap-1">
                     <span className="flex items-center justify-between gap-2">
                       <span className="flex min-w-0 items-baseline gap-1.5">
@@ -75,14 +81,14 @@ export function CandidateList({
                       <SeverityBadge severity={c.severity_hint} />
                     </span>
                     <span className="flex items-center justify-between gap-2 text-[11px] text-ink-faint">
-                      <CopyId id={c.candidate_id} short={18} />
+                      <CopyId id={c.candidate_id} short={18} className="pointer-events-auto" />
                       <span className={clsx("reading", TONE_CLASS[severityTone(c.severity_hint)].text)}>
                         评分 {c.anomaly_score.toFixed(2)}
                       </span>
                     </span>
                   </span>
                   <RowChevron className="affordance-chevron text-ink-faint group-hover/row:translate-x-0.5 group-hover/row:text-ink-muted" />
-                </button>
+                </div>
               </li>
             ))}
           </ul>

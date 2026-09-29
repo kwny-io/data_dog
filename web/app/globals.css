@@ -85,8 +85,8 @@
   --rule-strong: #a9b7c6; /* emphasis rule: panel frame */
   --grid: #dce4ed; /* graph-paper grid */
   --ink: #0f1b2a; /* primary text */
-  --ink-muted: #5a6b7e; /* secondary text, labels */
-  --ink-faint: #8b9aab; /* tertiary, axis ticks */
+  --ink-muted: #47586a; /* secondary text, labels */
+  --ink-faint: #5a6b7e; /* tertiary, axis ticks */
 
   /* Primary — instrument blue (engineering trust, not SaaS marketing blue). */
   --primary: #14548f;
@@ -97,14 +97,19 @@
   /* Semantics. The brief pins four named roles; the hexes borrow the
    * existing Streamlit palette so operators don't re-learn the colours.
    * Consistency across the app matters more than prettiness here, because
-   * the alert state machine is read through them. */
-  --critical: #dc2626;
+   * the alert state machine is read through them.
+   *
+   * All four are dark enough to clear 4.5:1 as body text on paper (#edf1f6)
+   * AND on panel (#fff). The old amber (#d97706) was 2.9–3.2:1 — below AA for
+   * the "待接入" / severity_hint text it carries, so it was darkened to
+   * #a15700. See doc 38 §4.4. */
+  --critical: #d01e1e;
   --critical-soft: #fde8e8;
-  --warning: #d97706;
+  --warning: #a15700;
   --warning-soft: #fdf1e0;
-  --confirmed: #059669; /* the "good/closed" slot */
+  --confirmed: #047857; /* the "good/closed" slot */
   --confirmed-soft: #e2f5ee;
-  --suppressed: #64748b; /* muted/void slot */
+  --suppressed: #5b6878; /* muted/void slot */
   --suppressed-soft: #eef1f5;
 
   --focus: #2563eb;
@@ -114,13 +119,15 @@
 .dark {
   --paper: #0a141e; /* blueprint at night */
   --paper-sunken: #060f18;
-  --panel: #101e2c;
+  --panel: #0d1a28; /* lower than before (#101e2c): keeps panels distinct from
+                       paper while cutting the light a night-shift screen emits */
   --rule: #22384c;
   --rule-strong: #38566f;
   --grid: #16283a;
   --ink: #dce7f2;
   --ink-muted: #8fa6bc;
-  --ink-faint: #61798f;
+  --ink-faint: #7890a8; /* lifted from #61798f: the old value read 3.7:1 on the
+                           panel, below AA for the axis ticks / captions it carries */
 
   --primary: #6ba6dc;
   --primary-hover: #8abae6;
@@ -204,6 +211,13 @@
       linear-gradient(90deg, var(--grid) 1px, transparent 1px);
     background-size: 24px 24px;
     opacity: 0.55;
+  }
+
+  /* At night the grid is pure decoration emitting light — the one thing a
+   * dark theme exists to reduce. Dim it, don't remove it: the drafting-page
+   * identity survives, the emitted light drops. */
+  html.dark body::before {
+    opacity: 0.3;
   }
 
   :focus-visible {

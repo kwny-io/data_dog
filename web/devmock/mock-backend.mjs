@@ -13,6 +13,11 @@ import { createServer } from "node:http";
 const PORT = Number(process.env.PORT ?? 8000);
 const TENANT = "tenant-demo";
 
+// EMPTY=1 → serve zero items everywhere, to review the empty-state UI.
+// Metrics stay (a live service still reports health), so the dashboard shows
+// its "no data yet" panels rather than failing.
+const EMPTY = process.env.EMPTY === "1";
+
 // ---------------------------------------------------------------- 数据
 
 const CANDIDATES = [
@@ -300,7 +305,15 @@ const OUTBOX = [
   { id: 4, event_id: "alert_closed", status: "delivered", attempts: 2, created_at: "2026-08-12T18:00:05Z" },
 ];
 
-const METRICS = `# HELP data_dog_db_rows rows in db
+const METRICS = EMPTY
+  ? `# HELP data_dog_db_rows rows in db
+# TYPE data_dog_db_rows gauge
+data_dog_db_rows{table="candidates"} 0
+data_dog_db_rows{table="telemetry_events"} 0
+data_dog_uptime_seconds 98765
+data_dog_candidates_created_total 0
+`
+  : `# HELP data_dog_db_rows rows in db
 # TYPE data_dog_db_rows gauge
 data_dog_db_rows{table="candidates"} 4
 data_dog_db_rows{table="telemetry_events"} 12843
@@ -364,6 +377,12 @@ const INVESTIGATION = {
 
 // ---------------------------------------------------------------- 路由
 
+// The four list datasets, collapsed to [] when EMPTY=1.
+const S_CANDIDATES = EMPTY ? [] : CANDIDATES;
+const S_ALERTS = EMPTY ? [] : ALERTS;
+const S_REPORTS = EMPTY ? [] : REPORTS;
+const S_OUTBOX = EMPTY ? [] : OUTBOX;
+
 function send(res, status, body, contentType = "application/json") {
   const payload = typeof body === "string" ? body : JSON.stringify(body);
   res.writeHead(status, {
@@ -405,28 +424,28 @@ const server = createServer((req, res) => {
     return send(res, 200, {
       ok: true,
       uptime_s: 98765,
-      candidates_total: CANDIDATES.length,
-      alerts_by_state: ALERTS.reduce((m, a) => ((m[a.state] = (m[a.state] ?? 0) + 1), m), {}),
-      outbox_pending: OUTBOX.filter((o) => o.status === "pending").length,
+      candidates_total: S_CANDIDATES.length,
+      alerts_by_state: S_ALERTS.reduce((m, a) => ((m[a.state] = (m[a.state] ?? 0) + 1), m), {}),
+      outbox_pending: S_OUTBOX.filter((o) => o.status === "pending").length,
       resolver_ready: true,
       auth_enabled: true,
     });
 
   if (p === "/v1/candidates") {
-    let items = CANDIDATES;
+    let items = S_CANDIDATES;
     if (q.get("component_ref")) items = items.filter((c) => c.component_ref === q.get("component_ref"));
     if (q.get("severity")) items = items.filter((c) => c.severity_hint === q.get("severity"));
     return send(res, 200, page(items, limit, offset));
   }
   const candMatch = p.match(/^\/v1\/candidates\/([^/]+)$/);
   if (candMatch) {
-    const c = CANDIDATES.find((x) => x.candidate_id === candMatch[1]);
+    const c = S_CANDIDATES.find((x) => x.candidate_id === candMatch[1]);
     if (!c) return send(res, 404, { ok: false, error: "not_found", detail: "no such candidate" });
     return send(res, 200, { ok: true, item: c });
   }
   const evMatch = p.match(/^\/v1\/candidates\/([^/]+)\/evidence$/);
   if (evMatch) {
-    const c = CANDIDATES.find((x) => x.candidate_id === evMatch[1]);
+    const c = S_CANDIDATES.find((x) => x.candidate_id === evMatch[1]);
     if (!c) return send(res, 404, { ok: false, error: "not_found" });
     return send(res, 200, {
       ok: true,
@@ -446,16 +465,16 @@ const server = createServer((req, res) => {
   }
 
   if (p === "/v1/alerts") {
-    let items = ALERTS;
+    let items = S_ALERTS;
     if (q.get("state")) items = items.filter((a) => a.state === q.get("state"));
     return send(res, 200, page(items, limit, offset));
   }
   if (p === "/v1/outbox") {
-    let items = OUTBOX;
+    let items = S_OUTBOX;
     if (q.get("status")) items = items.filter((o) => o.status === q.get("status"));
     return send(res, 200, page(items, limit, offset));
   }
-  if (p === "/v1/reports") return send(res, 200, page(REPORTS, limit, offset));
+  if (p === "/v1/reports") return send(res, 200, page(S_REPORTS, limit, offset));
 
   if (p === "/v1/investigations" && req.method === "POST") {
     // 模拟同步长任务：延迟 1.5s 再返回，让进度轨可见
@@ -467,5 +486,6 @@ const server = createServer((req, res) => {
 
 server.listen(PORT, () => {
   console.log(`[mock] data_dog mock backend on http://localhost:${PORT}  (tenant=${TENANT})`);
-  console.log(`[mock] candidates=${CANDIDATES.length} alerts=${ALERTS.length} reports=${REPORTS.length} outbox=${OUTBOX.length}`);
+  console.log(`[mock] mode=${EMPTY ? "EMPTY (all lists empty)" : "DEMO"}`);
+  console.log(`[mock] candidates=${S_CANDIDATES.length} alerts=${S_ALERTS.length} reports=${S_REPORTS.length} outbox=${S_OUTBOX.length}`);
 });

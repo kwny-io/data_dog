@@ -1,11 +1,23 @@
 "use client";
 
+import { useEffect, useState } from "react";
+
 import { useTheme } from "@/lib/providers";
 
 /** Cycles light → dark → system. The current mode is named in the title so
- *  the control is understandable without guessing from an icon. */
+ *  the control is understandable without guessing from an icon.
+ *
+ *  The stored theme lives in localStorage, which the server cannot read — so
+ *  during SSR (and the first client render, which must match it) the theme is
+ *  unknown. Rendering the real icon there would make SSR and the client
+ *  disagree on the SVG tree and fail hydration. So we hold a neutral
+ *  placeholder until mounted, then show the true icon. The button keeps its
+ *  exact box, so nothing shifts. */
 export function ThemeToggle() {
   const { theme, setTheme } = useTheme();
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => setMounted(true), []);
+
   const order = ["light", "dark", "system"] as const;
   const next = order[(order.indexOf(theme) + 1) % order.length] ?? "system";
   const label = surface(theme);
@@ -14,13 +26,19 @@ export function ThemeToggle() {
     <button
       type="button"
       onClick={() => setTheme(next)}
-      title={`主题：${label}（点击切换到「${surface(next)}」）`}
-      aria-label={`主题：${label}。点击切换到${surface(next)}`}
+      title={mounted ? `主题：${label}（点击切换到「${surface(next)}」）` : "切换主题"}
+      aria-label={mounted ? `主题：${label}。点击切换到${surface(next)}` : "切换主题"}
       className="inline-flex h-8 w-8 items-center justify-center border border-rule-strong bg-panel text-ink-muted hover:bg-paper-sunken hover:text-ink"
     >
-      {theme === "light" && <SunIcon />}
-      {theme === "dark" && <MoonIcon />}
-      {theme === "system" && <AutoIcon />}
+      {!mounted ? (
+        <span aria-hidden className="h-[15px] w-[15px]" />
+      ) : theme === "light" ? (
+        <SunIcon />
+      ) : theme === "dark" ? (
+        <MoonIcon />
+      ) : (
+        <AutoIcon />
+      )}
     </button>
   );
 }

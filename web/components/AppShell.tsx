@@ -23,6 +23,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   return (
     <div className="min-h-dvh">
       <TopBar />
+      <MobileNav pathname={pathname} />
       <div className="mx-auto flex w-full max-w-[1600px] gap-0 px-4 lg:px-6">
         <SideNav pathname={pathname} />
         <main className="min-w-0 flex-1 py-5 lg:pl-6">{children}</main>
@@ -78,31 +79,39 @@ function SideNav({ pathname }: { pathname: string }) {
           );
         })}
       </ul>
-      <MobileNav pathname={pathname} />
     </nav>
   );
 }
 
-/** Below lg the sidebar is hidden; a horizontal strip keeps navigation usable. */
+/** Below lg the sidebar is hidden, so navigation moves to a horizontal strip
+ *  directly under the top bar. It must live OUTSIDE SideNav — nesting it there
+ *  put it inside a `hidden … lg:block` parent, which hid it on exactly the
+ *  viewports it was meant to serve (see doc 38 §1.2). */
 function MobileNav({ pathname }: { pathname: string }) {
   return (
-    <ul className="mt-3 flex gap-1 overflow-x-auto lg:hidden">
-      {NAV.map((item) => {
-        const active = item.href === "/" ? pathname === "/" : pathname.startsWith(item.href);
-        return (
-          <li key={item.href}>
-            <Link
-              href={item.href}
-              className={clsx(
-                "whitespace-nowrap rounded-[var(--radius-token)] px-2.5 py-1 text-xs",
-                active ? "bg-primary-soft font-medium text-primary" : "text-ink-muted",
-              )}
-            >
-              {item.label}
-            </Link>
-          </li>
-        );
-      })}
-    </ul>
+    <nav
+      aria-label="主导航"
+      className="border-b border-rule bg-panel/60 lg:hidden"
+    >
+      <ul className="mx-auto flex w-full max-w-[1600px] gap-1 overflow-x-auto px-4 py-2">
+        {NAV.map((item) => {
+          const active = item.href === "/" ? pathname === "/" : pathname.startsWith(item.href);
+          return (
+            <li key={item.href}>
+              <Link
+                href={item.href}
+                aria-current={active ? "page" : undefined}
+                className={clsx(
+                  "block whitespace-nowrap rounded-[var(--radius-token)] px-2.5 py-1 text-xs",
+                  active ? "bg-primary-soft font-medium text-primary" : "text-ink-muted",
+                )}
+              >
+                {item.label}
+              </Link>
+            </li>
+          );
+        })}
+      </ul>
+    </nav>
   );
 }

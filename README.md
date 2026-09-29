@@ -13,7 +13,7 @@
 | | 亮点 | 证据 |
 |---|---|---|
 | 🔗 | **全链闭环，一条命令跑通** | 厂商文档 →[P1]→ 算子 →[P2]→ 候选 →[Agent]→ 报告 →[P3]→ 策略门 → SaaS 反馈，`python -m data_dog.e2e.replay_demo` |
-| 🧪 | **262 个测试全绿，全离线确定性** | `pytest -q` → `262 passed, 2 skipped`（26 个测试文件，fake provider，无需 API Key、不联网） |
+| 🧪 | **348 个测试全绿，全离线确定性** | `pytest -q` → `348 passed, 4 skipped`（30 个测试文件，fake provider，无需 API Key、不联网） |
 | 🔒 | **热路径确定性：上报不交给模型判断** | 上不上报由**确定性策略门**（四条件决策表 + 冲突消解）决定，同输入永远同结论；模型只出现在"调查报告"那一步 |
 | 🧱 | **不拿 `eval` 执行厂商字符串** | 自建**受限 DSL**：词法 → AST 解释器，无动态执行原语、函数闭集白名单、编译期类型检查 |
 | 🔍 | **诚实抽取，区分"能证实 / 待确认"** | 官方 SDK 头文件明写电机 **90°C 触发保护** → `verified`；无出处的 75°C → `unconfirmed`，**不冒充厂商事实** |
@@ -23,18 +23,18 @@
 | 📊 | **带 ground truth 的量化评估** | 合成 + MuJoCo 双数据源各 **6/6**；7 个评估 case 含 **2 个对抗性**（提示注入 / 身份伪装） |
 | 🚚 | **能交付：服务 + 容器 + HTTPS** | FastAPI（liveness / readiness 分离）+ Dockerfile + compose（含 Caddy 自动申请 HTTPS）+ Makefile |
 
-**规模**：源码 79 个 Python 文件 / 11180 行，测试 26 个文件 / 3837 行；前端 `web/` 为 Next.js 15 控制台（58 个 TS/TSX 文件）；5 份正式事件 JSON Schema；15 个 `make` 命令。
+**规模**：源码 96 个 Python 文件 / 13830 行，测试 30 个文件 / 5198 行；前端 `web/` 为 Next.js 15 控制台（61 个 TS/TSX 文件）；5 份正式事件 JSON Schema；19 个 `make` 命令。
 
 ---
 
 ## 诚实边界（先说清楚，免得误会）
 
-- **不接真实遥测流**。证据来自自洽的 mock / 合成 / MuJoCo 仿真，只能验证**链路正确性**，验证不了真实场景的**误报率**。
-- **多租户是应用层行隔离，不是数据库强制 RLS**。租户 / 设备身份由网关注入，`tenant_id` 进复合主键、仓储层强制按租户过滤、跨租户读一律 404；但隔离依赖应用代码正确而非数据库策略强制（未用 PostgreSQL Row-Level Security）。
-- **不能水平扩展**。窗口与有状态算子在进程内，多副本会不一致，需要状态外置。
-- **P4 大工程明确不做**：沙箱算子运行时、控制面（Registry / Canary / 回滚 / 签名）、实时高吞吐流处理、真实多租户 SaaS——这些需要团队与设施。
+- **遥测接入支持真实流**，但**默认不开启**。`src/data_dog/stream/` 提供四种传输的流式源：**文件/日志尾随**（标准库，机器人本机日志最真实）、**HTTP 推送**（标准库）、**MQTT**、**Kafka**（后两者需可选依赖 `.[mqtt]` / `.[kafka]`）。配 `DD_STREAM_ENABLED=1` + `DD_STREAM_SOURCE=...` 即启用，走与 HTTP 入口**同一条**数据面。默认关闭是因为演示/CI 环境没有真实设备——**不是做不到**。评估集的证据仍来自 mock / 合成 / MuJoCo（可复现），故"真实误报率"仍需真实数据回灌才能定论。
+- **多租户已加数据库强制层（PostgreSQL RLS）**。应用层：`tenant_id` 进复合主键、仓储强制过滤、跨租户读 404；数据库层：迁移 `a7b8c9d0e1f2` 对 8 张租户表启用 `ROW LEVEL SECURITY` + 策略（`USING`/`WITH CHECK`）。**适用于 PostgreSQL**；SQLite 无 RLS，本地开发仍是应用层隔离（诚实边界）。另有两条必须知道的边界：**superuser 与表属主默认绕过 RLS** → 生产连接须用**非属主、非 superuser** 角色；未设 `app.tenant_id` → 谓词为 NULL → **零行**（失败关闭）。真库验证见 `tests/test_storage_postgres.py`（建非特权角色，裸 SQL 断言跨租户读写都被挡）。
+- **支持水平扩展**：有状态算子已**外置**到可插拔 `StateStore`（`mutate(key, fn)` 原子 RMW 原语）。后端：`memory`（默认，单副本正确）/ `postgres`（`state_kv` 表，行锁）/ `redis`（WATCH/MULTI/EXEC，需 `.[redis]`）。候选归并（`SharedCandidateBuilder`）与限流桶都在共享后端，故多副本归并/限流一致。**边界**：默认后端随数据库类型自动选（PG→postgres，否则 memory）；用 `DD_STATE_BACKEND` 显式指定；`DD_RATE_BACKEND` 可单独把限流切到 Redis（限流成热路径瓶颈时）。file/MQTT 源多副本会**重复消费**（Kafka 用消费者组、MQTT 用共享订阅主题可避免）。
+- **P4 大工程仍明确不做**：沙箱算子运行时、控制面（Registry / Canary / 回滚 / 签名）、真实多租户 SaaS 的控制面——这些需要团队与设施。
 
-> 接真实设备时只需替换 `EvidenceStore` 的数据源实现，Agent / 工具逻辑不用改（见「数据从哪来」）。
+> 接真实设备时：走流式源（file/http/mqtt/kafka）或 HTTP `/v1/telemetry`，Agent / 工具逻辑不用改。
 
 ---
 
@@ -127,7 +127,7 @@ pytest tests/ -q
 
 ## 数据从哪来（诚实说明）
 
-程序**当前不接真实遥测流**，证据来自 `src/data_dog/evidence/store.py` 写死的 mock 数据，但**设计成自洽且有现场感**：
+**遥测接入已支持真实流式源（见上文「诚实边界」，默认关闭）**；本节的示例证据默认来自 `src/data_dog/evidence/store.py` 的 mock 数据，**设计成自洽且有现场感**：
 
 - **左髋电机**：一整段真实升温过程（09:40 → 09:55 温度从 52°C 逐步爬到 78.2°C，超过 75°C 告警阈，电流同步抬升）——标准的**热退化**剧本。
 - **右髋电机**：温度 61°C / 电流 6.2A，全在基线内 —— **误报**剧本（应排除）。
@@ -146,7 +146,7 @@ pytest tests/ -q
 >
 > 两个数据源都实现与 `EvidenceStore` 相同的查询接口 —— **换数据源只需替换合成层，Agent / 工具逻辑完全不用改**。
 
-生产环境接真实设备时，`EvidenceStore` 换成真实时间序库 / 厂商知识库 / 事件流的实现即可，Agent / Tool 逻辑不用改。
+生产环境接真实设备时，**接入侧**走 `stream/`（file / http / mqtt / kafka）或 HTTP `/v1/telemetry`；**证据侧**把 `EvidenceStore` 换成真实时间序库 / 厂商知识库的实现即可。Agent / Tool 逻辑不用改。
 
 ---
 
@@ -181,14 +181,18 @@ src/data_dog/
   alerting/     上报闭环（确定性策略门 + Alert 生命周期 + 幂等 Outbox + 测试 SaaS）
   e2e/          整链回放（厂商文档→算子→候选→Agent→策略门→SaaS，一条命令）
   storage/      持久化（SQLAlchemy：本地 SQLite / 生产 PostgreSQL）+ 仓储层
-  service/      HTTP 服务（FastAPI：liveness/readiness 探针 + 遥测接入 + 查询端）
+  service/      HTTP 服务（FastAPI：探针 + 遥测接入 + 调查/查询端 + P3 落库接线）
+  knowledge.py          向量知识库客户端（Chroma，厂商知识检索）
+  knowledge_ingest.py   用户文档导入的纯逻辑（切片 + 词法检索，无外部依赖）
+  eval_feedback.py      反馈回灌：人工标签 vs Agent 处置 → 一致率/误报率/漏报率
+  settings.py   配置集中（纯 os.environ，调用时惰性读取，不缓存）
   paths.py      资源定位（资源位置外部可注入，防"打包后路径失联"）
   observability.py  可观测性（token 消耗 / 每步耗时 / 成本统计）
 ui/             Streamlit 网页版
 evals/          Agent 评估框架（7 case，含对抗性）
 scripts/        数据清洗 / 算子生成 / RAG 落地脚本
 schemas/        标准事件正式 Schema（JSON Schema，5 份）+ 版本演进策略 + 校验工具
-docs/           设计文档（MuJoCo 仿真与输出解读、SLO 量化目标、受限 DSL 规范）
+docs/           设计文档（架构总览、落地交付、各子系统、SLO、受限 DSL 规范）
 ```
 
 ---
@@ -323,19 +327,32 @@ docker compose ps
 |---|---|---|
 | `/healthz` | GET | 存活探针（进程活着即 200，不查依赖） |
 | `/readyz` | GET | 就绪探针（数据库不通 → 503，摘流量不重启） |
-| `/metrics` | GET | 进程内指标 |
+| `/metrics` | GET | 进程内指标（全局运维口径，不分租户） |
 | `/v1/telemetry` | POST | 接入原始日志 → 候选异常 → 落库 |
-| `/v1/candidates` `/v1/alerts` `/v1/outbox` | GET | 查询 |
+| `/v1/summary` | GET | 聚合：候选 / 告警按状态 / 出箱各计数 |
+| `/v1/candidates` `/v1/alerts` `/v1/outbox` `/v1/reports` | GET | 分页查询（租户内） |
+| `/v1/candidates/{id}` | GET | 候选项详情 |
+| `/v1/candidates/{id}/evidence` | GET | Agent 所见证据（指标 / 参考窗口 / 厂商知识） |
+| `/v1/candidates/{id}/refs` | GET | 证据引用（挂到结论的出处） |
+| `/v1/investigations` | POST | 对候选跑 Agent 受控调查 → 持久化报告 |
+| `/v1/investigations/{id}` | GET | 读持久化报告 |
+| `/v1/feedback` | POST | 人工反馈（误报 / 已修复 / 无需动作）→ 驱动告警状态机 |
+| `/v1/alerts/{id}/feedback` | GET | 读某告警的反馈历史 |
+| `/v1/eval/feedback` | GET | 反馈回灌：人工标签 vs Agent 处置 → 一致率 / 误报率 / 漏报率 |
+| `/v1/knowledge/documents` | POST / GET | 导入 / 列出用户厂商文档（切片落库） |
+| `/v1/knowledge/search` | GET | 词法检索用户文档切片 |
+| `/v1/knowledge/documents/{id}` | DELETE | 删除文档及其切片 |
+
+身份**只认请求头** `X-Tenant-Id` / `X-Device-Sn`，正文与查询串里的身份字段一律被忽略（与 P2 网关失败语义一致）；缺租户头 → 401，跨租户读 → 404（不泄露存在性）。
 
 ```bash
 curl http://127.0.0.1:8000/healthz
 curl http://127.0.0.1:8000/readyz
 ```
-身份**只认请求头** `X-Tenant-Id` / `X-Device-Sn`，正文里的身份字段一律被忽略（与 P2 网关失败语义一致）。
 `make probe` / `make ingest` 封装了这些命令。
 
 ```bash
-pytest tests/test_service.py -q     # 14 项
+pytest tests/test_service.py -q
 ```
 
 **给别人用**：先设 `DD_API_KEY`（不然端口开放=任何人可读写）。
@@ -352,3 +369,21 @@ make up-prod                         # = compose.prod.yaml：Caddy 自动申请 
 
 详见 `docs/delivery.md`（含存活/就绪为何分开、每请求新建 DataPlane 的取舍、
 不在局域网的三条路、以及还不是生产级的项）。
+
+---
+
+## 文档地图
+
+| 想了解 | 看 |
+|---|---|
+| **全局架构（分层 / 依赖 / 数据流）** | `docs/architecture.md` |
+| 落地交付（服务怎么跑、Docker、生产 compose） | `docs/delivery.md` |
+| P1 离线算子工厂 | `docs/operator_factory.md`、`docs/dsl_spec.md` |
+| P2 在线数据面 | `docs/data_plane.md` |
+| P3 上报闭环 | `docs/alerting.md` |
+| Agent 降级路径 | `docs/degradation.md` |
+| 持久化 / 多租户 | `docs/storage.md` |
+| 整链回放 | `docs/e2e.md` |
+| SLO 量化目标 | `docs/slo.md` |
+| 事件 Schema 与版本策略 | `schemas/README.md` |
+| MuJoCo 数据源 | `docs/mujoco_sim.md` |

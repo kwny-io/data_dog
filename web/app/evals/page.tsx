@@ -66,8 +66,6 @@ export default function EvalsPage() {
             <PendingSlot
               title="逐用例评分"
               will="运行评估后，此处按用例展示：实际裁决 vs 期望集、证据工具是否调用、是否触犯禁用裁决。"
-              source="evals/run_evals.py"
-              command="python -m evals.run_evals"
             />
           </div>
         </Panel>
@@ -157,7 +155,7 @@ export default function EvalsPage() {
       </Panel>
 
       {/* Sources — reproduce commands, kept from the previous page. */}
-      <Panel title="可复现的评估入口" subtitle="这些结果不经过 /v1/* 暴露，需在服务仓库内运行">
+      <Panel title="可复现的评估入口">
         <ul className="divide-y divide-rule">
           {EVAL_SOURCES.map((s) => (
             <li key={s.name} className="px-4 py-3.5">

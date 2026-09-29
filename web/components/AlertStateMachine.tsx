@@ -3,6 +3,7 @@
 import clsx from "clsx";
 
 import { TechValue } from "@/components/tech";
+import { HScroll } from "@/components/ui/hscroll";
 import {
   ALERT_STATE_LABEL,
   ALERT_STATE_STYLE,
@@ -64,41 +65,43 @@ export function AlertStateMachine({
   const edges = collectEdges();
 
   return (
-    <div className={clsx("overflow-x-auto", className)}>
-      <div
-        className="grid min-w-[720px] gap-x-6 gap-y-8 px-4 py-5"
-        style={{ gridTemplateColumns: "repeat(6, minmax(90px, 1fr))" }}
-      >
-        {nodes.map((state) => {
-          const pos = LAYOUT[state];
-          const style = ALERT_STATE_STYLE[state];
-          const count = counts?.[state] ?? 0;
-          const isSel = selected === state;
-          return (
-            <div
-              key={state}
-              style={{ gridColumn: pos.col + 1, gridRow: pos.row + 1 }}
-              className="flex flex-col items-center gap-1.5"
-            >
-              <StateNode
-                state={state}
-                tone={style.tone}
-                filled={count > 0}
-                count={count}
-                selected={isSel}
-                onClick={() => onSelect?.(isSel ? null : state)}
-              />
-              {/* show the transition verb on the outgoing edge for the mainline */}
-              <EdgeCaption forState={state} />
-            </div>
-          );
-        })}
-      </div>
+    <div className={className}>
+      <HScroll>
+        <div
+          className="grid min-w-[720px] gap-x-6 gap-y-8 px-4 py-5"
+          style={{ gridTemplateColumns: "repeat(6, minmax(90px, 1fr))" }}
+        >
+          {nodes.map((state) => {
+            const pos = LAYOUT[state];
+            const style = ALERT_STATE_STYLE[state];
+            const count = counts?.[state] ?? 0;
+            const isSel = selected === state;
+            return (
+              <div
+                key={state}
+                style={{ gridColumn: pos.col + 1, gridRow: pos.row + 1 }}
+                className="flex flex-col items-center gap-1.5"
+              >
+                <StateNode
+                  state={state}
+                  tone={style.tone}
+                  filled={count > 0}
+                  count={count}
+                  selected={isSel}
+                  onClick={() => onSelect?.(isSel ? null : state)}
+                />
+                {/* show the transition verb on the outgoing edge for the mainline */}
+                <EdgeCaption forState={state} />
+              </div>
+            );
+          })}
+        </div>
+      </HScroll>
 
-      {/* Legend: the map is data, so the legend states the invariants.
-       *  The legend is stated in the operator's language; the English enum
-       *  names are demoted behind the raw-value toggle so the legend does not
-       *  read as a parenthesised debug dump. */}
+      {/* Legend sits OUTSIDE the scroller (it wraps rather than scrolls), so the
+       *  scroll-edge fade never clips it. The map is data, so the legend states
+       *  the invariants; the English enum names are demoted behind the raw-value
+       *  toggle so it does not read as a parenthesised debug dump. */}
       <div className="flex flex-wrap items-center gap-x-5 gap-y-2 border-t border-rule px-4 py-3 text-[11px] text-ink-muted">
         <span className="flex items-center gap-1.5">
           <span className="inline-block h-2.5 w-2.5 rounded-full bg-ink-faint" aria-hidden />

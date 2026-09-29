@@ -92,7 +92,7 @@ export default function AlertsPage() {
             <DataTable
               head={
                 <>
-                  <Th>事件 ID</Th>
+                  <Th sticky>事件 ID</Th>
                   <Th>类型</Th>
                   <Th>状态</Th>
                   <Th>严重度</Th>
@@ -103,8 +103,8 @@ export default function AlertsPage() {
               }
             >
               {rows.map((a) => (
-                <tr key={a.event_id} className="border-b border-rule hover:bg-paper-sunken/60">
-                  <Td>
+                <tr key={a.event_id} className="group border-b border-rule hover:bg-paper-sunken/60">
+                  <Td sticky>
                     <CopyId id={a.event_id} short={16} />
                   </Td>
                   <Td>

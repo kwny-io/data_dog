@@ -136,7 +136,7 @@ export default function OperatorsPage() {
             <DataTable
               head={
                 <>
-                  <Th>算子 ID</Th>
+                  <Th sticky>算子 ID</Th>
                   <Th>版本</Th>
                   <Th numeric>触发次数</Th>
                   <Th>涉及部件</Th>
@@ -145,8 +145,8 @@ export default function OperatorsPage() {
               }
             >
               {operators.map((op) => (
-                <tr key={`${op.id}:${op.version}`} className="border-b border-rule">
-                  <Td>
+                <tr key={`${op.id}:${op.version}`} className="group border-b border-rule">
+                  <Td sticky>
                     <span className="text-sm text-ink">{operatorName(op.id)}</span>
                     <TechValue value={op.id} label="算子标识" className="ml-1.5" />
                   </Td>
@@ -178,17 +178,14 @@ export default function OperatorsPage() {
           <PendingSlot
             title="算子注册表"
             will="全部注册算子及其规则、版本与启停状态。当前仅能显示实际触发过的算子。"
-            source="需 /v1/operators 端点"
           />
           <PendingSlot
             title="变更审计"
             will="每次算子增删改的操作者、时间与 diff。"
-            source="需 /v1/operators/audit 端点"
           />
           <PendingSlot
             title="灰度发布"
             will="按设备/租户切分的灰度比例与生效范围。"
-            source="需 /v1/operators/rollout 端点"
           />
         </div>
       </Panel>
