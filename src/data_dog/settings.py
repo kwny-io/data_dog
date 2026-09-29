@@ -262,6 +262,49 @@ def investigate_queue_poll_ms() -> int:
     return max(20, _get_int("DD_INVESTIGATE_QUEUE_POLL_MS", default=200))
 
 
+# ---------------------------------------------------------------- 算子沙箱（P4-1）
+
+def sandbox_kind() -> str:
+    """算子执行器类型：inline（默认，单进程+预算）/ subprocess（进程隔离+资源上限）。
+
+    wasm 为预留档位（未实现）。热路径保持 inline；对**不可信/待审**算子或隔离有
+    硬要求的部署改 subprocess。见 `docs/p4/01_sandbox.md`。
+    """
+    return _get("DD_SANDBOX_KIND", default="inline").lower()
+
+
+def sandbox_wall_s() -> float:
+    """单算子墙钟上限（秒）。默认 50ms，对齐 slo.md §4（热路径须极短）。"""
+    return _get_float("DD_SANDBOX_WALL_S", default=0.05)
+
+
+def sandbox_max_steps() -> int:
+    """解释器步数预算（Tier 0）。默认 10 万，防超长表达式。"""
+    return _get_int("DD_SANDBOX_MAX_STEPS", default=100_000)
+
+
+def sandbox_mem_mb() -> int:
+    """子进程地址空间增量上限（MB，Tier 1）。默认 64。"""
+    return _get_int("DD_SANDBOX_MEM_MB", default=64)
+
+
+def sandbox_cpu_s() -> float:
+    """子进程 CPU 时间上限（秒，Tier 1 rlimit）。默认 0.1。"""
+    return _get_float("DD_SANDBOX_CPU_S", default=0.1)
+
+
+def sandbox_policy():
+    """组装 `SandboxPolicy`（延迟导入避免 settings 依赖 operator_factory）。"""
+    from .operator_factory.sandbox import SandboxPolicy
+    return SandboxPolicy(
+        wall_s=sandbox_wall_s(),
+        max_steps=sandbox_max_steps(),
+        mem_mb=sandbox_mem_mb(),
+        cpu_s=sandbox_cpu_s(),
+        kind=sandbox_kind(),
+    )
+
+
 # ---------------------------------------------------------------- 路径
 
 def project_root() -> str | None:

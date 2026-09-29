@@ -60,11 +60,16 @@ class Operator:
 
     # -- 执行：返回命中的 rule_id 列表 --
     def run(self, event: dict[str, Any],
-            window: WindowContext | None = None) -> list[str]:
+            window: WindowContext | None = None,
+            max_steps: int = 0, wall_s: float = 0.0) -> list[str]:
         """对一条（可能畸形的）输入执行算子。
 
         健壮性（架构 §10.3 / §8.4 Fuzz 要求）：**任何畸形输入都不得抛异常**——
         类型不符/缺失/超范围一律视为"该规则不命中"（宁可漏报，不可崩溃或误报）。
+
+        `max_steps` / `wall_s`：Tier 0 沙箱预算（默认 0 = 不限，保持既有语义）。
+        由 `sandbox.ExecutorPool` 传入；超步/超时抛 `SandboxViolation` 向上传播，
+        **不**被本方法的"不命中"容错吞掉（安全事件不可伪装为不命中）。
         """
         hits: list[str] = []
         if not isinstance(event, dict):
@@ -85,7 +90,7 @@ class Operator:
             except (TypeError, ValueError):
                 continue
         for cr in self.compile_dsl():
-            if evaluate(cr, event, window):
+            if evaluate(cr, event, window, max_steps=max_steps, wall_s=wall_s):
                 hits.append(cr.rule_id)
         return hits
 

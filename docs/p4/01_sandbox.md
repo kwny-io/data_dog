@@ -1,5 +1,9 @@
 # P4-1 算子沙箱运行时
 
+> **状态：✅ 已实现（2026-09-29）。** Tier 0（步数+墙钟预算）+ Tier 1（子进程隔离）
+> 已落地；Tier 2（WASM）按设计**保留为预留档位，未接线**（避免重依赖拖慢交付）。
+> 实测档位与验收结果见 §8。文件：`operator_factory/sandbox.py`、`sandbox_exec.py`。
+
 ## 1. 目标
 
 让「厂商字符串变不成可执行代码」这个安全故事**成真到运行时层**：即使受限 DSL 的解释器
@@ -109,3 +113,42 @@ class SandboxViolation(RuntimeError):
 
 - **P4-2 控制面**依赖本项：签名验过的算子，才由沙箱执行——「验签 + 沙箱」是完整信任链。
 - 与「缺口-8 验证流水线（编译扫描）」互补：扫描是静态防线，沙箱是动态防线。
+
+## 8. 实现与验收（2026-09-29 实测）
+
+**交付物**（均已在 `feat/p4-orchestration` 落地）：
+
+| 文件 | 内容 |
+|---|---|
+| `operator_factory/sandbox.py` | `SandboxPolicy` / `ExecutorPool` / `InlineExecutor` / `SubprocessExecutor` + 再导出 `SandboxViolation` |
+| `operator_factory/sandbox_exec.py` | Tier 1 worker 入口（spawn 可导入）；rlimit/seccomp 在子进程内自设 |
+| `operator_factory/dsl.py` | `SandboxViolation` 定义；`Evaluator`/`evaluate` 加 `max_steps`/`wall_s` 预算 |
+| `operator_factory/pipeline.py` | `Operator.run()` 透传预算（默认 0 = 不限，语义不变） |
+| `settings.py` | `DD_SANDBOX_*` 唯一配置读取点 + `sandbox_policy()` |
+| `pyproject.toml` | 可选依赖 `[wasm]` / `[seccomp]` / `[sandbox]` |
+| `tests/test_sandbox.py` | 15 项测试 |
+
+**验收对照（§5 六条）**：
+
+| # | 验收项 | 结果 |
+|---|---|---|
+| 1 | step 预算快速失败，宿主 <200ms | ✅ `test_step_budget_violation_fast` |
+| 2 | 墙钟超时按期终止 | ✅ `test_wall_clock_violation_on_large_window` |
+| 3 | 子进程崩溃不拖垮父进程 | ✅ `test_subprocess_crash_does_not_kill_host`（自动重启 worker 自愈） |
+| 4 | 无网络/文件隔离 | ⚠️ **本档降级**：Windows 实测档位 `subprocess[no-rlimit+no-seccomp]`，best-effort；Linux + `pyseccomp` 方为硬隔离 |
+| 5 | 零回归 | ✅ `test_operator_factory*` 全绿；全量 **379 passed, 4 skipped** |
+| 6 | 隔离相近 | ✅ 越权/超时失败关闭（Fail-closed），仅丢弃该次求值 |
+
+**本机实测隔离档位**（如实打印，非声称）：
+```
+isolation = subprocess[no-rlimit+no-seccomp]   # Windows 11，无 resource/seccomp
+hit  = ['R']    miss = []
+```
+
+**关键设计取舍**：
+- `SandboxViolation` **继承 `RuntimeError`**（非 `DSLError`）→ `evaluate()` 的"不命中"容错
+  **不吞**它——安全事件不可被伪装成"不命中"（`test_violation_not_masked_as_miss`）。
+- Tier 1 用 **`RLIMIT_AS = 当前占用 + mem_mb`**（增量余量），非绝对值——否则 spawn 的
+  Python 子进程基线就超 64MB，会立刻触顶连正常求值都跑不了。
+- worker **常驻**而非逐算子 fork：fork 开销远大于单次求值，逐算子 fork 拖垮吞吐。
+

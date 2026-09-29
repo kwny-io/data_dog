@@ -56,6 +56,20 @@ mqtt = [
 kafka = [
     "kafka-python>=2.0",
 ]
+# 算子沙箱加强项（P4-1，均**可选**，不装也能跑；缺省降级见 docs/p4/01_sandbox.md §6）
+# wasm：用 wasmtime 承载纯计算（预留最优档，本版未接线）
+wasm = [
+    "wasmtime>=20.0",
+]
+# seccomp：Linux 下禁算子 socket/connect/open/execve（best-effort）
+seccomp = [
+    "pyseccomp>=0.1.2",
+]
+# 一次装齐沙箱全部加强项
+sandbox = [
+    "wasmtime>=20.0",
+    "pyseccomp>=0.1.2",
+]
 
 [project.scripts]
 data-dog = "data_dog.cli:app"

@@ -22,6 +22,7 @@ P2 与 Enricher 一起做）；状态机（dsl_spec §5，本模块只做无状�
 from __future__ import annotations
 
 import re
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -29,6 +30,18 @@ from typing import Any
 
 class DSLError(ValueError):
     """DSL 编译或求值错误（统一归类为 invalid_input）。"""
+
+
+class SandboxViolation(RuntimeError):
+    """违反沙箱策略（超时 / 超步 / 越权）。
+
+    定义在 dsl.py（最底层）以免与 sandbox.py 循环导入；sandbox.py 再对外导出。
+    继承 RuntimeError 而非 DSLError：`evaluate()` 只吞 DSLError/TypeError/ValueError，
+    故本异常会**向上传播**——沙箱越权是安全事件，不能被"视为不命中"悄悄掩盖。
+
+    为何不继承 DSLError：DSLError 语义是"表达式本身有问题 → 不命中即可"，
+    而 SandboxViolation 语义是"执行越界，须由调用方记录/熔断"。
+    """
 
 
 # ---------------------------------------------------------------- 词法
@@ -338,9 +351,31 @@ def _as_number(x: Any) -> float:
 
 
 class Evaluator:
-    def __init__(self, fields: dict[str, Any], window: WindowContext | None = None):
+    def __init__(self, fields: dict[str, Any], window: WindowContext | None = None,
+                 max_steps: int = 0, wall_s: float = 0.0):
         self.fields = fields
         self.window = window or WindowContext()
+        # Tier 0 预算：max_steps<=0 表示不限步；wall_s<=0 表示不限时（默认不限，
+        # 保持既有语义不变——只有走沙箱的执行器才传非零预算）。
+        self.max_steps = max_steps
+        self._steps = 0
+        self._deadline = (time.monotonic() + wall_s) if wall_s and wall_s > 0 else 0.0
+
+    # -- 预算检查（Tier 0）--
+    def _tick(self) -> None:
+        """每访问一个 AST 节点记一步；超步 / 超时即抛 SandboxViolation。
+
+        检查点是**节点级**（不是每条语句级）：DSL 无循环/无递归，表达式深度即
+        节点数，所以节点计数天然有界——但深链如 a+b+c+... （解析为左深树）或
+        巨大 window 输入仍需封顶，故保留。
+        """
+        if self.max_steps:
+            self._steps += 1
+            if self._steps > self.max_steps:
+                raise SandboxViolation(
+                    f"步数超预算 {self.max_steps}（疑似超长表达式）")
+        if self._deadline and time.monotonic() > self._deadline:
+            raise SandboxViolation("求值超墙钟预算（疑似超长窗口输入）")
 
     # -- 编译期类型检查 --
     def check(self, node: Any) -> str:
@@ -395,6 +430,7 @@ class Evaluator:
 
     # -- 求值（自建 AST 解释器：不触碰任何动态代码执行原语）--
     def eval_node(self, node: Any) -> Any:
+        self._tick()
         if isinstance(node, Num):
             return node.value
         if isinstance(node, Str):
@@ -467,6 +503,7 @@ class Evaluator:
             func = name.split(".", 1)[1]
             if func not in WINDOW_FUNCS:
                 raise DSLError(f"未知窗口函数 {func!r}")
+            self._tick()  # 单个大聚合调用前再查一次，防超长窗口拖死
             fld = node.args[0].name
             extra = tuple(self.eval_node(a) for a in node.args[1:])
             return self.window.agg(func, fld, extra)
@@ -566,13 +603,17 @@ def compile_rule(rule: dict, declared_fields: Sequence[str] = ()) -> CompiledRul
 
 
 def evaluate(rule: CompiledRule, fields: dict[str, Any],
-             window: WindowContext | None = None) -> bool:
+             window: WindowContext | None = None,
+             max_steps: int = 0, wall_s: float = 0.0) -> bool:
     """对单个事件（+窗口上下文）求值，返回是否命中。
 
     健壮性：任何求值期异常（字段缺失导致的 None 比较、类型不符等）一律视为"不命中"，
     **不得抛出**中断数据流（架构 §10.3：字段缺失走 missing 语义，不抛异常）。
+
+    例外：`SandboxViolation`（继承 RuntimeError）**不在此吞掉**——它是安全事件，
+    须由调用方（沙箱执行器）记录并熔断，不能被伪装成"不命中"。
     """
     try:
-        return bool(Evaluator(fields, window).eval_node(rule.ast))
+        return bool(Evaluator(fields, window, max_steps=max_steps, wall_s=wall_s).eval_node(rule.ast))
     except (DSLError, TypeError, ValueError):
         return False

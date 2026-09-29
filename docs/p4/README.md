@@ -8,10 +8,10 @@
 
 ## 优先级与建议顺序
 
-| # | 项 | 文件 | 建议 | 依赖 |
+| # | 项 | 文件 | 状态 | 依赖 |
 |---|---|---|---|---|
-| P4-8 | 软实时 P99 基准 | [08_soft_realtime.md](08_soft_realtime.md) | **先做**（最便宜，给所有性能声明兜底） | 无 |
-| P4-1 | 算子沙箱运行时 | [01_sandbox.md](01_sandbox.md) | 高 | 无 |
+| P4-8 | 软实时 P99 基准 | [08_soft_realtime.md](08_soft_realtime.md) | ✅ **已完成**（2026-09-29） | 无 |
+| P4-1 | 算子沙箱运行时 | [01_sandbox.md](01_sandbox.md) | ✅ **已完成**（2026-09-29） | 无 |
 | P4-2 | 控制面 Registry/Canary/回滚/签名 | [02_control_plane.md](02_control_plane.md) | 高 | P4-1（沙箱是签名后的执行前提） |
 | P4-4 | K8s/Helm 编排 | [04_k8s_helm.md](04_k8s_helm.md) | 高 | P4-5（多副本需分片/协调） |
 | P4-7 | 退化趋势预测 | [07_degradation_forecast.md](07_degradation_forecast.md) | 高 | 无 |
