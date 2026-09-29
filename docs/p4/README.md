@@ -1,0 +1,53 @@
+# P4 大工程 —— 并行实施总纲
+
+> 这 8 项曾是「明确不做」。**重新评估后：7 项转为可做，1 项（硬实时 <1ms）如实保留为
+> 非目标、改述为软实时**。原因：当初标"不做"多因技术未到位，非真不该做。
+>
+> 每个文件**自包含**——一个并行会话读一份即可开工，互不依赖文件内容（共享的只有
+> `storage/models.py`、`service/app.py` 两个集成点，见下）。
+
+## 优先级与建议顺序
+
+| # | 项 | 文件 | 建议 | 依赖 |
+|---|---|---|---|---|
+| P4-8 | 软实时 P99 基准 | [08_soft_realtime.md](08_soft_realtime.md) | **先做**（最便宜，给所有性能声明兜底） | 无 |
+| P4-1 | 算子沙箱运行时 | [01_sandbox.md](01_sandbox.md) | 高 | 无 |
+| P4-2 | 控制面 Registry/Canary/回滚/签名 | [02_control_plane.md](02_control_plane.md) | 高 | P4-1（沙箱是签名后的执行前提） |
+| P4-4 | K8s/Helm 编排 | [04_k8s_helm.md](04_k8s_helm.md) | 高 | P4-5（多副本需分片/协调） |
+| P4-7 | 退化趋势预测 | [07_degradation_forecast.md](07_degradation_forecast.md) | 高 | 无 |
+| P4-3 | 通知/值班/升级 SLA | [03_notify_oncall.md](03_notify_oncall.md) | 中 | 无 |
+| P4-5 | 车队级分片 | [05_sharding.md](05_sharding.md) | 中 | 缺口-5（多副本协调，另一批） |
+| P4-6 | 跨地域多活 | [06_multi_region.md](06_multi_region.md) | **缓**（ROI 最低，设计给全） | P4-3 P4-5 |
+
+## 与「缺口」批的关系
+
+另一批是**当前范围的技术缺口**，独立成文档，见 **[gaps/](gaps/README.md)**（8 项：
+调查异步化 / 事件时间水位线 / checkpoint / 降级队列持久化 / 多副本协调 / 因果拓扑 /
+变更源 / 验证流水线）。两批在 `stream/`、`state/`、`service/app.py` 有交集，建议：
+**先合缺口批，再做 P4**——P4-4/P4-5 直接建立在缺口 G5（多副本协调）之上。
+
+## 集成点（并行冲突区，务必协调）
+
+所有 P4 项最终要碰这两个文件，**并行时约定**：各自新增独立模块，只在这两处做**最小**改动：
+
+1. **`src/data_dog/storage/models.py` + 新迁移**：P4-2（operator_registry）、P4-3（oncall/escalation 表）
+   各加自己的表。**迁移文件名带各自前缀**避免 alembic 撞号：
+   `20260930_0800_a1_operator_registry.py`、`20260930_0810_a2_oncall.py`。
+2. **`src/data_dog/service/app.py`**：P4-2、P4-3 各加自己的 `/v1/*` 端点，放在文件末尾
+   （`# ---- P4-2 ----` 分节注释内），减少 diff 冲突。
+
+## 全局诚实边界（各文档重复声明，此处汇总）
+
+- **硬实时 <1ms**：Python + FastAPI + 关系库做不到。**改述为软实时 P99 目标**（P4-8 实测）。
+- **RPO=0**：需数据库同步复制设施，非代码可解。多活是**异步**（RPO>0）。
+- **吞吐数字**：一律**实测**（loadgen），不空口保证。
+- **RUL**：输出「到达阈值的 ETA ± 区间」，**非**研究级精确剩余寿命。
+- **沙箱**：Windows 上无 seccomp，隔离降级为「子进程 + 资源上限 + best-effort」，文档写明。
+
+## 统一定义（各文档引用，避免歧义）
+
+- **热路径**：`POST /v1/telemetry` → 网关 → 解析 → 检测 → 候选落库。**零 LLM**。
+- **调查路径**：`POST /v1/investigations` → AgentLoop。**可含 LLM**。
+- **确定性 ID**：`cand_<hash(...)>` / `event_id` / 幂等键，全由输入唯一确定。
+- **失败关闭**：拿不准就拒，绝不降级为无鉴权 / 不猜。
+- **租户作用域**：`tenant_id` 进复合主键；跨租户读 404；**RLS 仅 PostgreSQL**。
