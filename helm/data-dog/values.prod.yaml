@@ -1,0 +1,58 @@
+# 生产覆盖值：多副本 + 外部 PostgreSQL/Redis + 敏感配置走已有 Secret。
+#
+#   helm upgrade --install dd ./helm/data-dog \
+#     -f ./helm/data-dog/values.prod.yaml \
+#     --set image.repository=registry.example.com/data-dog \
+#     --set image.tag=0.1.0 \
+#     --set ingress.enabled=true \
+#     --set-secret 由 external-secrets / sealed-secrets 提供（见 secret.existingSecret）
+#
+# 前提：先创建好 Secret（键名即环境变量名）：
+#   kubectl create secret generic dd-secrets \
+#     --from-literal=DD_DATABASE_URL='postgresql+psycopg://user:pw@pg-host:5432/data_dog' \
+#     --from-literal=DD_API_KEY='<强随机>' \
+#     --from-literal=DD_OPERATOR_SIGNING_KEY='<强随机>' \
+#     --from-literal=DD_REDIS_URL='redis://redis-host:6379/0'
+
+image:
+  pullPolicy: IfNotPresent
+
+# 生产**必须**用外部 Secret，绝不让密钥落在 values/ConfigMap/etcd 明文里。
+secret:
+  existingSecret: dd-secrets
+  create: false
+
+config:
+  DD_STATE_BACKEND: postgres
+  DD_RATE_BACKEND: redis        # 限流走 Redis（sub-ms + 原生 TTL），业务状态仍走 PG
+  DD_AUTO_MIGRATE: "0"          # 多副本必须关；迁移走 migrate Job
+  DD_LOG_JSON: "1"
+
+api:
+  replicas: 3
+  resources:
+    requests: { cpu: 250m, memory: 512Mi }
+    limits:   { cpu: "1",  memory: 1Gi }
+
+stream:
+  enabled: true
+  # 生产流式源用 kafka（消费者组）或 mqtt（共享订阅）；file 只适合单副本 demo。
+  source: kafka
+  replicas: 3
+  resources:
+    requests: { cpu: 200m, memory: 384Mi }
+    limits:   { cpu: "1",  memory: 768Mi }
+
+autoscaling:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 20
+  targetCPUUtilizationPercentage: 70
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 2              # replicas=3 时至少保 2 可用
+
+serviceMonitor:
+  enabled: true
+  interval: 30s

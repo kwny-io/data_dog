@@ -1,0 +1,50 @@
+{{- /*
+  迁移 Job：Helm hook，在 install/upgrade **应用之前**跑一次 alembic upgrade head。
+  为什么必须显式跑：多副本下 DD_AUTO_MIGRATE=0（各实例同时启动会并发跑迁移、互相竞争），
+  迁移收敛到这一个一次性 Job。hook 保证在 Deployment 之前应用、且失败即中止发布。
+*/ -}}
+{{- if .Values.migrate.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "data-dog.fullname" . }}-migrate
+  labels:
+    {{- include "data-dog.labels" . | nindent 4 }}
+    app.kubernetes.io/component: migrate
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": {{ .Values.migrate.hookDeletePolicy }}
+spec:
+  backoffLimit: {{ .Values.migrate.backoffLimit }}
+  activeDeadlineSeconds: {{ .Values.migrate.activeDeadlineSeconds }}
+  template:
+    metadata:
+      labels:
+        {{- include "data-dog.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: migrate
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ include "data-dog.serviceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: migrate
+          image: {{ include "data-dog.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["python", "-m", "data_dog.storage.migrations", "upgrade"]
+          envFrom:
+            {{- include "data-dog.envFrom" . | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+{{- end }}

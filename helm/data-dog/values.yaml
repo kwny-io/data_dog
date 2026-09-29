@@ -1,0 +1,141 @@
+# data-dog Helm chart 默认值（适合 kind / 本地集群）。
+# 生产覆盖见 values.prod.yaml，并**务必**用 --set 或 -f 注入密钥（或用 existingSecret）。
+
+# ---- 镜像 ----
+image:
+  repository: data-dog
+  # 省略则用 Chart.appVersion
+  tag: ""
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+# ---- 非敏感配置（进 ConfigMap，作为所有工作负载的 env 来源）----
+# 每一项对应 data_dog 的一个 DD_* 环境变量（见 src/data_dog/settings.py）。
+# 多副本**必须**让状态/限流外置：memory 后端会让各副本各算各的（见 §3.3）。
+config:
+  DD_SERVICE_NAME: data-dog
+  DD_SERVICE_HOST: "0.0.0.0"
+  DD_SERVICE_PORT: "8000"
+  # 多副本共享状态后端（memory 会让限流/候选合并各算各的）
+  DD_STATE_BACKEND: postgres
+  # 生产多副本**必须** 0：多个实例同时启动会并发跑迁移、互相竞争。
+  # 迁移由 migrate Job（Helm hook）在应用启动前跑一次。
+  DD_AUTO_MIGRATE: "0"
+  DD_LOG_LEVEL: INFO
+  DD_LOG_JSON: "1"
+  # 流式接入默认关（由 stream.enabled 单独控制消费者工作负载）
+  DD_STREAM_ENABLED: "0"
+  DD_PROJECT_ROOT: /app
+  DD_VENDOR_DOCS: /app/vendor_docs
+  DD_OPERATORS_DIR: /app/operators
+
+# ---- 敏感配置（不进 values 明文；由外部 Secret 注入）----
+# secret.existingSecret 非空 → 用它；否则用 secret.create 由本 chart 建
+# （create 时 values 里的值会被写进 Secret，**仅本地 demo 用**，生产别这么干）。
+secret:
+  existingSecret: ""
+  create: false
+  # 仅当 create=true 时使用（键名即环境变量名）：
+  data:
+    DD_DATABASE_URL: ""
+    DD_API_KEY: ""
+    DD_OPERATOR_SIGNING_KEY: ""
+    DD_REDIS_URL: ""
+
+# ---- API 工作负载（无状态，可任意扩缩）----
+api:
+  replicas: 3
+  resources:
+    requests: { cpu: 200m, memory: 512Mi }
+    limits:   { cpu: "1",  memory: 1Gi }
+  # 探针路径对齐 src/data_dog/service/app.py：/healthz 存活、/readyz 就绪（含 DB/stream 检查）
+  probes:
+    liveness:
+      path: /healthz
+      initialDelaySeconds: 10
+      periodSeconds: 15
+      timeoutSeconds: 3
+      failureThreshold: 3
+    readiness:
+      path: /readyz
+      initialDelaySeconds: 5
+      periodSeconds: 10
+      timeoutSeconds: 3
+      failureThreshold: 3
+  # 额外环境变量（追加到 config+secret 之后）
+  extraEnv: []
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# ---- 流式消费者工作负载（独立扩缩理由，见 §3.3）----
+stream:
+  enabled: false
+  # file 源只能 1；kafka/mqtt 可 >1（靠消费者组/共享订阅协调）
+  replicas: 1
+  # 源类型：kafka / mqtt / file（决定多副本是否安全——file 多副本会被拒绝启动）
+  source: file
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits:   { cpu: 500m, memory: 512Mi }
+  extraEnv: []
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# ---- 迁移 Job（Helm hook：pre-install/pre-upgrade）----
+migrate:
+  enabled: true
+  # 用与 api 同一镜像跑 `python -m data_dog.storage.migrations upgrade`
+  backoffLimit: 3
+  activeDeadlineSeconds: 300
+  # hook 删除策略：新 hook 创建前删旧的，避免同名 Job 冲突
+  hookDeletePolicy: before-hook-creation
+
+# ---- Service ----
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 8000
+
+# ---- Ingress（可选；也可沿用仓库既有的 Caddy 反代）----
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: data-dog.local
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+# ---- HPA（按 CPU 起步；自定义指标需 Prometheus Adapter，见 §6）----
+autoscaling:
+  enabled: false
+  minReplicas: 3
+  maxReplicas: 20
+  targetCPUUtilizationPercentage: 70
+  # 可选：按内存
+  targetMemoryUtilizationPercentage: ""
+
+# ---- PDB（滚动更新/节点维护时不一次性打光副本）----
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+# ---- Prometheus Operator ServiceMonitor（可选）----
+serviceMonitor:
+  enabled: false
+  interval: 30s
+  path: /metrics
+  labels: {}

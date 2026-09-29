@@ -133,6 +133,17 @@ def stream_enabled() -> bool:
     return _get_bool("DD_STREAM_ENABLED", default=False)
 
 
+def stream_shards() -> int:
+    """流式消费者的**副本数**（K8s 里 `deployment-stream` 的 replicas）。
+
+    这个值**不在消费进程内决定并行度**，而是为了让进程自检：
+    file 源（单文件、无协调）配了多副本 → 启动即失败关闭（见 stream/factory.py），
+    免得多个副本各尾随一份、事件被重复处理而无人察觉。
+    多副本只对 kafka（消费者组）/ mqtt（共享订阅）安全。
+    """
+    return max(1, _get_int("DD_STREAM_SHARDS", default=1))
+
+
 def stream_source() -> str:
     """流式源类型：file / http / mqtt / kafka。"""
     return _get("DD_STREAM_SOURCE", default="file").lower()

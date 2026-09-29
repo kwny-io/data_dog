@@ -1,0 +1,32 @@
+{{ .Chart.Name }} 已部署。
+
+检查滚动状态：
+  kubectl -n {{ .Release.Namespace }} rollout status deploy/{{ include "data-dog.fullname" . }}-api
+
+探活/就绪/指标（本地端口转发后）：
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "data-dog.fullname" . }} 8000:{{ .Values.service.port }}
+  curl localhost:8000/healthz
+  curl localhost:8000/readyz
+  curl localhost:8000/metrics
+
+{{- if .Values.stream.enabled }}
+
+流式消费者：{{ .Values.stream.replicas }} 副本，源={{ .Values.stream.source }}。
+{{- if eq .Values.stream.source "file" }}
+注意：file 源为单副本（replicas=1）；多副本会在启动时报错退出（有意为之）。
+{{- end }}
+{{- else }}
+
+流式接入**未启用**（stream.enabled=false）。需要消费实时遥测时：
+  helm upgrade {{ .Release.Name }} ./helm/data-dog --set stream.enabled=true --set stream.source=kafka
+{{- end }}
+
+{{- if not .Values.secret.existingSecret }}
+{{- if not .Values.secret.create }}
+
+⚠️  未配置任何 Secret 来源（secret.existingSecret 与 secret.create 都为空）。
+   应用可能连不上数据库或缺少签名密钥——请提供外部 Secret（生产）或设 secret.create=true（仅本地 demo）。
+{{- end }}
+{{- end }}
+
+验收多副本状态一致（同一设备事件打到不同 pod 应归并成 1 条候选）见 docs/p4/04_k8s_helm.md §5。

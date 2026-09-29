@@ -1,0 +1,84 @@
+{{- /*
+  流式消费者：独立工作负载（扩缩理由与 API 不同）。
+  - kafka/mqtt：可多副本（消费者组 / 共享订阅协调）。
+  - file：只能 1 副本；若 replicas>1，消费者进程会**启动即报错退出**（失败关闭），
+    K8s 表现为 CrashLoopBackOff —— 这是**有意为之**：宁可显式崩溃，不静默重复消费。
+*/ -}}
+{{- if .Values.stream.enabled }}
+{{- if and (eq .Values.stream.source "file") (gt (int .Values.stream.replicas) 1) }}
+{{- fail (printf "\n\n配置错误：stream.source=file 不支持 stream.replicas>1（当前 %d）。\nfile 源是单文件尾随、无跨副本协调，多副本会重复消费。\n请将 stream.replicas 设为 1，或改用 kafka/mqtt 源（见 docs/p4/04_k8s_helm.md §3.3）。\n" (int .Values.stream.replicas)) }}
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "data-dog.fullname" . }}-stream
+  labels:
+    {{- include "data-dog.labels" . | nindent 4 }}
+    app.kubernetes.io/component: stream
+spec:
+  replicas: {{ .Values.stream.replicas }}
+  selector:
+    matchLabels:
+      {{- include "data-dog.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: stream
+  template:
+    metadata:
+      labels:
+        {{- include "data-dog.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: stream
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+    spec:
+      serviceAccountName: {{ include "data-dog.serviceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: stream
+          image: {{ include "data-dog.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["python", "-m", "data_dog.service.stream_worker"]
+          envFrom:
+            {{- include "data-dog.envFrom" . | nindent 12 }}
+          env:
+            # consumers 用独立配置：开流/指定源/声明副本数（供进程自检）
+            - name: DD_STREAM_ENABLED
+              value: "1"
+            - name: DD_STREAM_SOURCE
+              value: {{ .Values.stream.source | quote }}
+            - name: DD_STREAM_SHARDS
+              value: {{ .Values.stream.replicas | quote }}
+            {{- with .Values.stream.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          # 消费者没有 HTTP 端口；用进程存活探针（进程没了即重启）
+          livenessProbe:
+            exec:
+              command: ["python", "-c", "import sys; sys.exit(0)"]
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          resources:
+            {{- toYaml .Values.stream.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop: ["ALL"]
+      # 优雅停机：给消费者时间 flush 暂存消息（stream_worker 捕获 SIGTERM 后收尾）
+      terminationGracePeriodSeconds: 30
+      {{- with .Values.stream.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.stream.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

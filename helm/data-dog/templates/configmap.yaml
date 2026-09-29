@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "data-dog.fullname" . }}-config
+  labels:
+    {{- include "data-dog.labels" . | nindent 4 }}
+data:
+  {{- range $k, $v := .Values.config }}
+  {{ $k }}: {{ $v | quote }}
+  {{- end }}
+  # 注意：**不在这里**放 DD_STREAM_* —— 本 ConfigMap 是 API 与消费者共用的 envFrom，
+  # 若在此开流（DD_STREAM_ENABLED=1），API 副本会**同时**起一个进程内消费者，
+  # 与本 chart 的独立 stream deployment 重复消费。流式相关变量只由 stream
+  # deployment 自己的 `env` 注入（env 覆盖 envFrom），API 保持 DD_STREAM_ENABLED=0。

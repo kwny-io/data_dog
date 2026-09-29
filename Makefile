@@ -4,7 +4,7 @@
 PY ?= .venv/Scripts/python.exe
 PORT ?= 8000
 
-.PHONY: help install test lint typecheck cov serve probe ingest e2e ui bench up down logs ps health clean
+.PHONY: help install test lint typecheck cov serve probe ingest e2e ui bench up down logs ps health clean helm-lint verify-chart k8s-e2e
 
 help:            ## 显示所有命令
 	@echo "make install  安装依赖(含服务)"
@@ -21,6 +21,9 @@ help:            ## 显示所有命令
 	@echo "make logs     跟 Docker 应用日志"
 	@echo "make ps       看 Docker 容器状态"
 	@echo "make health   看容器健康状态"
+	@echo "make helm-lint    helm lint + template 渲染检查"
+	@echo "make verify-chart chart 渲染不变量断言(P4-4)"
+	@echo "make k8s-e2e      kind 多副本状态一致验收(需 kind/kubectl)"
 
 install:         ## 安装依赖
 	$(PY) -m pip install -e ".[dev,postgres]"
@@ -84,6 +87,18 @@ ps:              ## 容器状态
 
 health:          ## 容器健康状态
 	docker inspect --format '{{.Name}} {{.State.Health.Status}}' data_dog-app-1 data_dog-db-1 2>/dev/null || docker compose ps
+
+helm-lint:       ## helm lint + 渲染（默认值与生产覆盖值）
+	helm lint helm/data-dog
+	helm template dd helm/data-dog >/dev/null
+	helm template dd helm/data-dog -f helm/data-dog/values.prod.yaml >/dev/null
+	@echo "[helm-lint] lint 与渲染均通过"
+
+verify-chart:    ## chart 渲染不变量断言（P4-4 验收 1）
+	$(PY) scripts/verify_chart.py
+
+k8s-e2e:         ## kind 多副本状态一致验收（P4-4 验收 6，需 kind/kubectl/helm）
+	bash tools/k8s_e2e.sh
 
 clean:           ## 清本地缓存与 SQLite
 	rm -rf .pytest_cache **/__pycache__ *.db

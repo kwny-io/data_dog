@@ -340,6 +340,38 @@ def test_factory_kafka_without_dep_is_clear_error(monkeypatch):
         build_source()
 
 
+def test_factory_file_multi_replica_fails_closed(monkeypatch, tmp_path):
+    """file 源 + 多副本 → 启动即失败（失败关闭），不静默重复消费。"""
+    f = tmp_path / "r.log"
+    f.write_text("")
+    monkeypatch.setenv("DD_STREAM_SOURCE", "file")
+    monkeypatch.setenv("DD_STREAM_FILE_PATH", str(f))
+    monkeypatch.setenv("DD_STREAM_SHARDS", "3")
+    with pytest.raises(RuntimeError, match="不支持多副本"):
+        build_source()
+
+
+def test_factory_http_multi_replica_fails_closed(monkeypatch):
+    """http 源同样无跨副本协调 → 多副本拒绝。"""
+    monkeypatch.setenv("DD_STREAM_SOURCE", "http")
+    monkeypatch.setenv("DD_STREAM_SHARDS", "2")
+    with pytest.raises(RuntimeError, match="不支持多副本"):
+        build_source()
+
+
+def test_factory_kafka_multi_replica_allowed(monkeypatch):
+    """kafka 靠消费者组 → 多副本放行（这里只验不因多副本被拒）。"""
+    monkeypatch.setenv("DD_STREAM_SOURCE", "kafka")
+    monkeypatch.setenv("DD_STREAM_SHARDS", "4")
+    try:
+        src = build_source()
+    except RuntimeError as e:
+        # 缺 kafka-python 依赖时的报错可以接受；**不能**是多副本拒绝
+        assert "不支持多副本" not in str(e)
+        return
+    assert src.name == "kafka"
+
+
 def _has(mod: str) -> bool:
     import importlib.util
     return importlib.util.find_spec(mod) is not None

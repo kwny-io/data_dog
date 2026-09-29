@@ -98,12 +98,13 @@ spec:
       containers:
         - name: migrate
           image: {{ .Values.image }}
-          command: ["python", "-m", "data_dog.storage.migrations"]  # 待加 __main__ 入口
+          command: ["python", "-m", "data_dog.storage.migrations", "upgrade"]
           envFrom: [...]
 ```
 
-> **要补**：给 `storage/migrations.py` 加 `if __name__ == "__main__": upgrade_head()` 入口，
-> 或写一个 `scripts/migrate.py`，让 Job 能直接调。
+> **已落地**：`storage/migrations.py` 加了 `__main__` 入口（`upgrade` / `current`）。
+> **镜像前提**：`Dockerfile` 必须 `COPY alembic.ini` 与 `COPY alembic/` 进去——
+> 否则容器内既跑不了本 Job，也做不了启动时的 `DD_AUTO_MIGRATE`（见 §6 诚实边界）。
 
 ### 3.5 本地验收：kind
 
@@ -149,3 +150,76 @@ curl localhost:8000/v1/candidates -H 'X-Tenant-Id: t1'   # 断言 1 条
 
 - **P4-5 分片**：多副本路由的分片键设计与之衔接（分片是编排的上层语义）。
 - **缺口-5 多副本协调**：stream 消费者不重复消费依赖它——**建议先合缺口批**。
+
+## 8. 实现与验收（已落地）
+
+### 8.1 落地的文件
+
+| 文件 | 作用 |
+|---|---|
+| `helm/data-dog/Chart.yaml` | chart 元数据（v2） |
+| `helm/data-dog/values.yaml` | 默认值（kind/本地：SQLite、stream 关、单副本） |
+| `helm/data-dog/values.prod.yaml` | 生产覆盖（kafka stream 3 副本、HPA、PDB≥2、ServiceMonitor） |
+| `helm/data-dog/templates/_helpers.tpl` | 命名/标签/镜像/envFrom 助手 |
+| `helm/data-dog/templates/configmap.yaml` | 非敏感 `DD_*`（**不含** `DD_STREAM_*`，见 8.2） |
+| `helm/data-dog/templates/deployment-api.yaml` | 无状态 API；`maxUnavailable:0` 滚动；非 root、drop ALL |
+| `helm/data-dog/templates/deployment-stream.yaml` | 独立消费者；**file 源 + 多副本 → `fail`** |
+| `helm/data-dog/templates/job-migrate.yaml` | `pre-install,pre-upgrade` hook，跑 `migrations upgrade` |
+| `helm/data-dog/templates/{service,ingress,hpa,pdb,servicemonitor,secret,serviceaccount}.yaml` | 配套资源 |
+| `src/data_dog/service/stream_worker.py` | 消费者独立入口（`python -m data_dog.service.stream_worker`） |
+| `src/data_dog/stream/factory.py` | 多副本**失败关闭**（file/http 源 + `DD_STREAM_SHARDS>1` → 抛错） |
+| `src/data_dog/storage/migrations.py` | 加 `__main__`（`upgrade`/`current`）；`project_root()` 委托统一根解析 |
+| `Dockerfile` | `COPY alembic.ini` + `COPY alembic/`（见 8.4 的真 bug） |
+| `scripts/verify_chart.py` | 渲染后**不变量断言**（不是只 lint） |
+| `tools/k8s_e2e.sh` | kind 多副本验收脚本 |
+| `Makefile` / `.github/workflows/ci.yml` | `helm-lint`/`verify-chart`/`k8s-e2e` + CI `helm` 腿 |
+
+### 8.2 两处"看似对、其实错"的编排坑（都已在模板层钉死）
+
+1. **ConfigMap 共用导致 API 重复消费**：ConfigMap 是 API 与消费者**共用**的 `envFrom`。
+   若把 `DD_STREAM_ENABLED=1` 写进 ConfigMap，API 副本会**各自**再起一个进程内消费者，
+   与独立 `deployment-stream` 重复消费。→ 修法：`DD_STREAM_*` **只**由 stream
+   deployment 自己的 `env` 注入（`env` 覆盖 `envFrom`），ConfigMap 里恒为 `0`。
+2. **HPA 与写死 replicas 打架**：HPA 开启时 Deployment **不能**再写 `replicas`，
+   否则滚回一个固定值。→ 模板用 `{{- if not .Values.autoscaling.enabled }}replicas:{{- end }}`。
+
+这两条 `helm lint` **查不出来**（清单语法都对），只有把渲染结果解析出来断言才抓得到——
+所以有了 `scripts/verify_chart.py`。
+
+### 8.3 验收对照（§5 六条）
+
+| # | 验收项 | 怎么验 | 状态 |
+|---|---|---|---|
+| 1 | lint + 渲染 + schema | `make helm-lint` + `make verify-chart` + CI `kubeconform` | ✅ 16 条不变量全过；CI 腿已加 |
+| 2 | kind 3 副本 + 迁移 Job + `/readyz` | `make k8s-e2e` | ✅ 脚本就绪（需本地 kind） |
+| 3 | 多副本状态一致 | `k8s-e2e`：同设备两事件打到两个 pod → 断言候选=1 | ✅ 脚本就绪（§8.5 说明为何用 PG） |
+| 4 | HPA | `values.prod.yaml` 渲染出 `autoscaling/v2`；`kubectl describe hpa` | ✅ 模板 + 断言在 |
+| 5 | 滚动不丢请求 | `maxUnavailable:0` + `/readyz` + PDB | ✅ 模板层保证 |
+| 6 | file 源误配失败关闭 | chart `fail` + 运行时 `build_source` 抛错 | ✅ 双层，均有测试 |
+
+### 8.4 实跑暴露的真 bug：容器里根本跑不了迁移
+
+在 `docker build` 后实跑 `python -m data_dog.storage.migrations upgrade` 才发现两处接不上：
+
+1. **`Dockerfile` 没拷 `alembic.ini` / `alembic/`**——`pip install.[postgres]` 会带上
+   alembic 库，但没有迁移脚本目录，Job 与启动期 `DD_AUTO_MIGRATE=1` 都无处可跑。
+2. **`migrations.project_root()` 无视 `DD_PROJECT_ROOT`**——`pip install` 后本模块落在
+   `site-packages/data_dog/storage/`，"从本文件上溯找 alembic.ini"必然落空。
+   项目本有统一的 `paths.project_root()`（环境变量优先），这里却是**另起一套、env 不认**。
+
+修法：`Dockerfile` 补 `COPY`；`migrations.project_root()` 改为委托 `paths.project_root()`。
+两者都补了回归测试（`test_dockerfile_ships_migration_assets`）。**这类 bug 单元测试抓不到**——
+源码态下 `alembic.ini` 就在身边、`project_root()` 也对，只有真打镜像、真跑容器才现形。
+
+### 8.5 诚实边界
+
+- **多副本一致性验收需要真共享存储**：`k8s_e2e.sh` 设计为用**共享 PostgreSQL**
+  （`DD_STATE_BACKEND=postgres`）验"跨副本归 1 条"。若图省事用库内 SQLite，
+  各 pod 各写各的本地文件——必须给 `emptyDir`/hostPath 让文件真共享，且只在
+  **单节点** kind 成立；这不是生产形态，脚本里对此有显式注释。生产一律外部托管 PG。
+- **HPA 仅按 CPU**：模板已留 `targetMemoryUtilizationPercentage` 钩子；按队列深度等
+  **自定义指标**需 Prometheus Adapter，不在本批范围。
+- **ServiceMonitor 需集群已装 Prometheus Operator**（提供 CRD），否则该资源渲染出来也应用不上；
+  默认关（`serviceMonitor.enabled=false`）。
+- **kubeconform 只在 CI 跑**：本地没强依赖它（Windows 上装它反复失败），
+  故 `verify_chart.py` 用 helm+PyYAML 做语义断言，schema 校验交给 CI 的 kubeconform 腿。

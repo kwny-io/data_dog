@@ -1,0 +1,12 @@
+apiVersion: v2
+name: data-dog
+description: 机器狗遥测故障调查平台 —— API（无状态）+ 流式消费者（独立工作负载）+ 迁移 Job
+type: application
+# version 是 chart 的版本；appVersion 是 data_dog 应用镜像的默认 tag（可被 values.image.tag 覆盖）
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.25.0-0"
+keywords: [telemetry, anomaly-detection, agent, robotics]
+home: https://github.com/kwny-io/data_dog
+sources:
+  - https://github.com/kwny-io/data_dog

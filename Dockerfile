@@ -30,6 +30,13 @@ COPY vendor_docs ./vendor_docs
 COPY operators ./operators
 COPY schemas ./schemas
 
+# 迁移资源：alembic.ini + alembic/ 必须进镜像——否则容器内既跑不了
+# `python -m data_dog.storage.migrations upgrade`（K8s 迁移 Job / compose），
+# 也做不了启动时的 `DD_AUTO_MIGRATE=1`（migrations.project_root() 找不到 alembic.ini
+# 会退化成猜路径 → 迁移失败）。二者都依赖这两份。
+COPY alembic.ini ./alembic.ini
+COPY alembic ./alembic
+
 # 非 root 运行（最小权限）
 RUN useradd --create-home --uid 10001 appuser && chown -R appuser /app
 USER appuser
