@@ -505,6 +505,35 @@ def test_tenant_lists_are_isolated(client):
     assert b["count"] == 0 and b["total"] == 0 and b["items"] == []
 
 
+# ---------------------------------------------------------------- 仪表盘聚合
+
+def test_summary_empty_tenant(client):
+    """空租户：计数为 0，但进程级事实（ready/auth）仍如实给出。"""
+    r = client.get("/v1/summary", headers=_Q)
+    assert r.status_code == 200
+    b = r.json()
+    assert b["ok"] is True
+    assert b["candidates_total"] == 0
+    assert b["alerts_by_state"] == {}
+    assert b["outbox_pending"] == 0
+    assert isinstance(b["resolver_ready"], bool)
+    assert isinstance(b["auth_enabled"], bool)
+    assert b["uptime_s"] >= 0
+
+
+def test_summary_requires_tenant(client):
+    assert client.get("/v1/summary").status_code == 401
+
+
+def test_summary_counts_tenant_scoped(client):
+    """计数限定当前租户：本租户接入后总数上升，别租户仍见 0。"""
+    _seed_candidate(client)
+    b = client.get("/v1/summary", headers=_Q).json()
+    assert b["candidates_total"] >= 1
+    other = client.get("/v1/summary", headers={"X-Tenant-Id": "tenant-others"}).json()
+    assert other["candidates_total"] == 0
+
+
 # ---------------------------------------------------------------- 单资源端点
 
 def _seed_candidate(client, event_id="e1", temperature=96):
@@ -523,6 +552,39 @@ def test_get_single_candidate(client):
     assert body["ok"] is True
     assert body["item"]["candidate_id"] == cid
     assert body["item"]["severity_hint"] == "critical"
+
+
+def test_resolve_candidate_refs_indexed(client):
+    """候选的 metricwin ref 能被解析成**真实索引**（非 not_indexed 占位）。"""
+    cid = _seed_candidate(client)
+    r = client.get(f"/v1/candidates/{cid}/refs", headers=_Q)
+    assert r.status_code == 200, r.text
+    b = r.json()
+    assert b["ok"] is True
+    assert b["total"] >= 1 and b["resolved"] >= 1
+    first = b["results"][0]
+    assert first["ok"] is True
+    assert first["source"] == "metricwin"
+    assert first["payload"]["indexed"] is True
+    assert first["payload"]["candidate_id"] == cid
+    assert first["payload"]["component_ref"]  # 真反查到了部件
+
+
+def test_resolve_candidate_refs_requires_tenant(client):
+    cid = _seed_candidate(client)
+    assert client.get(f"/v1/candidates/{cid}/refs").status_code == 401
+
+
+def test_resolve_candidate_refs_cross_tenant_404(client):
+    cid = _seed_candidate(client)
+    r = client.get(f"/v1/candidates/{cid}/refs",
+                   headers={"X-Tenant-Id": "tenant-other"})
+    assert r.status_code == 404
+
+
+def test_resolve_candidate_refs_unknown_404(client):
+    assert client.get("/v1/candidates/cand_nope/refs",
+                      headers=_Q).status_code == 404
 
 
 def test_get_candidate_cross_tenant_404(client):
@@ -551,6 +613,18 @@ def test_candidate_evidence_endpoint(client):
     assert "temperature_c" in body["metrics"]
     assert body["metrics"]["temperature_c"] == 96.0
     assert body["vendor_knowledge"], "关节电机应有厂商知识条目"
+
+
+def test_candidate_evidence_reference_window_is_object_when_absent(client):
+    """回归：无更早参照行时 `reference_window_metrics` 须为 `{}` 而非 `null`。
+
+    前端类型声明为非空 `Record<string, number>` 且直接 `Object.keys(...)`——
+    返回 `null` 会让候选详情页抛 TypeError 崩页。契约以对象空值表达"无参照"。
+    """
+    cid = _seed_candidate(client)
+    r = client.get(f"/v1/candidates/{cid}/evidence", headers=_Q)
+    assert r.status_code == 200
+    assert r.json()["reference_window_metrics"] == {}
 
 
 def test_candidate_evidence_cross_tenant_404(client):
@@ -588,6 +662,10 @@ def test_create_investigation_offline(client, monkeypatch):
     assert report["summary"], "报告必须有结论摘要"
     # 左髋过温 + 有近期固件变更 → 确定性 provider 给 needs_human_review
     assert report["disposition"] == "needs_human_review"
+    # 回归：离线 provider 必须履行 prompt 声明的 event_type 契约，否则 alerting
+    # 兜底成 unknown_event，所有故障共用同一 event_type（event_id/幂等键不再区分故障）
+    assert report["event_type"] and report["event_type"] != "unknown_event"
+    assert report["event_type"] == "joint_motor_temperature_high"
 
     # ReAct 轨迹：至少一条工具调用，工具名在闭集内
     assert body["trace"], "应有 ReAct 轨迹"
@@ -673,3 +751,325 @@ def test_reports_pagination(client, monkeypatch):
     b = r.json()
     assert b["count"] == 2 and b["has_more"] is True
     assert b["total"] == 3
+
+
+# ---------------------------------------------------------------- 反馈回灌
+
+def _seed_alert(event_id="alert-1", state="detected", tenant="tenant-real"):
+    """直接往客户端临时库写一条告警（绕过 P3 状态机，聚焦回灌端点本身）。"""
+    from data_dog.alerting.lifecycle import AlertEvent
+    from data_dog.storage import repository as repo
+    from data_dog.storage.db import session_scope
+    with session_scope() as s:
+        repo.save_alert(s, AlertEvent(
+            event_id=event_id, idempotency_key=f"k-{event_id}",
+            device_ref="device-go2-0001", component_ref="joint_motor.front_left_hip",
+            event_type="thermal_overheat", state=state,
+            severity="critical", confidence=0.9), tenant_id=tenant)
+
+
+def test_feedback_false_positive_rejects_detected(client):
+    """detected 告警收到「误报」→ 转 rejected，并落一条反馈。"""
+    _seed_alert(event_id="a-fp", state="detected")
+    r = client.post("/v1/feedback", headers=_Q,
+                    json={"event_id": "a-fp", "kind": "false_positive",
+                          "note": "传感器漂移"})
+    assert r.status_code == 200, r.text
+    b = r.json()
+    assert b["state_applied"] == "rejected"
+    assert b["state_now"] == "rejected"
+    assert b["alert"]["state"] == "rejected"
+
+    fb = client.get("/v1/alerts/a-fp/feedback", headers=_Q).json()
+    assert fb["count"] == 1 and fb["items"][0]["kind"] == "false_positive"
+
+
+def test_feedback_repaired_closes_confirmed(client):
+    """confirmed 告警收到「已修」→ 一步转 closed（confirmed→closed 是合法边）。"""
+    _seed_alert(event_id="a-rp", state="confirmed")
+    r = client.post("/v1/feedback", headers=_Q,
+                    json={"event_id": "a-rp", "kind": "repaired"})
+    b = r.json()
+    assert b["state_applied"] == "closed"
+    assert b["state_now"] == "closed"
+
+
+def test_feedback_repaired_detected_not_forced(client):
+    """detected 无直达 closed 的边：repaired 只存档、不改状态（如实拒绝，不臆造中间态）。"""
+    _seed_alert(event_id="a-rp-det", state="detected")
+    r = client.post("/v1/feedback", headers=_Q,
+                    json={"event_id": "a-rp-det", "kind": "repaired"})
+    b = r.json()
+    assert b["state_applied"] is None
+    assert b["state_now"] == "detected"
+
+
+def test_feedback_no_action_keeps_state(client):
+    """no_action 只存档、不改状态（state_applied 为 null）。"""
+    _seed_alert(event_id="a-na", state="detected")
+    r = client.post("/v1/feedback", headers=_Q,
+                    json={"event_id": "a-na", "kind": "no_action"})
+    b = r.json()
+    assert b["state_applied"] is None
+    assert b["state_now"] == "detected"
+    # 反馈仍落库（可审计）
+    assert client.get("/v1/alerts/a-na/feedback", headers=_Q).json()["count"] == 1
+
+
+def test_feedback_illegal_transition_not_forced(client):
+    """closed 是终态：误报反馈不能把它拉回 rejected —— 如实拒绝，不改状态。"""
+    _seed_alert(event_id="a-closed", state="closed")
+    r = client.post("/v1/feedback", headers=_Q,
+                    json={"event_id": "a-closed", "kind": "false_positive"})
+    b = r.json()
+    assert b["state_applied"] is None
+    assert b["state_now"] == "closed"
+
+
+def test_feedback_unknown_kind_422(client):
+    _seed_alert(event_id="a-bad", state="detected")
+    r = client.post("/v1/feedback", headers=_Q,
+                    json={"event_id": "a-bad", "kind": "whatever"})
+    assert r.status_code == 422
+
+
+def test_feedback_missing_fields_422(client):
+    r = client.post("/v1/feedback", headers=_Q, json={"kind": "repaired"})
+    assert r.status_code == 422
+
+
+def test_feedback_requires_tenant(client):
+    assert client.post("/v1/feedback", json={"event_id": "x",
+                                             "kind": "repaired"}).status_code == 401
+
+
+def test_feedback_cross_tenant_404(client):
+    """别租户的告警：对当前租户不可见 → 404，且不泄露存在性。"""
+    _seed_alert(event_id="a-other", state="detected", tenant="tenant-other")
+    r = client.post("/v1/feedback", headers=_Q,
+                    json={"event_id": "a-other", "kind": "repaired"})
+    assert r.status_code == 404
+    assert client.get("/v1/alerts/a-other/feedback", headers=_Q).status_code == 404
+
+
+# ---------------------------------------------------------------- P3 接进服务
+
+def test_investigation_creates_alert(client, monkeypatch):
+    """调查成功后 P3 落库产告警——让 /v1/alerts、/v1/summary 在真实运行里有数据。
+
+    此前后端从不产告警（save_alert 只在测试里调），反馈/告警端点全是悬空的。
+    """
+    _investigation_env(monkeypatch)
+    cid = _seed_candidate(client, temperature=96)
+
+    body = client.post("/v1/investigations", headers=_Q,
+                       json={"candidate_id": cid}).json()
+    # 端点如实回报 P3 结果
+    assert body["alerting"]["reported"] is True, body["alerting"]
+    assert body["alerting"]["event_id"]
+    assert body["alerting"]["event_state"] == "confirmed"
+    assert body["alerting"]["new"] is True
+
+    # 告警可查，且租户作用域内可见
+    alerts = client.get("/v1/alerts", headers=_Q).json()
+    assert alerts["count"] == 1
+    ev = alerts["items"][0]
+    assert ev["investigation_id"] == body["investigation_id"]
+    # 设备引用是不透明派生，不含明文 SN
+    assert "device-go2-0001" not in ev["device_ref"]
+    assert ev["device_ref"].startswith("device-")
+
+    # summary 的 alerts_by_state 不再恒空
+    summ = client.get("/v1/summary", headers=_Q).json()
+    assert summ["alerts_by_state"].get("confirmed") == 1
+
+
+def test_investigation_repeat_is_update_not_new(client, monkeypatch):
+    """同一候选重复调查 → 同一 event_id（Episode 语义），是**更新**不是新建。"""
+    _investigation_env(monkeypatch)
+    cid = _seed_candidate(client, temperature=96)
+
+    a = client.post("/v1/investigations", headers=_Q,
+                    json={"candidate_id": cid}).json()["alerting"]
+    b = client.post("/v1/investigations", headers=_Q,
+                    json={"candidate_id": cid}).json()["alerting"]
+    assert a["event_id"] == b["event_id"], "同一 Episode 必须复用 event_id"
+    assert b["new"] is False, "第二次是更新"
+    assert b["event_revision"] > a["event_revision"], "revision 递增"
+    # 只有一条告警（更新而非新建）
+    assert client.get("/v1/alerts", headers=_Q).json()["count"] == 1
+
+
+def test_investigation_outbox_persisted(client, monkeypatch):
+    """投递落库：outbox 有条目且状态为 delivered（重启可查，非进程内）。"""
+    _investigation_env(monkeypatch)
+    cid = _seed_candidate(client, temperature=96)
+    body = client.post("/v1/investigations", headers=_Q,
+                       json={"candidate_id": cid}).json()
+    assert body["alerting"]["delivered"] is True
+    outbox = client.get("/v1/outbox", headers=_Q,
+                        params={"status": "delivered"}).json()
+    assert outbox["count"] == 1
+
+
+# ---------------------------------------------------------------- 反馈回灌评估
+
+def _seed_report(inv_id, disposition, tenant="tenant-real"):
+    """直接写一份调查报告（精确控制 disposition，用于评估口径测试）。"""
+    from data_dog.schemas.events import InvestigationReport
+    from data_dog.storage import repository as repo
+    from data_dog.storage.db import session_scope
+    with session_scope() as s:
+        repo.save_report(s, InvestigationReport(
+            investigation_id=inv_id, disposition=disposition,
+            confidence=0.9, summary="seed"), tenant_id=tenant)
+
+
+def _seed_alert_full(event_id, state, inv_id, tenant="tenant-real"):
+    """写一条**带 investigation_id** 的告警（评估关联经它回到报告）。"""
+    from data_dog.alerting.lifecycle import AlertEvent
+    from data_dog.storage import repository as repo
+    from data_dog.storage.db import session_scope
+    with session_scope() as s:
+        repo.save_alert(s, AlertEvent(
+            event_id=event_id, idempotency_key=f"k-{event_id}",
+            device_ref="device-opaque", component_ref="joint_motor.front_left_hip",
+            event_type="thermal", state=state, severity="critical",
+            confidence=0.9, investigation_id=inv_id), tenant_id=tenant)
+
+
+def test_eval_feedback_classifies_agree_and_error(client):
+    """评估端点把 (人工 kind, Agent 裁决) 归类为一致/误报/漏报并算率。"""
+    from data_dog.storage import repository as repo
+    from data_dog.storage.db import session_scope
+    # 场景：inv-confirmed 报告 confirmed + 告警 + 人工 repaired → agree
+    #       inv-rejected 报告 rejected + 告警 + 人工 false_positive → agree
+    #       inv-fp 报告 confirmed + 告警 + 人工 false_positive → false_positive
+    _seed_report("inv-c", "confirmed")
+    _seed_report("inv-r", "rejected")
+    _seed_report("inv-fp", "confirmed")
+    _seed_alert_full("a-c", "confirmed", "inv-c")
+    _seed_alert_full("a-r", "rejected", "inv-r")
+    _seed_alert_full("a-fp", "confirmed", "inv-fp")
+    with session_scope() as s:
+        repo.save_feedback(s, tenant_id="tenant-real", event_id="a-c", kind="repaired")
+        repo.save_feedback(s, tenant_id="tenant-real", event_id="a-r",
+                           kind="false_positive")
+        repo.save_feedback(s, tenant_id="tenant-real", event_id="a-fp",
+                           kind="false_positive")
+
+    b = client.get("/v1/eval/feedback", headers=_Q).json()
+    s = b["summary"]
+    assert s["labeled"] == 3
+    assert s["agree"] == 2
+    assert s["false_positive"] == 1
+    assert s["false_negative"] == 0
+    assert s["agreement_rate"] == round(2 / 3, 3)
+    # 明细行带上 Agent 裁决，可下钻
+    assert {r["event_id"] for r in b["rows"]} == {"a-c", "a-r", "a-fp"}
+
+
+def test_eval_feedback_missing_report_is_unlabeled(client):
+    """告警无对应报告（调查失败/别处产生）→ 如实归 unlabeled，不臆造裁决。"""
+    from data_dog.storage import repository as repo
+    from data_dog.storage.db import session_scope
+    _seed_alert("a-orphan", state="detected")   # 无 investigation_id
+    with session_scope() as s:
+        repo.save_feedback(s, tenant_id="tenant-real", event_id="a-orphan",
+                           kind="false_positive")
+    s = client.get("/v1/eval/feedback", headers=_Q).json()["summary"]
+    assert s["total"] == 1
+    assert s["labeled"] == 0
+    assert s["unlabeled"] == 1
+
+
+def test_eval_feedback_requires_tenant(client):
+    assert client.get("/v1/eval/feedback").status_code == 401
+
+
+def test_eval_feedback_cross_tenant_isolated(client):
+    """别租户的反馈不可见：只统计本租户。"""
+    from data_dog.storage import repository as repo
+    from data_dog.storage.db import session_scope
+    _seed_report("inv-x", "confirmed", tenant="tenant-other")
+    _seed_alert_full("a-x", "confirmed", "inv-x", tenant="tenant-other")
+    with session_scope() as s:
+        repo.save_feedback(s, tenant_id="tenant-other", event_id="a-x",
+                           kind="repaired")
+    s = client.get("/v1/eval/feedback", headers=_Q).json()["summary"]
+    assert s["total"] == 0
+
+
+# ---------------------------------------------------------------- 用户厂商文档
+
+def test_knowledge_import_and_search(client):
+    """导入用户文档 → 列表可见 → 词法检索命中。"""
+    r = client.post("/v1/knowledge/documents", headers=_Q,
+                    json={"source_name": "go2-manual.txt",
+                          "text": "电机温度超过 90°C 触发过热保护。\n\n电池 SOC 低电压告警。"})
+    assert r.status_code == 200, r.text
+    b = r.json()
+    assert b["ok"] is True and b["document_id"].startswith("kdoc_")
+    assert b["chunk_count"] >= 1
+
+    docs = client.get("/v1/knowledge/documents", headers=_Q).json()
+    assert docs["count"] == 1
+    assert docs["items"][0]["source_name"] == "go2-manual.txt"
+
+    # 词法检索（英文词）
+    s = client.get("/v1/knowledge/search", headers=_Q,
+                   params={"q": "SOC 电池"}).json()
+    assert s["count"] >= 1
+    assert any("SOC" in h["text"] for h in s["hits"])
+    assert s["hits"][0]["source_name"] == "go2-manual.txt"
+
+
+def test_knowledge_import_idempotent(client):
+    """同内容重复导入 → 同 document_id（内容寻址），不产生重复文档。"""
+    body = {"source_name": "a.txt", "text": "unique content here"}
+    a = client.post("/v1/knowledge/documents", headers=_Q, json=body).json()
+    b = client.post("/v1/knowledge/documents", headers=_Q, json=body).json()
+    assert a["document_id"] == b["document_id"]
+    assert client.get("/v1/knowledge/documents", headers=_Q).json()["count"] == 1
+
+
+def test_knowledge_requires_tenant(client):
+    assert client.get("/v1/knowledge/documents").status_code == 401
+    assert client.get("/v1/knowledge/search", params={"q": "x"}).status_code == 401
+    assert client.post("/v1/knowledge/documents",
+                       json={"text": "x"}).status_code == 401
+
+
+def test_knowledge_import_empty_text_422(client):
+    r = client.post("/v1/knowledge/documents", headers=_Q,
+                    json={"source_name": "x", "text": "   "})
+    assert r.status_code == 422
+
+
+def test_knowledge_cross_tenant_isolated(client):
+    """租户隔离：t1 导入的文档，t2 检索不到、列表为空。"""
+    client.post("/v1/knowledge/documents", headers=_Q,
+                json={"source_name": "private.txt", "text": "secret motor spec"})
+    other = {"X-Tenant-Id": "tenant-other"}
+    assert client.get("/v1/knowledge/documents", headers=other).json()["count"] == 0
+    hits = client.get("/v1/knowledge/search", headers=other,
+                      params={"q": "motor"}).json()
+    assert hits["count"] == 0
+
+
+def test_knowledge_delete(client):
+    doc = client.post("/v1/knowledge/documents", headers=_Q,
+                      json={"text": "to be deleted"}).json()
+    did = doc["document_id"]
+    assert client.delete(f"/v1/knowledge/documents/{did}",
+                         headers=_Q).status_code == 200
+    assert client.get("/v1/knowledge/documents", headers=_Q).json()["count"] == 0
+    # 再删 → 404
+    assert client.delete(f"/v1/knowledge/documents/{did}",
+                         headers=_Q).status_code == 404
+
+
+def test_feedback_unknown_alert_404(client):
+    r = client.post("/v1/feedback", headers=_Q,
+                    json={"event_id": "nope", "kind": "repaired"})
+    assert r.status_code == 404

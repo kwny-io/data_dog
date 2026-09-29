@@ -20,9 +20,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import alembic.command as command
 from alembic.config import Config
-
-from alembic import command
 
 
 def project_root() -> Path:

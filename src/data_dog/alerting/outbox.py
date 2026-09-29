@@ -29,9 +29,32 @@ def make_idempotency_key(device_ref: str, event_type: str, episode_key: str) -> 
     return f"{device_ref}:{event_type}:{episode_key}"
 
 
+def make_event_id(device_ref: str, event_type: str, episode_key: str) -> str:
+    """正式事件的 event_id：由**同一组三要素**确定性派生（§14.3）。
+
+    与幂等键同源（`device_ref:event_type:episode_key`）——同一 Episode 反复调查
+    得到**同一 event_id**，因此"再次上报"是**更新**（revision 递增）而非新建。
+    哈希后取 16 位十六进制，避免 event_id 里出现设备/事件明细。
+    """
+    ikey = make_idempotency_key(device_ref, event_type, episode_key)
+    return "alert_" + hashlib.sha256(ikey.encode()).hexdigest()[:16]
+
+
 def episode_key_from(investigation_id: str = "", component_ref: str = "") -> str:
     """Episode 稳定标识：优先用调查 id，退化用部件名。"""
     return investigation_id or component_ref or "unknown-episode"
+
+
+def make_device_ref(device_sn: str) -> str:
+    """把设备明文 SN 映射为**稳定的不透明引用**（§12.5 要求非明文）。
+
+    对外事件里不该出现设备序列号；但同一设备必须每次得到**同一**引用，否则
+    幂等键/event_id 会漂移，同一 Episode 会被当成新事件。用 `device-<sha256[:16]>`：
+    确定性强、不可反推。
+    """
+    if not device_sn:
+        return "device-unknown"
+    return "device-" + hashlib.sha256(device_sn.encode()).hexdigest()[:16]
 
 
 @dataclass

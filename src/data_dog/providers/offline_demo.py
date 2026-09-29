@@ -63,15 +63,30 @@ class DeterministicEvidenceProvider:
                                          "since": self.since}),
                 "content": ""}], "__raw_tool_calls": []}
         return {"kind": "text", "content": json.dumps(
-            self._conclusion(comp, str(self.cand.get("severity_hint", "info"))),
+            self._conclusion(comp, str(self.cand.get("severity_hint", "info")),
+                             str(self.cand.get("signal", ""))),
             ensure_ascii=False)}
 
     @staticmethod
-    def _conclusion(comp: str, severity: str) -> dict[str, Any]:
+    def _event_type(comp: str, signal: str) -> str:
+        """从部件类型 + 信号确定性派生故障类型。
+
+        prompt 契约要求结论含 `event_type`（如 joint_motor_thermal_degradation）；
+        不产出会让 alerting 兜底成 `unknown_event`，令所有故障共用同一 event_type
+        → `event_id`/`idempotency_key` 不再区分故障，跨故障可能撞同一条告警。
+        """
+        ctype = comp.split(".", 1)[0] or "component"
+        sig = signal or "anomaly"
+        return f"{ctype}_{sig}"
+
+    @staticmethod
+    def _conclusion(comp: str, severity: str, signal: str = "") -> dict[str, Any]:
         changes = RECENT_CHANGES.get(comp, [])
+        event_type = DeterministicEvidenceProvider._event_type(comp, signal)
         if severity != "critical":
             return {
                 "disposition": "rejected", "severity": "info", "confidence": 0.85,
+                "event_type": event_type,
                 "summary": f"{comp} 未越过厂商保护阈值，判定为非异常。",
                 "hypotheses": [], "missing_evidence": [],
                 "recommended_actions": ["无需处理"],
@@ -80,7 +95,7 @@ class DeterministicEvidenceProvider:
             what = changes[0].get("what", "近期变更")
             return {
                 "disposition": "needs_human_review", "severity": "critical",
-                "confidence": 0.6,
+                "confidence": 0.6, "event_type": event_type,
                 "summary": (f"{comp} 温度越过厂商保护阈值，但该部件近期有变更（{what}），"
                             "无法区分变更效应与真实退化，需人工复核。"),
                 "hypotheses": [{"cause": f"{what} 导致读数偏移", "status": "supported"},
@@ -90,6 +105,7 @@ class DeterministicEvidenceProvider:
             }
         return {
             "disposition": "confirmed", "severity": "critical", "confidence": 0.9,
+            "event_type": event_type,
             "summary": (f"{comp} 温度越过厂商保护阈值，且无变更干扰、证据完整，"
                         "判为明确热故障。"),
             "hypotheses": [{"cause": "热退化/冷却失效", "status": "supported"}],

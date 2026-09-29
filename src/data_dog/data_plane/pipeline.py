@@ -56,14 +56,17 @@ class DataPlane:
                  window_size: int = 30,
                  normalizer: Normalizer | None = None,
                  status_normalizer: StatusCodeNormalizer | None = None,
-                 enricher: Enricher | None = None):
+                 enricher: Enricher | None = None,
+                 builder: Any | None = None):
         self.resolver = resolver
         self.gateway = gateway or TelemetryGateway()
         self.normalizer = normalizer or Normalizer()
         self.status_normalizer = status_normalizer or StatusCodeNormalizer()
         self.enricher = enricher or Enricher()
         self.window = WindowBuffer(size=window_size)
-        self.builder = CandidateBuilder()
+        # 候选构建器可注入：单机/测试用内存版（CandidateBuilder），多副本用
+        # 共享后端版（SharedCandidateBuilder）。二者产出同形 CandidateEvent。
+        self.builder = builder if builder is not None else CandidateBuilder()
         self.stats = DataPlaneStats()
 
     # ---- 单个事件 ----
@@ -151,6 +154,7 @@ class DataPlane:
                     metrics=metrics, hits=hits,
                     occurred_at=env.occurred_at, received_at=env.received_at,
                     raw_ref=env.payload_ref, baseline=baseline,
+                    tenant_id=env.tenant_id,
                 )
         return norm, None
 

@@ -73,6 +73,33 @@ investigations_total = Counter(
     registry=registry,
 )
 
+# ---------------------------------------------------------------- 异步调查（G1）
+
+# 异步调查 job 的状态流转计数（每次进入该状态 +1）
+# status ∈ {pending, running, succeeded, failed, cancelled}
+investigation_jobs_total = Counter(
+    "data_dog_investigation_jobs_total",
+    "异步调查任务数（按状态）",
+    labelnames=("status",),
+    registry=registry,
+)
+
+# 待办队列深度（pending 且尚未被 worker 取走的 job 数；>0 持续升高说明消费跟不上）
+investigation_queue_depth = Gauge(
+    "data_dog_investigation_queue_depth",
+    "异步调查待办队列深度",
+    registry=registry,
+)
+
+# 单次异步调查的执行耗时（从 worker 领取到落终态）
+investigation_job_duration_seconds = Histogram(
+    "data_dog_investigation_job_duration_seconds",
+    "异步调查执行耗时（秒）",
+    # 覆盖离线毫秒级到真实 LLM 的分钟级
+    buckets=(0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 30.0, 60.0, 120.0),
+    registry=registry,
+)
+
 # 库内累计量（用 COUNT(*) 聚合，不做全表加载）
 db_rows = Gauge(
     "data_dog_db_rows",
@@ -86,6 +113,35 @@ db_rows = Gauge(
 rate_limited_total = Counter(
     "data_dog_rate_limited_total",
     "被限流拒绝的事件总数",
+    registry=registry,
+)
+
+# ---------------------------------------------------------------- 流式接入
+
+stream_messages_total = Counter(
+    "data_dog_stream_messages_total",
+    "流式源收到的消息总数（按来源）",
+    labelnames=("source",),      # file / http / mqtt / kafka
+    registry=registry,
+)
+
+stream_candidates_total = Counter(
+    "data_dog_stream_candidates_total",
+    "流式接入产出的候选总数",
+    registry=registry,
+)
+
+# 推式源队列满时丢弃的消息（背压证据：>0 说明消费跟不上，需扩副本/调队列）
+stream_dropped_total = Counter(
+    "data_dog_stream_dropped_total",
+    "流式源因队列满而丢弃的消息总数",
+    labelnames=("source",),
+    registry=registry,
+)
+
+stream_up = Gauge(
+    "data_dog_stream_up",
+    "流式消费线程是否存活（1=存活，0=未启用或已退出）",
     registry=registry,
 )
 

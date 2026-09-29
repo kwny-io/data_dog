@@ -104,9 +104,95 @@ def auto_migrate() -> bool:
     return _get_bool("DD_AUTO_MIGRATE", default=True)
 
 
-def default_tenant() -> str:
-    """无租户上下文时使用的租户（demo/CLI/迁移回填共用此值）。"""
-    return _get("DD_DEFAULT_TENANT", default="demo")
+# ---------------------------------------------------------------- 共享状态
+
+def state_backend() -> str:
+    """跨副本共享状态后端：memory / postgres / redis。空=按数据库类型自动选。"""
+    return _get("DD_STATE_BACKEND").lower()
+
+
+def rate_backend() -> str:
+    """限流后端（可独立于状态后端）。空 = 跟随 `DD_STATE_BACKEND`。
+
+    拆分场景（限流检查成为热路径瓶颈时）：`DD_RATE_BACKEND=redis` 让限流走
+    Redis（sub-ms + 原生 TTL），业务状态仍走 PG（耐久 + 可查询）。默认不拆，
+    两者同源，少运维一个组件。
+    """
+    return _get("DD_RATE_BACKEND").lower()
+
+
+def redis_url() -> str:
+    """Redis 连接串（DD_STATE_BACKEND=redis 时需要）。"""
+    return _get("DD_REDIS_URL", default="redis://localhost:6379/0")
+
+
+# ---------------------------------------------------------------- 流式接入
+
+def stream_enabled() -> bool:
+    """是否在进程内启动流式接入消费者。"""
+    return _get_bool("DD_STREAM_ENABLED", default=False)
+
+
+def stream_source() -> str:
+    """流式源类型：file / http / mqtt / kafka。"""
+    return _get("DD_STREAM_SOURCE", default="file").lower()
+
+
+def stream_tenant() -> str:
+    """流式信道的租户（身份来源）。本地文件/总线不带应用层身份，只能从配置取。"""
+    return _get("DD_STREAM_TENANT", default="demo")
+
+
+def stream_device_sn() -> str:
+    """流式信道的默认设备号（正文取不到 device 时的兜底）。"""
+    return _get("DD_STREAM_DEVICE_SN")
+
+
+def stream_device_from_field() -> str:
+    """从每条消息正文的该字段取 device_sn（一个信道承载多台设备时用）。"""
+    return _get("DD_STREAM_DEVICE_FIELD")
+
+
+def stream_http_host() -> str:
+    return _get("DD_STREAM_HTTP_HOST", default="127.0.0.1")
+
+
+def stream_http_port() -> int:
+    return _get_int("DD_STREAM_HTTP_PORT", default=8099)
+
+
+def stream_http_path() -> str:
+    return _get("DD_STREAM_HTTP_PATH", default="/ingest")
+
+
+def stream_file_path() -> str:
+    """file 源：尾随的日志文件/目录路径。"""
+    return _get("DD_STREAM_FILE_PATH")
+
+
+def stream_poll_ms() -> int:
+    """file 源：轮询间隔（毫秒）。"""
+    return _get_int("DD_STREAM_POLL_MS", default=500)
+
+
+def stream_mqtt_url() -> str:
+    return _get("DD_STREAM_MQTT_URL", default="tcp://localhost:1883")
+
+
+def stream_mqtt_topic() -> str:
+    return _get("DD_STREAM_MQTT_TOPIC", default="telemetry/#")
+
+
+def stream_kafka_bootstrap() -> str:
+    return _get("DD_STREAM_KAFKA_BOOTSTRAP", default="localhost:9092")
+
+
+def stream_kafka_topic() -> str:
+    return _get("DD_STREAM_KAFKA_TOPIC", default="telemetry")
+
+
+def stream_kafka_group() -> str:
+    return _get("DD_STREAM_KAFKA_GROUP", default="data-dog")
 
 
 # ---------------------------------------------------------------- 限流
@@ -154,6 +240,26 @@ def investigate_max_steps() -> int:
 def investigate_offline() -> bool:
     """强制用离线确定性 provider（CI/测试用，不调真实 LLM）。"""
     return _get_bool("DD_INVESTIGATE_OFFLINE", default=False)
+
+
+def investigate_async() -> bool:
+    """`POST /v1/investigations` 默认是否异步（提交→202 job 句柄）。
+
+    默认 **False**：保持既有同步语义（前端按同步长任务处理）。置 1 后默认走异步，
+    调用方仍可用 `?sync=1` 单独退回同步。异步化是把 worker 从长 LLM 调用里解放出来
+    的关键；前端改用轮询后即可默认打开（见 docs/p4/gaps/01_async_investigation.md）。
+    """
+    return _get_bool("DD_INVESTIGATE_ASYNC", default=False)
+
+
+def investigate_workers() -> int:
+    """异步调查 worker 池大小（进程内线程数）。"""
+    return max(1, _get_int("DD_INVESTIGATE_WORKERS", default=4))
+
+
+def investigate_queue_poll_ms() -> int:
+    """worker 空转时查共享队列的间隔（毫秒）。"""
+    return max(20, _get_int("DD_INVESTIGATE_QUEUE_POLL_MS", default=200))
 
 
 # ---------------------------------------------------------------- 路径

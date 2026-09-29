@@ -56,12 +56,21 @@ class TelemetryGateway:
     rate_per_sec：每设备每秒允许的条数（令牌桶容量 = burst）。
     """
 
-    def __init__(self, *, rate_per_sec: float = 200.0, burst: int = 400):
+    def __init__(self, *, rate_per_sec: float = 200.0, burst: int = 400,
+                 state_store: Any = None):
         self.rate_per_sec = rate_per_sec
         self.burst = burst
-        self._buckets: dict[str, _Bucket] = {}
+        # 限流桶落在**限流后端**：跨副本共享后，任一实例扣掉的令牌对其它实例
+        # 可见，限流不再"各挡各的"。默认惰性取全局限流后端（未配置则与业务状态
+        # 后端同源）；高频场景可 `DD_RATE_BACKEND=redis` 单独把限流切到 Redis。
+        if state_store is None:
+            from ..state import get_rate_store
+            state_store = get_rate_store()
+        self._state = state_store
         self.stats = GatewayStats()
         self._clock = time.monotonic
+        # 兼容旧字段：快照里报告的桶数（共享后端下无进程内桶，恒为 0）
+        self._buckets: dict[str, _Bucket] = {}
 
     # -- 认证（桩）：真实部署由网关注入；这里演示"正文身份一律不作数" --
     def authenticate(self, auth: dict[str, Any] | None) -> AuthenticatedCaller | None:
@@ -75,19 +84,14 @@ class TelemetryGateway:
                                    principal=str(auth.get("principal", "gateway")))
 
     # -- 限流 --
-    def _allow(self, key: str) -> bool:
-        now = self._clock()
-        b = self._buckets.get(key)
-        if b is None:
-            self._buckets[key] = _Bucket(tokens=self.burst - 1, last=now)
-            return True
-        # 补令牌
-        b.tokens = min(self.burst, b.tokens + (now - b.last) * self.rate_per_sec)
-        b.last = now
-        if b.tokens < 1:
-            return False
-        b.tokens -= 1
-        return True
+    def _allow(self, tenant_id: str, device_sn: str) -> bool:
+        # 限流桶按 **(租户, 设备)** 隔离：不同租户的同名设备序列号不得共享令牌
+        # （否则一方猛发会把另一方的桶扣空——跨租户的可用性攻击面）。
+        # 委托给共享后端的原子令牌桶：跨副本一致。
+        key = f"{tenant_id}|{device_sn}"
+        return self._state.rate_limit_allow(
+            key, rate_per_sec=self.rate_per_sec, burst=self.burst,
+            now=self._clock())
 
     def snapshot(self) -> dict[str, Any]:
         """限流状态快照（供 /metrics 与排查使用）。"""
@@ -98,6 +102,7 @@ class TelemetryGateway:
             "accepted": self.stats.accepted,
             "rejected": self.stats.rejected,
             "rate_limited": self.stats.rate_limited,
+            "shared": type(self._state).__name__,
         }
 
     # -- 分区键 --
@@ -146,7 +151,7 @@ class TelemetryGateway:
                                     f"载荷过大: {size}B > {_MAX_PAYLOAD_BYTES}B")
 
         # 限流
-        if not self._allow(caller.device_sn):
+        if not self._allow(caller.tenant_id, caller.device_sn):
             self.stats.rate_limited += 1
             return self._reject("rate_limited", ToolErrorCode.RATE_LIMITED,
                                 f"设备 {caller.device_sn} 超限")

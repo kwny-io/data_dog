@@ -9,10 +9,9 @@ from data_dog import settings
 
 
 def test_defaults(monkeypatch):
-    for k in ("DD_DEFAULT_TENANT", "DD_SERVICE_NAME", "DD_LLM_VENDOR",
+    for k in ("DD_SERVICE_NAME", "DD_LLM_VENDOR",
               "DATA_DOG_VENDOR", "DD_LLM_MODEL", "DATA_DOG_MODEL"):
         monkeypatch.delenv(k, raising=False)
-    assert settings.default_tenant() == "demo"
     assert settings.service_name() == "data-dog"
     assert settings.llm_vendor() == "deepseek"
     assert settings.llm_model() == ""

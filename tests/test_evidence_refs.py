@@ -19,6 +19,7 @@ from data_dog.evidence.refs import (
     default_resolver,
     digest,
     is_valid_ref,
+    make_candidate_metricwin_source,
     make_telemetry_source,
     metricwin_ref_for,
     parse_ref,
@@ -183,3 +184,42 @@ def test_real_candidate_refs_are_parseable():
         assert cand.evidence_refs
         for ref in cand.evidence_refs:
             assert is_valid_ref(ref), f"链路产出的 ref 不可解析: {ref}"
+
+
+def test_candidate_metricwin_source_indexes_real_row():
+    """注入真实反查源后，metricwin ref 解析出**索引内容**而非 not_indexed 占位。"""
+    row = {"device_sn": "device-1", "component_ref": "joint_motor.front_left_hip",
+           "signal": "temperature_rising", "severity_hint": "critical",
+           "window_start": "2026-09-13T09:55:00Z",
+           "window_end": "2026-09-13T10:00:00Z",
+           "sample_count": 3, "rule_matches": ["motor_temp_protect"],
+           "anomaly_score": 0.8,
+           "evidence": [{"key": "temperature_c", "from_value": 90, "to_value": 96}],
+           "evidence_refs": ["metricwin://cand_abc"], "detector_provenance": "op-1:1"}
+    res = EvidenceResolver({"metricwin": make_candidate_metricwin_source(
+        lambda cid: row if cid == "cand_abc" else None)})
+    out = res.resolve("metricwin://cand_abc")
+    assert out["ok"] is True
+    p = out["payload"]
+    assert p["indexed"] is True
+    assert p["component_ref"] == "joint_motor.front_left_hip"
+    assert p["window"]["start"].startswith("2026-09-13")
+
+
+def test_candidate_metricwin_source_missing_is_not_found():
+    res = EvidenceResolver({"metricwin": make_candidate_metricwin_source(
+        lambda cid: None)})
+    out = res.resolve("metricwin://cand_missing")
+    assert out["ok"] is False
+    assert out["error"] == "not_found"
+
+
+def test_candidate_metricwin_source_ignores_non_candidate_authority():
+    """本源只管 cand_ 前缀；非候选 authority 交回 not_found（不被误当候选查）。"""
+    called = []
+    res = EvidenceResolver({"metricwin": make_candidate_metricwin_source(
+        lambda cid: called.append(cid))})
+    out = res.resolve("metricwin://some_component/09:55-10:00")
+    assert out["ok"] is False
+    assert out["error"] == "not_found"
+    assert called == []          # lookup 根本没被调用

@@ -7,6 +7,8 @@
   alerts             正式事件（P3 产出，对齐 §12.5）
   alert_outbox       上报 outbox（幂等投递，要求持久）
   alert_feedback     人工/维修反馈
+  knowledge_documents/chunks  用户导入的厂商文档（A7）
+  investigation_job  异步调查任务的执行状态（G1）
 
 设计取舍：
   - 复杂/多态字段（metrics、hypotheses、evidence…）用 **JSON**（PostgreSQL 为 JSONB，
@@ -88,9 +90,12 @@ class ReportRow(Base):
     summary: Mapped[str] = mapped_column(Text, default="")
     candidate_refs: Mapped[list[str]] = mapped_column(JSON, default=list)
     hypotheses: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    counter_evidence_refs: Mapped[list[str]] = mapped_column(JSON, default=list)
     missing_evidence: Mapped[list[str]] = mapped_column(JSON, default=list)
+    risk_window: Mapped[str | None] = mapped_column(String(120), nullable=True)
     recommended_actions: Mapped[list[str]] = mapped_column(JSON, default=list)
     correlation_group_id: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    linked_candidate_refs: Mapped[list[str]] = mapped_column(JSON, default=list)
     model_provenance: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     created_at: Mapped[float] = mapped_column(Float, default=_now)
 
@@ -146,3 +151,76 @@ class AlertFeedbackRow(Base):
     kind: Mapped[str] = mapped_column(String(30))
     note: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[float] = mapped_column(Float, default=_now)
+
+
+class KnowledgeDocumentRow(Base):
+    """用户导入的厂商文档（A7 用户通道）。**租户隔离**：每租户各存各的。
+
+    内容寻址：document_id = kdoc_<sha256[:12]>，同内容重复导入 → 同 id（幂等）。
+    与内置 chroma 语料（全局一份公开资料）不同，用户文档按租户隔离——别人的
+    厂商原件不应被你的租户检索到。
+    """
+    __tablename__ = "knowledge_documents"
+
+    tenant_id: Mapped[str] = mapped_column(String(80), primary_key=True, index=True)
+    document_id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    source_name: Mapped[str] = mapped_column(String(200))
+    content_sha256: Mapped[str] = mapped_column(String(64))
+    char_count: Mapped[int] = mapped_column(Integer, default=0)
+    chunk_count: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[float] = mapped_column(Float, default=_now)
+
+
+class StateKvRow(Base):
+    """跨副本共享状态（限流桶 / 候选分组）。
+
+    水平扩展的落点：有状态算子不能只活在进程内。此表是所有副本共享的
+    状态载体，`mutate` 以 `SELECT ... FOR UPDATE` 行锁做原子 read-modify-write。
+
+    为什么不复用 tenant 复合主键：状态 key 已内含租户/设备维度（如
+    `rate:<device_sn>`），且需跨租户统一按 key 老化，故用单一 TEXT 主键。
+    """
+    __tablename__ = "state_kv"
+
+    key: Mapped[str] = mapped_column(String(300), primary_key=True)
+    value: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    updated_at: Mapped[float] = mapped_column(Float, default=_now)
+
+
+class KnowledgeChunkRow(Base):
+    """导入文档的切片。主键 (tenant_id, chunk_id)，chunk_id 由文档+序号派生。"""
+    __tablename__ = "knowledge_chunks"
+
+    tenant_id: Mapped[str] = mapped_column(String(80), primary_key=True, index=True)
+    chunk_id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    document_id: Mapped[str] = mapped_column(String(80), index=True)
+    ordinal: Mapped[int] = mapped_column(Integer, default=0)
+    text: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[float] = mapped_column(Float, default=_now)
+
+
+class InvestigationJobRow(Base):
+    """异步调查任务的**执行状态**（G1）。
+
+    与 `reports`（调查的**产物**，长期保留）分离：job 是短命的执行记录，
+    完成后 `report_id` 指向落库报告。这样 `POST /v1/investigations` 能立即返回
+    一个可轮询的句柄，不再把 worker 绑在一次可能十几秒的 LLM 调用上。
+
+    状态机：pending → running → {succeeded, failed, cancelled}；pending 可直接被
+    取消（cancelled）。终态不可再变（仓储层校验，避免取消与完成互相覆盖）。
+
+    `tenant_id` 进主键：job_id 由 租户/候选/随机数 派生，仍按复合主键隔离，
+    与其余租户表一致（跨租户读 404）。RLS 对**本表同样启用**——见迁移注释。
+    """
+    __tablename__ = "investigation_job"
+
+    tenant_id: Mapped[str] = mapped_column(String(80), primary_key=True, index=True)
+    job_id: Mapped[str] = mapped_column(String(120), primary_key=True)
+    candidate_id: Mapped[str] = mapped_column(String(80), index=True)
+    status: Mapped[str] = mapped_column(String(20), index=True, default="pending")
+    report_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    worker_id: Mapped[str] = mapped_column(String(120), default="")
+    submitted_at: Mapped[float] = mapped_column(Float, default=_now)
+    started_at: Mapped[float | None] = mapped_column(Float, nullable=True)
+    finished_at: Mapped[float | None] = mapped_column(Float, nullable=True)

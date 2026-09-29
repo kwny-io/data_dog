@@ -24,9 +24,9 @@ baseline 建的主键**没有名字**，而 SQLite 也不保存主键约束名�
 
 - `telemetry_events`：`tenant_id` 列 baseline 已存在，重建时**保留原值**
   （不覆盖为 demo）。
-- 其余四张改主键的表：既有行回填租户 = `demo`（与 settings.default_tenant()
-  默认值一致），新表不带 server_default，后续漏传租户的写入在 DB 层直接报错
-  （失败关闭），而非静默落到某租户。
+- 其余四张改主键的表：既有行回填租户 = `demo`（固定字面量，见下 `_BACKFILL_TENANT`），
+  新表不带 server_default，后续漏传租户的写入在 DB 层直接报错（失败关闭），
+  而非静默落到某租户。
 - `alert_feedback`：保留代理主键，只加列 + 索引。
 
 可逆：downgrade 重建回原主键（单列），并移除新增的 tenant_id 列

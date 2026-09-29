@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import hmac
+import threading
 import time
 from contextlib import asynccontextmanager
 from typing import Any
@@ -26,6 +27,8 @@ from fastapi.responses import JSONResponse
 
 from .. import settings
 from ..agent.loop import AgentLoop
+from ..alerting.lifecycle import TRANSITIONS
+from ..alerting.saas import SaaSTestAdapter
 from ..core import metrics
 from ..core.logging import (
     clear_request_id,
@@ -34,21 +37,32 @@ from ..core.logging import (
     setup_logging,
 )
 from ..core.tracing import clear_trace, start_trace
+from ..data_plane.candidate_shared import SharedCandidateBuilder
 from ..data_plane.gateway import TelemetryGateway
 from ..data_plane.p2_demo import _detector_config
 from ..data_plane.pipeline import DataPlane, build_demo_resolver
 from ..errors import ToolErrorCode, http_status_for
+from ..eval_feedback import summarize_feedback
+from ..evidence.refs import EvidenceResolver, make_candidate_metricwin_source
+from ..knowledge_ingest import (
+    chunk_text,
+    make_document_id,
+    rank_chunks,
+    sha256_text,
+)
 from ..presentation import derive_verdict
 from ..providers.client import LLMCallError
 from ..providers.config import load_config
 from ..providers.offline_demo import DeterministicEvidenceProvider
 from ..schemas.events import CandidateEvent, EvidenceSummary
+from ..state import get_state_store
 from ..storage import migrations
 from ..storage import models as M
 from ..storage import repository as repo
 from ..storage.db import database_url as _database_url
-from ..storage.db import get_engine, session_scope
+from ..storage.db import get_engine, reset_tenant_context, session_scope, set_tenant_context
 from ..tools.investigation import InvestigationTools
+from .alerting import report_alert
 from .evidence import RepoEvidenceBridge
 
 _log = get_logger(__name__)
@@ -94,6 +108,10 @@ class ServiceState:
             rate_per_sec=settings.rate_per_sec(),
             burst=settings.rate_burst(),
         )
+        # P3 上报的投递目标（本地测试 SaaS）。进程级共享：其幂等去重表
+        # (`_seen`) 跨请求有效，重复投递同一 (key, revision) 只产生一次外部
+        # 效果。事件/outbox 的**持久真相**在 DB，这里只是投递端。
+        self.saas_adapter = SaaSTestAdapter()
         try:
             self.resolver = build_demo_resolver(_detector_config())
         except Exception as e:            # 缺厂商文档/依赖时不致命，降级为不可用
@@ -102,10 +120,111 @@ class ServiceState:
     def new_plane(self) -> DataPlane | None:
         if self.resolver is None:
             return None
-        return DataPlane(self.resolver, gateway=self.gateway)
+        # 候选构建器走**共享后端**：跨副本/跨请求一致地归并同一设备的命中。
+        # 单副本（memory 后端）行为等价；多副本（PG/Redis）才真正共享。
+        # 每次请求新建实例，但分组状态在共享存储里，故跨请求仍能正确合并。
+        return DataPlane(self.resolver, gateway=self.gateway,
+                         builder=SharedCandidateBuilder(state_store=get_state_store()))
 
 
 _state = ServiceState()
+
+# 进程内流式接入句柄（可选）。lifespan 起、关停时清；测试可读其 stats 断言。
+_stream_lock = threading.Lock()
+_stream: tuple[Any, Any, threading.Thread, threading.Event] | None = None
+
+
+def _set_stream(runner, source, thread, stop) -> None:
+    global _stream
+    with _stream_lock:
+        _stream = (runner, source, thread, stop)
+
+
+def _stream_handle():
+    with _stream_lock:
+        return _stream if _stream is not None else (None, None, None, None)
+
+
+def _clear_stream() -> None:
+    global _stream
+    with _stream_lock:
+        _stream = None
+
+
+# ------------------------------------------------------------------ 异步调查 worker 池（G1）
+
+# 进程内单例。lifespan 起、关停时停；测试可读其 alive/queue_depth 断言。
+_job_runner_lock = threading.Lock()
+_job_runner: Any = None
+
+
+def _get_job_runner():
+    with _job_runner_lock:
+        return _job_runner
+
+
+def _set_job_runner(runner) -> None:
+    global _job_runner
+    with _job_runner_lock:
+        _job_runner = runner
+
+
+def _start_job_runner_if_needed() -> None:
+    """起异步调查 worker 池。
+
+    只在 `DD_INVESTIGATE_ASYNC=1` 时启动——否则 `POST /v1/investigations` 走同步
+    路径，无需 worker。worker 的 run_fn 注入 `_execute_investigation`（本模块内
+    唯一的调查实现），故同步/异步两条路径**共用同一段执行逻辑**。
+    """
+    if not settings.investigate_async():
+        return
+    from .investigation_jobs import JobRunner, SharedJobQueue
+
+    runner = JobRunner(
+        _run_investigation_job,
+        workers=settings.investigate_workers(),
+        queue=SharedJobQueue(),
+        poll_interval_s=settings.investigate_queue_poll_ms() / 1000.0,
+    )
+    runner.start()
+    _set_job_runner(runner)
+
+
+def _stop_job_runner() -> None:
+    runner = _get_job_runner()
+    if runner is None:
+        return
+    runner.stop()
+
+
+def _run_investigation_job(tenant_id: str, candidate_id: str,
+                           should_cancel) -> dict[str, Any]:
+    """worker 的执行回调：跑一次调查，返回 job 终态结果（不抛异常给 worker）。
+
+    返回 `{"status", "report_id", "error_code"}`：
+      - 成功 → succeeded + report_id
+      - 取消 → cancelled（由 worker 侧 finish_job 拒绝覆盖，这里如实返回 cancelled）
+      - 失败 → failed + 有限错误码
+    """
+    started = time.monotonic()
+    status, report_id, error_code = "failed", None, "execution_failed"
+    try:
+        outcome = _execute_investigation(
+            tenant_id, candidate_id, should_cancel=should_cancel)
+        # 取消：provider 抛 _InvestigationCancelled，_execute_investigation 会
+        # 把它翻译成 status="cancelled"（不产出报告）。
+        status = outcome.get("status", "failed")
+        report_id = outcome.get("report_id")
+        error_code = outcome.get("error_code")
+    except Exception as e:                            # noqa: BLE001
+        _log.error("异步调查执行异常", extra={
+            "candidate_id": candidate_id,
+            "error": f"{type(e).__name__}: {e}"})
+        error_code = "execution_failed"
+    finally:
+        metrics.investigation_job_duration_seconds.observe(time.monotonic() - started)
+        metrics.investigation_jobs_total.labels(status=status).inc()
+    return {"status": status, "report_id": report_id, "error_code": error_code}
 
 
 # ------------------------------------------------------------------ 工具
@@ -166,6 +285,7 @@ def _extract_api_key(request) -> str:
 async def _lifespan(app: FastAPI):
     """启动时跑数据库迁移。连不上不应阻止进程启动——由 /readyz 报未就绪。"""
     setup_logging(version=_VERSION)
+    _warn_if_shared_state_unavailable()
     try:
         # 走 alembic 版本化迁移（不再用 create_all —— 它对已存在的表静默跳过，
         # 加列/改类型在生产库上不生效且不报错，是典型的"看起来跑通了"）
@@ -180,7 +300,68 @@ async def _lifespan(app: FastAPI):
         # 迁移失败不阻止启动：由 /readyz 报未就绪，编排层据此摘流量
         _log.error("迁移失败（服务仍启动，/readyz 将报未就绪）",
                    extra={"error": f"{type(e).__name__}: {e}"})
+    try:
+        _start_stream_if_enabled()
+    except Exception as e:                           # noqa: BLE001
+        # 流式接入是可选增强：起不来不该拖垮 HTTP 服务（本身仍可用）
+        _log.error("流式接入启动失败（HTTP 入口不受影响）",
+                   extra={"error": f"{type(e).__name__}: {e}"})
+    try:
+        _start_job_runner_if_needed()
+    except Exception as e:                           # noqa: BLE001
+        # 异步调查 worker 池起不来：不影响已启动的 HTTP 服务（同步路径仍可用），
+        # 但配了 DD_INVESTIGATE_ASYNC 的提交会 503——故记 error 级。
+        _log.error("异步调查 worker 池启动失败",
+                   extra={"error": f"{type(e).__name__}: {e}"})
     yield
+    _stop_job_runner()
+    _stop_stream()
+
+
+def _start_stream_if_enabled() -> None:
+    """按 `DD_STREAM_ENABLED` 起流式消费者（长驻 plane + 共享候选构建器）。"""
+    if not settings.stream_enabled():
+        return
+    from ..stream import StreamRunner, build_source
+    plane = _state.new_plane()
+    if plane is None:
+        raise RuntimeError(f"算子绑定不可用，无法启动流式接入：{_state.build_error}")
+    source = build_source()
+    runner = StreamRunner(plane, source, default_tenant=settings.stream_tenant())
+    thread, stop = runner.start_background()
+    _set_stream(runner, source, thread, stop)
+    _log.info("流式接入已启动", extra={
+        "source": source.name, "thread": thread.name})
+
+
+def _stop_stream() -> None:
+    runner, source, _thread, stop = _stream_handle()
+    if runner is None:
+        return
+    stop.set()
+    try:
+        source.close()                               # 唤醒 poll，加快线程退出
+    except Exception:                                # noqa: BLE001
+        pass
+    _log.info("流式接入已停止", extra={"stats": runner.stats})
+
+
+def _warn_if_shared_state_unavailable() -> None:
+    """多副本 + memory 状态后端 = 限流/候选合并在各副本各算各的（静默错误）。
+
+    显式告警：不是崩溃（单副本场景 memory 完全正确），但要在日志里说清楚，
+    别让运维以为"多副本天然一致"。
+    """
+    from ..state.memory import InMemoryStateStore
+    try:
+        store = get_state_store()
+    except Exception:                     # noqa: BLE001  后端构建失败由 /readyz 报
+        return
+    if isinstance(store, InMemoryStateStore):
+        _log.warning(
+            "共享状态后端为 memory（进程内）：多副本部署下限流与候选合并会各算各的。"
+            "多副本请配 DD_STATE_BACKEND=postgres（或 redis）。单副本可忽略。",
+            extra={"migration": "state_backend_memory"})
 
 
 def create_app() -> FastAPI:
@@ -200,7 +381,7 @@ def create_app() -> FastAPI:
             CORSMiddleware,
             allow_origins=_origins,
             allow_credentials=True,
-            allow_methods=["GET", "POST", "OPTIONS"],
+            allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
             allow_headers=["Content-Type", "X-API-Key", "X-Tenant-Id",
                            "X-Device-Sn", "X-Request-Id", "traceparent"],
             expose_headers=["X-Request-Id", "traceparent"],
@@ -247,11 +428,16 @@ def create_app() -> FastAPI:
         """
         rid = set_request_id(request.headers.get("X-Request-Id"))
         _trace_id, traceparent = start_trace(request.headers.get("traceparent"))
+        # 租户上下文：让本请求内所有 `session_scope()` 自动带上 RLS 租户
+        # （PostgreSQL 行级安全策略据此放行）。身份来自请求头（认证主体），
+        # 与 `_tenant_required` 同源；未带则 None → RLS 下零行可见（失败关闭）。
+        tenant_token = set_tenant_context(request.headers.get("X-Tenant-Id"))
         t0 = time.perf_counter()
         try:
             response = await call_next(request)
         finally:
             duration_ms = round((time.perf_counter() - t0) * 1000.0, 2)
+            reset_tenant_context(tenant_token)
             clear_request_id()
             clear_trace()
         response.headers["X-Request-Id"] = rid
@@ -315,6 +501,31 @@ def create_app() -> FastAPI:
         else:
             checks["resolver"] = {"ok": True}
 
+        # 流式接入（仅在启用时检查）：启用了但消费线程已死 = 数据静默停收，
+        # 必须报未就绪——否则"看起来在跑、其实没在收"是最危险的静默故障。
+        if settings.stream_enabled():
+            runner, source, thread, _stop = _stream_handle()
+            if runner is None:
+                checks["stream"] = {"ok": False, "error": "已启用但未启动"}
+            elif not thread.is_alive():
+                checks["stream"] = {"ok": False, "error": "消费线程已退出"}
+            else:
+                checks["stream"] = {"ok": True, "source": source.name,
+                                    "stats": runner.stats}
+            ready = ready and bool(checks["stream"]["ok"])
+
+        # 异步调查 worker 池（仅在启用时检查）：配了异步但池子没跑 = 提交会 503，
+        # 报未就绪，让编排层把该实例摘出（实例接请求也只会拒）。
+        if settings.investigate_async():
+            runner = _get_job_runner()
+            if runner is None or not runner.alive:
+                checks["investigation_workers"] = {"ok": False,
+                                                   "error": "异步调查 worker 池未运行"}
+            else:
+                checks["investigation_workers"] = {"ok": True,
+                                                   "queue_depth": runner.queue_depth()}
+            ready = ready and bool(checks["investigation_workers"]["ok"])
+
         body = {"status": "ready" if ready else "not_ready", "checks": checks}
         return JSONResponse(status_code=200 if ready else 503, content=body)
 
@@ -330,6 +541,14 @@ def create_app() -> FastAPI:
         metrics.auth_enabled.set(1 if settings.api_key() else 0)
         metrics.resolver_ready.set(1 if _state.resolver is not None else 0)
         metrics.uptime_seconds.set(round(time.time() - _STARTED_AT, 1))
+        _runner, _src, _thr, _stop = _stream_handle()
+        metrics.stream_up.set(1 if (_thr is not None and _thr.is_alive()) else 0)
+        # 异步调查：队列深度（共享队列里的待办数）+ 各状态 job 数
+        jr = _get_job_runner()
+        if jr is not None:
+            depth = jr.queue_depth()
+            if depth >= 0:
+                metrics.investigation_queue_depth.set(depth)
         try:
             with session_scope() as s:
                 metrics.db_rows.labels(table="candidates").set(
@@ -338,6 +557,10 @@ def create_app() -> FastAPI:
                     repo.count_rows(s, M.AlertRow))
                 metrics.db_rows.labels(table="outbox_pending").set(
                     repo.count_rows(s, M.AlertOutboxRow, status="pending"))
+                metrics.db_rows.labels(table="investigation_jobs_pending").set(
+                    repo.count_rows(s, M.InvestigationJobRow, status="pending"))
+                metrics.db_rows.labels(table="investigation_jobs_running").set(
+                    repo.count_rows(s, M.InvestigationJobRow, status="running"))
         except Exception as e:                        # noqa: BLE001
             _log.warning("采集库内行数失败", extra={
                 "error": f"{type(e).__name__}: {e}"})
@@ -411,6 +634,32 @@ def create_app() -> FastAPI:
         }
 
     # -------------------------------------------------- 查询
+
+    @app.get("/v1/summary", tags=["query"])
+    def summary(
+        x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
+    ) -> dict[str, Any]:
+        """仪表盘聚合只读端点（租户作用域）。
+
+        一次给前端首屏所需的总量数字，省掉"拉三个列表再数长度"的往返。所有计数
+        都**限定在当前租户**（用 COUNT/GROUP BY 聚合，不拉全表）；`uptime_s` /
+        `resolver_ready` / `auth_enabled` 是进程级事实，与租户无关。
+        """
+        tenant = _tenant_required(x_tenant_id)
+        with session_scope() as s:
+            candidates_total = repo.count_rows(s, M.CandidateRow, tenant_id=tenant)
+            alerts_by_state = repo.count_alerts_by_state(s, tenant_id=tenant)
+            outbox_pending = repo.count_rows(
+                s, M.AlertOutboxRow, tenant_id=tenant, status="pending")
+        return {
+            "ok": True,
+            "uptime_s": round(time.time() - _STARTED_AT, 1),
+            "candidates_total": candidates_total,
+            "alerts_by_state": alerts_by_state,
+            "outbox_pending": outbox_pending,
+            "resolver_ready": _state.resolver is not None,
+            "auth_enabled": bool(settings.api_key()),
+        }
 
     @app.get("/v1/candidates", tags=["query"])
     def list_candidates(
@@ -508,10 +757,41 @@ def create_app() -> FastAPI:
             "component_ref": cand["component_ref"],
             "window": {"start": cand["window_start"], "end": cand["window_end"]},
             "metrics": tel.get("metrics", {}),
-            "reference_window_metrics": tel.get("reference_window_metrics"),
+            "reference_window_metrics": tel.get("reference_window_metrics") or {},
             "evidence": cand.get("evidence", []),
             "vendor_knowledge": vendor,
         }
+
+    @app.get("/v1/candidates/{candidate_id}/refs", tags=["query"])
+    def resolve_candidate_refs(
+        candidate_id: str,
+        x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
+    ) -> dict[str, Any]:
+        """把候选的 evidence_refs（不透明引用）解析成**可读证据**。
+
+        引用形如 `metricwin://<candidate_id>` / `rawlog://<event_id>` 等；此前只是
+        不透明字符串，审计方读不回内容。这里用 `EvidenceResolver` 解析，并把
+        `metricwin` 源**换成按落库候选反查的真实源**（租户作用域，跨租户查不到 →
+        not_found，不泄露存在性）。解析逻辑（语法/权限/完整性/有效期）复用同一实现。
+        """
+        tenant = _tenant_required(x_tenant_id)
+        with session_scope() as s:
+            cand = repo.get_candidate(s, candidate_id, tenant_id=tenant)
+            if cand is None:
+                raise HTTPException(status_code=404, detail="候选不存在")
+
+            def _lookup(cid: str) -> dict[str, Any] | None:
+                return repo.get_candidate(s, cid, tenant_id=tenant)
+
+            resolver = EvidenceResolver()
+            resolver.replace_source(
+                "metricwin", make_candidate_metricwin_source(_lookup))
+            refs = list(cand.get("evidence_refs", [])) or [
+                f"metricwin://{candidate_id}"]
+            out = resolver.resolve_all(refs)
+
+        out["candidate_id"] = candidate_id
+        return out
 
     @app.get("/v1/reports", tags=["query"])
     def list_reports(
@@ -545,93 +825,273 @@ def create_app() -> FastAPI:
     @app.post("/v1/investigations", tags=["investigate"])
     def create_investigation(
         payload: dict[str, Any],
+        response: Response,
         x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
+        sync: bool = Query(default=False, alias="sync"),
     ) -> dict[str, Any]:
-        """对一个候选跑一次 Agent 调查，产出并持久化报告。
+        """对一个候选跑一次 Agent 调查。
 
-        **同步**实现（FastAPI 线程池）：真实 LLM 时可能耗时 10–60s，
-        `DD_INVESTIGATE_TIMEOUT_S` 为**整次调查**的总预算（默认 90s），到点
-        失败关闭。诚实边界：同步 + 长超时会占用 worker、进程内有状态，
-        **不能水平扩展**——前端须按"长任务"处理（禁用/进度/可取消）。
-        本端点**绝不被 /v1/telemetry 调用**：热路径保持无 LLM。
+        **两种模式**（同一段执行逻辑，见 `_execute_investigation`）：
+          - **异步**（默认当 `DD_INVESTIGATE_ASYNC=1`）：落一条 pending job、入共享
+            队列，**立即**返回 `202 {job_id, status}`；worker 池后台执行。前端轮询
+            `GET /v1/investigations/jobs/{job_id}` 取状态/结果。这是端到端水平扩展
+            的关键——HTTP worker 不再被长 LLM 调用占满。
+          - **同步**（默认，或 `?sync=1`）：同请求内跑完再返回（旧行为，兼容既有
+            前端与测试）。真实 LLM 时 10–60s，故前端须按"长任务"处理。
+
+        `DD_INVESTIGATE_TIMEOUT_S` 为**整次调查**的总墙钟预算（默认 90s），两种模式
+        都适用，到点失败关闭。本端点**绝不被 /v1/telemetry 调用**：热路径保持无 LLM。
         """
         tenant = _tenant_required(x_tenant_id)
         candidate_id = (payload or {}).get("candidate_id")
         if not candidate_id:
             raise HTTPException(status_code=422, detail="正文需含 'candidate_id'")
 
+        use_async = settings.investigate_async() and not sync
+        if use_async:
+            return _submit_async_investigation(tenant, candidate_id, response)
+
+        outcome = _execute_investigation(tenant, candidate_id)
+        if not outcome.get("ok"):
+            raise HTTPException(status_code=outcome["http_status"],
+                                detail=outcome["detail"])
+        return outcome["response"]
+
+    # ------------------------------------------------ 异步 job（G1）
+
+    @app.get("/v1/investigations/jobs/{job_id}", tags=["investigate"])
+    def get_investigation_job(
+        job_id: str,
+        x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
+    ) -> dict[str, Any]:
+        """查异步调查 job 的状态（跨租户 → 404）。
+
+        status ∈ pending/running/succeeded/failed/cancelled。succeeded 时 `report_id`
+        可拿去 `GET /v1/investigations/{report_id}` 读完整报告。
+        """
+        tenant = _tenant_required(x_tenant_id)
         with session_scope() as s:
-            row = repo.get_candidate(s, candidate_id, tenant_id=tenant)
-            if row is None:
-                metrics.investigations_total.labels(result="not_found").inc()
-                raise HTTPException(status_code=404, detail="候选不存在")
-            tel_rows = repo.list_telemetry(s, tenant_id=tenant,
-                                           device_sn=row["device_sn"])
+            job = repo.get_job(s, job_id, tenant_id=tenant)
+        if job is None:
+            raise HTTPException(status_code=404, detail="调查任务不存在")
+        return {"ok": True, "job": _job_public(job)}
 
-        cand = _row_to_candidate(row)
-        trace: list[dict[str, Any]] = []
+    @app.get("/v1/investigations/jobs", tags=["investigate"])
+    def list_investigation_jobs(
+        x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
+        status: str | None = Query(default=None),
+        limit: int = Query(default=_DEFAULT_PAGE_SIZE, ge=1, le=_MAX_PAGE_SIZE),
+        offset: int = Query(default=0, ge=0),
+    ) -> dict[str, Any]:
+        """分页列出本租户的异步调查 job（可按 status 过滤）。"""
+        tenant = _tenant_required(x_tenant_id)
+        with session_scope() as s:
+            rows = repo.list_jobs(s, tenant_id=tenant, status=status,
+                                  limit=limit, offset=offset)
+            total = repo.count_rows(s, M.InvestigationJobRow, tenant_id=tenant)
+        return {"ok": True, "count": len(rows), "total": total,
+                "limit": limit, "offset": offset,
+                "has_more": offset + len(rows) < total,
+                "items": [_job_public(r) for r in rows]}
 
-        try:
-            provider = _build_investigation_provider()
-        except HTTPException:
-            metrics.investigations_total.labels(result="failed").inc()
-            raise
+    @app.post("/v1/investigations/jobs/{job_id}/cancel", tags=["investigate"])
+    def cancel_investigation_job(
+        job_id: str,
+        x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
+    ) -> dict[str, Any]:
+        """请求取消异步调查 job（跨租户 → 404）。
 
-        try:
-            bridge = RepoEvidenceBridge(tel_rows, device_sn=cand.device_sn)
-            tools = InvestigationTools(bridge)
-            agent = AgentLoop(provider, tools, model=settings.llm_model() or None,
-                              max_steps=settings.investigate_max_steps(),
-                              trace_cb=trace.append)
-            report = agent.investigate(cand)
-        except LLMCallError as e:
-            # 超时/不可用 → 统一错误码（504/503），失败关闭，不假装查过证据
-            metrics.investigations_total.labels(result="timeout").inc()
-            raise HTTPException(status_code=http_status_for(e.code),
-                                detail=e.detail) from e
-        except Exception as e:                          # noqa: BLE001
-            metrics.investigations_total.labels(result="failed").inc()
-            raise HTTPException(status_code=500,
-                                detail=f"调查执行失败：{type(e).__name__}") from e
+        **协作式**：pending 的直接取消；running 的置 cancelled，worker 在下一个
+        provider 调用边界停止（已发出的 LLM 调用要等它返回），故报告可能已落库——
+        以 job 的最终状态为准。已终态的任务原样返回，不改。
+        """
+        tenant = _tenant_required(x_tenant_id)
+        with session_scope() as s:
+            new_status = repo.cancel_job(s, job_id, tenant_id=tenant)
+            job = repo.get_job(s, job_id, tenant_id=tenant)
+        if new_status is None or job is None:
+            raise HTTPException(status_code=404, detail="调查任务不存在")
+        return {"ok": True, "job": _job_public(job)}
 
-        metrics.investigations_total.labels(result="ok").inc()
+    # -------------------------------------------------- 反馈（P3 闭环回灌）
 
-        # 持久化报告（幂等 upsert）
-        try:
-            with session_scope() as s:
-                repo.save_report(s, report, tenant_id=tenant)
-        except Exception as e:                          # noqa: BLE001
-            # 落库失败不吞掉已算出的结论，但如实标明
-            _log.warning("报告落库失败", extra={"error": f"{type(e).__name__}: {e}"})
+    # 反馈类型 → 期望的告警目标状态（对齐 alerting.saas 的三种 kind）。
+    # false_positive（误报）→ rejected；repaired（已修）→ closed；no_action → 不动状态。
+    # 仅当**当前状态允许一步转到目标状态**时才落地（见 alerting.lifecycle.TRANSITIONS）；
+    # 否则如实存档、返回 state_applied=null，不强行造出非法/臆造的中间状态。
+    #   例：repaired 只有 confirmed/escalated 能一步到 closed；detected 不行。
+    _FEEDBACK_KINDS = {"false_positive", "repaired", "no_action"}
+    _FEEDBACK_TARGET = {"false_positive": "rejected", "repaired": "closed"}
 
-        report_dict = report.to_dict()
-        usage = report_dict.get("model_provenance", {}).get("usage", {})
-        # 人话结论：与演示台/候选详情同源（presentation.derive_verdict）
-        tel_map = {cand.component_ref: {
-            "metrics": {},
-            "device_sn": cand.device_sn,
-        }}
-        # 从 trace 里取该候选窗口的实测指标，给 verdict 用（与证据端点一致）
-        for step in trace:
-            res = step.get("result") or {}
-            if step.get("name") == "query_candidate_evidence" and res.get("metrics"):
-                tel_map[cand.component_ref]["metrics"] = res["metrics"]
-                break
-        verdict, verdict_detail = derive_verdict(
-            [report_dict | {"severity_hint": cand.severity_hint,
-                            "component_ref": cand.component_ref,
-                            "rule_matches": cand.rule_matches}],
-            {}, tel_map)
+    @app.post("/v1/feedback", tags=["alerting"])
+    def submit_feedback(
+        payload: dict[str, Any],
+        x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
+    ) -> dict[str, Any]:
+        """提交人工反馈（误报 / 已修 / 无需处理），并**回灌**到告警状态机。
+
+        回灌规则（确定性；状态转移不合法则**如实拒绝**，不强行改）：
+          - `false_positive` → 告警转 `rejected`（rejected 是同 Episode 的活跃态，复发可
+            重回 detected）
+          - `repaired`       → 告警转 `closed`（**仅当当前状态可一步到 closed**，即
+            confirmed/escalated；detected/recovering 无直达边，则只存档不改状态）
+          - `no_action`      → 仅存档，不改状态
+        反馈始终以记录形式落库（可事后审计），状态变更追加进告警 history。
+        """
+        tenant = _tenant_required(x_tenant_id)
+        body = payload or {}
+        event_id = body.get("event_id")
+        kind = body.get("kind")
+        note = body.get("note", "")
+        if not event_id or not kind:
+            raise HTTPException(status_code=422, detail="正文需含 'event_id' 与 'kind'")
+        if kind not in _FEEDBACK_KINDS:
+            raise HTTPException(
+                status_code=422,
+                detail=f"未知反馈类型 {kind!r}（可用：{sorted(_FEEDBACK_KINDS)}）")
+
+        with session_scope() as s:
+            alert = repo.get_alert(s, event_id, tenant_id=tenant)
+            if alert is None:
+                raise HTTPException(status_code=404, detail="告警不存在")
+            repo.save_feedback(s, tenant_id=tenant, event_id=event_id,
+                               kind=kind, note=note)
+            target = _FEEDBACK_TARGET.get(kind)
+            applied: str | None = None
+            if target is not None:
+                legal = target in TRANSITIONS.get(alert["state"], set())
+                if legal:
+                    repo.set_alert_state(s, tenant_id=tenant, event_id=event_id,
+                                         to_state=target,
+                                         reason=f"人工反馈：{kind}")
+                    applied = target
+            updated = repo.get_alert(s, event_id, tenant_id=tenant)
+
         return {
             "ok": True,
-            "investigation_id": report.investigation_id,
-            "candidate_id": candidate_id,
-            "report": report_dict,
-            "verdict": verdict,
-            "verdict_detail": verdict_detail,
-            "trace": trace,
-            "usage": usage,
+            "event_id": event_id,
+            "kind": kind,
+            "state_applied": applied,          # null = 未改状态（no_action 或转移不合法）
+            "state_now": updated["state"] if updated else None,
+            "alert": updated,
         }
+
+    @app.get("/v1/alerts/{event_id}/feedback", tags=["alerting"])
+    def list_alert_feedback(
+        event_id: str,
+        x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
+    ) -> dict[str, Any]:
+        """读某条告警的人工反馈历史（租户内；跨租户 → 404）。"""
+        tenant = _tenant_required(x_tenant_id)
+        with session_scope() as s:
+            alert = repo.get_alert(s, event_id, tenant_id=tenant)
+            if alert is None:
+                raise HTTPException(status_code=404, detail="告警不存在")
+            items = repo.list_feedback_for_event(s, tenant_id=tenant,
+                                                 event_id=event_id)
+        return {"ok": True, "event_id": event_id, "count": len(items), "items": items}
+
+    @app.get("/v1/eval/feedback", tags=["eval"])
+    def eval_feedback(
+        x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
+    ) -> dict[str, Any]:
+        """把人工反馈当**评估标签**，度量 Agent 判得准不准（租户作用域）。
+
+        此前人工反馈只落库 + 改状态——那是"存档"，不是"回灌"。这里把每条反馈与
+        它告警对应的 Agent 裁决（`reports.disposition`）关联，算出一致率 / 误报率 /
+        漏报率。分母只含**有标签**的行（人工明确判为误报/已修的）；`no_action`
+        语义模糊，计入 unlabeled、不混进分子分母（宁可少算，不硬凑数字）。
+
+        与 `/v1/eval/*` 的离线评测集（evals/）互补：那是**离线回归**，这是**线上
+        真实反馈**驱动的度量。两者共同回答"Agent 到底判得准不准"。
+        """
+        tenant = _tenant_required(x_tenant_id)
+        with session_scope() as s:
+            rows = repo.list_feedback_with_report(s, tenant_id=tenant)
+        return {"ok": True, "summary": summarize_feedback(rows), "rows": rows}
+
+    # -------------------------------------------------- 用户厂商文档（A7）
+
+    @app.post("/v1/knowledge/documents", tags=["knowledge"])
+    def import_knowledge_document(
+        payload: dict[str, Any],
+        x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
+    ) -> dict[str, Any]:
+        """导入一份**用户自带**厂商文档（纯文本 → 切片 → 落库，租户隔离）。
+
+        正文：`{"source_name": "...", "text": "..."}`。`text` 是**已抽取的纯文本**；
+        PDF/DOCX 解析在上游（本项目不做二进制解析）。
+
+        **诚实标注**：本通道的检索是**词法检索**，与内置 chroma 语料（向量语义
+        检索）互补、非替代。用户文档按租户隔离——别人的厂商原件你检索不到。
+        """
+        tenant = _tenant_required(x_tenant_id)
+        body = payload or {}
+        text = body.get("text")
+        source_name = str(body.get("source_name") or "untitled")
+        if not isinstance(text, str) or not text.strip():
+            raise HTTPException(status_code=422, detail="正文需含非空 'text' 字符串")
+        if len(text) > 2_000_000:
+            raise HTTPException(status_code=422, detail="单份文档上限 200 万字符")
+
+        digest = sha256_text(text)
+        document_id = make_document_id(digest)
+        chunks = chunk_text(text, document_id=document_id)
+        with session_scope() as s:
+            repo.save_knowledge_document(
+                s, tenant_id=tenant,
+                meta={"document_id": document_id, "source_name": source_name,
+                      "content_sha256": digest, "char_count": len(text)},
+                chunks=[{"chunk_id": c.chunk_id, "ordinal": c.ordinal,
+                         "text": c.text} for c in chunks])
+        return {"ok": True, "document_id": document_id, "source_name": source_name,
+                "chunk_count": len(chunks), "char_count": len(text)}
+
+    @app.get("/v1/knowledge/documents", tags=["knowledge"])
+    def list_knowledge_documents(
+        x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
+    ) -> dict[str, Any]:
+        """列出本租户已导入的厂商文档。"""
+        tenant = _tenant_required(x_tenant_id)
+        with session_scope() as s:
+            items = repo.list_knowledge_documents(s, tenant_id=tenant)
+        return {"ok": True, "count": len(items), "items": items}
+
+    @app.get("/v1/knowledge/search", tags=["knowledge"])
+    def search_knowledge(
+        q: str = Query(..., min_length=1),
+        x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
+        limit: int = Query(default=5, ge=1, le=50),
+        document_id: str | None = Query(default=None),
+    ) -> dict[str, Any]:
+        """在本租户**已导入**的厂商文档里做**词法检索**，返回命中的切片。
+
+        这是"用户自带文档"的检索通道：确定性、可离线、零依赖。**不是**向量语义
+        检索——同义词/近义表述召回请用内置 chroma 语料通道。两者互补。
+        """
+        tenant = _tenant_required(x_tenant_id)
+        with session_scope() as s:
+            chunks = repo.list_knowledge_chunks(s, tenant_id=tenant,
+                                                document_id=document_id)
+            docs = {d["document_id"]: d["source_name"]
+                    for d in repo.list_knowledge_documents(s, tenant_id=tenant)}
+        hits = rank_chunks(chunks, q)[:limit]
+        for h in hits:
+            h["source_name"] = docs.get(h["document_id"], "")
+        return {"ok": True, "query": q, "count": len(hits), "hits": hits}
+
+    @app.delete("/v1/knowledge/documents/{document_id}", tags=["knowledge"])
+    def delete_knowledge_document(
+        document_id: str,
+        x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
+    ) -> dict[str, Any]:
+        """删一份用户导入的厂商文档及其切片（租户内；不存在 → 404）。"""
+        tenant = _tenant_required(x_tenant_id)
+        with session_scope() as s:
+            ok = repo.delete_knowledge_document(s, document_id, tenant_id=tenant)
+        if not ok:
+            raise HTTPException(status_code=404, detail="文档不存在")
+        return {"ok": True, "document_id": document_id, "deleted": True}
 
     return app
 
@@ -688,29 +1148,204 @@ def _row_to_candidate(row: dict[str, Any]) -> CandidateEvent:
     )
 
 
+# ---------------------------------------------------------------- 调查执行（同步/异步共用）
+
+def _job_public(job: dict[str, Any]) -> dict[str, Any]:
+    """job 行的对外视图（去掉内部 worker_id，保留可轮询的字段）。"""
+    return {
+        "job_id": job["job_id"],
+        "candidate_id": job["candidate_id"],
+        "status": job["status"],
+        "report_id": job.get("report_id"),
+        "error_code": job.get("error_code"),
+        "submitted_at": job.get("submitted_at"),
+        "started_at": job.get("started_at"),
+        "finished_at": job.get("finished_at"),
+    }
+
+
+def _submit_async_investigation(tenant: str, candidate_id: str,
+                                response: Response) -> dict[str, Any]:
+    """提交异步调查：校验候选存在 → 落 pending job → 入共享队列 → 202 返回句柄。
+
+    **立即返回**（不跑 LLM）：这是把 worker 从长调用里解放出来的关键。
+    候选不存在 → 404（与同步路径一致的失败语义）。
+    """
+    with session_scope() as s:
+        row = repo.get_candidate(s, candidate_id, tenant_id=tenant)
+    if row is None:
+        metrics.investigations_total.labels(result="not_found").inc()
+        raise HTTPException(status_code=404, detail="候选不存在")
+
+    runner = _get_job_runner()
+    if runner is None or not runner.alive:
+        # 配了 DD_INVESTIGATE_ASYNC 但 worker 池没起来：失败关闭，不假装受理。
+        raise HTTPException(status_code=503,
+                            detail="异步调查 worker 池未运行（检查启动日志）")
+
+    job_id = _make_job_id(tenant, candidate_id)
+    with session_scope() as s:
+        repo.create_job(s, tenant_id=tenant, job_id=job_id,
+                        candidate_id=candidate_id)
+    runner.submit(tenant_id=tenant, candidate_id=candidate_id, job_id=job_id)
+    metrics.investigation_jobs_total.labels(status="pending").inc()
+
+    response.status_code = 202
+    return {"ok": True, "job_id": job_id, "status": "pending",
+            "candidate_id": candidate_id,
+            "poll": f"/v1/investigations/jobs/{job_id}"}
+
+
+def _execute_investigation(tenant: str, candidate_id: str, *,
+                           should_cancel=None) -> dict[str, Any]:
+    """一次调查的**唯一实现**（同步端点与异步 worker 共用）。
+
+    返回统一结构，两条路径各自翻译：
+      - 同步端点看 `ok`/`http_status`/`detail`/`response`。
+      - worker 看 `status`（succeeded/failed/cancelled）/`report_id`/`error_code`。
+
+    失败/取消**不抛异常**（除取消用哨兵外），全部收敛成返回值——这样 worker 不必
+    区分异常种类，同步端点也能稳定映射 HTTP 状态。
+    """
+    with session_scope() as s:
+        row = repo.get_candidate(s, candidate_id, tenant_id=tenant)
+        if row is None:
+            metrics.investigations_total.labels(result="not_found").inc()
+            return {"ok": False, "http_status": 404, "detail": "候选不存在",
+                    "status": "failed", "error_code": "not_found"}
+        tel_rows = repo.list_telemetry(s, tenant_id=tenant,
+                                       device_sn=row["device_sn"])
+
+    cand = _row_to_candidate(row)
+    trace: list[dict[str, Any]] = []
+
+    try:
+        provider = _build_investigation_provider(should_cancel=should_cancel)
+    except HTTPException as e:
+        metrics.investigations_total.labels(result="failed").inc()
+        return {"ok": False, "http_status": e.status_code, "detail": e.detail,
+                "status": "failed", "error_code": "unavailable"}
+
+    try:
+        bridge = RepoEvidenceBridge(tel_rows, device_sn=cand.device_sn)
+        tools = InvestigationTools(bridge)
+        agent = AgentLoop(provider, tools, model=settings.llm_model() or None,
+                          max_steps=settings.investigate_max_steps(),
+                          trace_cb=trace.append)
+        report = agent.investigate(cand)
+    except _InvestigationCancelled:
+        # 协作式取消：不产出报告（要的就是"停，且不留半成品结论"）
+        metrics.investigations_total.labels(result="cancelled").inc()
+        return {"ok": False, "http_status": 409, "detail": "调查已被取消",
+                "status": "cancelled", "error_code": "cancelled"}
+    except LLMCallError as e:
+        # 超时/不可用 → 统一错误码（504/503），失败关闭，不假装查过证据
+        metrics.investigations_total.labels(result="timeout").inc()
+        return {"ok": False, "http_status": http_status_for(e.code), "detail": e.detail,
+                "status": "failed", "error_code": e.code.value}
+    except Exception as e:                          # noqa: BLE001
+        metrics.investigations_total.labels(result="failed").inc()
+        return {"ok": False, "http_status": 500,
+                "detail": f"调查执行失败：{type(e).__name__}",
+                "status": "failed", "error_code": "execution_failed"}
+
+    metrics.investigations_total.labels(result="ok").inc()
+
+    # 持久化报告（幂等 upsert）
+    try:
+        with session_scope() as s:
+            repo.save_report(s, report, tenant_id=tenant)
+    except Exception as e:                          # noqa: BLE001
+        # 落库失败不吞掉已算出的结论，但如实标明
+        _log.warning("报告落库失败", extra={"error": f"{type(e).__name__}: {e}"})
+
+    # ---- P3：策略门 → 正式事件 → outbox（全部落库）----
+    # 这一步让 /v1/alerts、/v1/feedback、/v1/summary 的 alerts_by_state 在真实
+    # 运行里**有数据**——此前后端从不产告警，这些端点是悬空的。失败不吞掉已
+    # 算出的结论，但如实回报（alerting 字段标 reported=False + 原因）。
+    alerting_result: dict[str, Any] = {"reported": False, "reason": "未执行"}
+    try:
+        with session_scope() as s:
+            alerting_result = report_alert(
+                s, tenant_id=tenant, cand=cand, report=report.to_dict(),
+                adapter=_state.saas_adapter)
+    except Exception as e:                          # noqa: BLE001
+        _log.warning("P3 上报失败", extra={"error": f"{type(e).__name__}: {e}"})
+        alerting_result = {"reported": False,
+                           "reason": f"{type(e).__name__}: {e}"}
+
+    report_dict = report.to_dict()
+    usage = report_dict.get("model_provenance", {}).get("usage", {})
+    # 人话结论：与演示台/候选详情同源（presentation.derive_verdict）
+    tel_map = {cand.component_ref: {
+        "metrics": {},
+        "device_sn": cand.device_sn,
+    }}
+    # 从 trace 里取该候选窗口的实测指标，给 verdict 用（与证据端点一致）
+    for step in trace:
+        res = step.get("result") or {}
+        if step.get("name") == "query_candidate_evidence" and res.get("metrics"):
+            tel_map[cand.component_ref]["metrics"] = res["metrics"]
+            break
+    verdict, verdict_detail = derive_verdict(
+        [report_dict | {"severity_hint": cand.severity_hint,
+                        "component_ref": cand.component_ref,
+                        "rule_matches": cand.rule_matches}],
+        {}, tel_map)
+    response = {
+        "ok": True,
+        "investigation_id": report.investigation_id,
+        "candidate_id": candidate_id,
+        "report": report_dict,
+        "verdict": verdict,
+        "verdict_detail": verdict_detail,
+        "trace": trace,
+        "usage": usage,
+        "alerting": alerting_result,
+    }
+    return {"ok": True, "response": response, "status": "succeeded",
+            "report_id": report.investigation_id, "error_code": None}
+
+
+def _make_job_id(tenant_id: str, candidate_id: str) -> str:
+    from .investigation_jobs import make_job_id
+    return make_job_id(tenant_id, candidate_id)
+
+
+class _InvestigationCancelled(Exception):
+    """协作式取消信号：worker 在 provider 调用边界发现 job 已被取消。"""
+
+
 class _DeadlineProvider:
-    """给 provider 加一个**整次调查的总墙钟预算**。
+    """给 provider 加一个**整次调查的总墙钟预算**（可选叠加协作式取消）。
 
     单次 LLM 调用超时（`Provider.timeout`）只保证"一次调用不会永久挂起"；但一次
     调查最多 `max_steps` 次调用，若每次都快到超时、叠加起来仍可能远超契约承诺的
     90s。本包装器把"整次调查"纳入同一个预算，到点后任何后续调用立即以
     `LLMCallError(TIMEOUT)` 失败关闭——端点因此有确定上界，不会长期占用 worker。
     `AgentLoop` 捕获该异常后会产出 fail-closed 报告（不假装查过证据）。
+
+    `should_cancel`（G1 异步取消）：每次调用前检查一次，为真则抛
+    `_InvestigationCancelled`——它**不被 AgentLoop 捕获**（与 TIMEOUT 不同），
+    故取消时不产出报告。这正是取消想要的："停，且不留半成品结论"。
     """
 
-    def __init__(self, inner: Any, budget_s: float):
+    def __init__(self, inner: Any, budget_s: float, should_cancel=None):
         self._inner = inner
         self._deadline = time.monotonic() + max(0.0, budget_s)
         self._budget_s = budget_s
+        self._should_cancel = should_cancel
 
     def chat(self, messages, **kw):
+        if self._should_cancel is not None and self._should_cancel():
+            raise _InvestigationCancelled()
         if time.monotonic() >= self._deadline:
             raise LLMCallError(ToolErrorCode.TIMEOUT,
                                f"调查总预算 {self._budget_s:.0f}s 已耗尽")
         return self._inner.chat(messages, **kw)
 
 
-def _build_investigation_provider() -> Any:
+def _build_investigation_provider(should_cancel=None) -> Any:
     """按配置构造调查用的 provider（每次调用新建，保证状态隔离）。
 
     - `DD_INVESTIGATE_OFFLINE=1` → 离线确定性 provider（CI/测试不调真实模型，
@@ -719,7 +1354,8 @@ def _build_investigation_provider() -> Any:
     """
     if settings.investigate_offline():
         return _DeadlineProvider(DeterministicEvidenceProvider(),
-                                 settings.investigate_timeout_s())
+                                 settings.investigate_timeout_s(),
+                                 should_cancel=should_cancel)
 
     cfg = load_config()
     key = (cfg.get("api_key") or "").strip()
@@ -734,7 +1370,8 @@ def _build_investigation_provider() -> Any:
         cfg.get("vendor_id") or settings.llm_vendor(), key,
         timeout=settings.investigate_timeout_s(),
     )
-    return _DeadlineProvider(provider, settings.investigate_timeout_s())
+    return _DeadlineProvider(provider, settings.investigate_timeout_s(),
+                             should_cancel=should_cancel)
 
 
 app = create_app()

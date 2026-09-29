@@ -1,0 +1,94 @@
+"""流式接入源的抽象（把 4 种传输统一成一个轮询接口）。
+
+为什么是 `poll()` 而不是 `__iter__`
+-----------------------------------
+四种传输里，file/kafka 天然是"拉"（读偏移/消费位点），MQTT/HTTP 天然是"推"
+（订阅回调/请求到达）。若接口做成 `__iter__`，推式源要么在迭代器里阻塞、
+要么自己开线程——两者都让"谁负责停、谁负责背压"变得含糊。
+
+`poll(timeout) -> list[StreamMessage]` 让**所有源**的行为一致：调用方（`StreamRunner`）
+在一个循环里轮询、拿到一批就处理、拿不到就再等。推式源在内部把回调写进一个线程
+安全队列，`poll` 负责把队列 drain 出来——对调用方仍是"轮询"，但语义没被扭曲。
+
+身份从哪来（安全模型）
+---------------------
+`StreamMessage.auth` 是喂给 `Gateway.ingest` 的**可信身份**。与 HTTP 入口一致：
+身份由**信道**注入，不读正文。信道是什么由源决定：
+- 网络源（http/mqtt/kafka）：身份来自**源配置**（订阅的 topic/队列归属哪个租户），
+  正文里的 tenant_id/device_sn 一律丢弃。
+- 本地文件源（file）：文件是可信本地输入，默认身份来自配置；可选从每行正文取
+  device_sn（见 `FileTailSource` 的文档），但仍不取 tenant_id。
+
+诚实边界：本模块只提供**进程内**轮询循环。没有做"多副本分工消费一个 topic"的
+消费者组协调（Kafka 的 group 协调由 Kafka 自己做；file/mqtt 多副本会重复消费）。
+要水平扩展，用 Kafka（自带消费者组）或给每个副本分不同的文件/topic。
+"""
+from __future__ import annotations
+
+import threading
+import time
+from abc import ABC, abstractmethod
+from collections import deque
+from dataclasses import dataclass
+from typing import Any
+
+
+@dataclass(frozen=True)
+class StreamMessage:
+    """一条待摄入的消息：原始正文 + 该信道的可信身份。"""
+    payload: dict[str, Any]
+    auth: dict[str, Any] | None
+    source: str = ""
+
+
+class StreamSource(ABC):
+    """流式源基类。实现 `poll`；推式源可复用 `QueueSource`。"""
+
+    name: str = "?"
+
+    @abstractmethod
+    def poll(self, timeout: float) -> list[StreamMessage]:
+        """取一批消息（至多一次 poll 的量）；`timeout` 秒内无新消息则返回空列表。"""
+
+    def close(self) -> None:                       # noqa: B027 - 有意可选，非抽象
+        pass
+
+
+class QueueSource(StreamSource):
+    """推式源（MQTT/HTTP）的公共骨架：后台把消息塞进队列，`poll` 排空队列。
+
+    子类/调用方在收到推送时调 `push()`（线程安全）。`poll` 在队列空时最多等
+    `timeout` 秒——用一个条件变量，而非忙等，避免空转烧 CPU。
+    """
+
+    def __init__(self, *, maxsize: int = 10_000) -> None:
+        self._q: deque[StreamMessage] = deque()
+        self._cv = threading.Condition()
+        self._maxsize = maxsize
+        self._closed = False
+        self.dropped = 0                          # 队列满时丢弃计数（背压证据）
+
+    def push(self, msg: StreamMessage) -> None:
+        with self._cv:
+            if len(self._q) >= self._maxsize:
+                # 背压：满则丢**新**消息并计数（不阻塞推送方——阻塞会拖垮
+                # MQTT/HTTP 回调线程）。丢弃是有代价的，故计数暴露到指标。
+                self.dropped += 1
+                return
+            self._q.append(msg)
+            self._cv.notify()
+
+    def poll(self, timeout: float) -> list[StreamMessage]:
+        deadline = time.monotonic() + max(0.0, timeout)
+        with self._cv:
+            if not self._q and not self._closed:
+                self._cv.wait(timeout=max(0.0, deadline - time.monotonic()))
+            out: list[StreamMessage] = []
+            while self._q:
+                out.append(self._q.popleft())
+            return out
+
+    def close(self) -> None:
+        with self._cv:
+            self._closed = True
+            self._cv.notify_all()

@@ -1,0 +1,99 @@
+"""HTTP 推送/流式接收源（标准库 `http.server`）。
+
+场景
+----
+设备侧没法跑我们的 HTTP 客户端、只会往一个 URL **POST** 遥测（webhook 风格），
+或我们用 `curl`/`requests` 主动喂数据做联调。本源起一个极简 HTTP 服务把这些
+推送收进队列，再走同一套数据面。
+
+身份从哪来
+----------
+- 只信**请求头** `X-Tenant-Id` / `X-Device-Sn`（与主服务的 `/v1/telemetry`
+  契约一致）；正文里的同名字段丢弃。
+- 可选 `require_device_header=False` + `device_from_field`：从正文取设备号
+  （某些设备固件不带头），此时 `tenant_id` 仍只认头。
+
+安全边界（诚实说明）
+--------------------
+这是**接入用**的极简服务，不含 TLS、不含鉴权。生产应置于反向代理/网关之后
+（由网关注入并校验身份），或直接用主服务的 `/v1/telemetry`（已有 API key +
+CORS + 租户头校验）。本源的价值在于"设备只会 POST"这一现实场景的落点。
+
+用标准库而非 aiohttp/FastAPI：避免在服务进程里再起一个 ASGI 应用（端口、生命周期
+都要额外管），`http.server` 的 `ThreadingHTTPServer` 足够接住轻量推送。
+"""
+from __future__ import annotations
+
+import json
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+from .base import QueueSource, StreamMessage
+
+
+class HttpPushSource(QueueSource):
+    """起一个线程化的 HTTP 服务，把 POST 的遥测塞进队列。"""
+
+    name = "http"
+
+    def __init__(self, *, tenant_id: str, host: str = "127.0.0.1",
+                 port: int = 8099, device_from_field: str = "",
+                 path: str = "/ingest", max_body: int = 256 * 1024,
+                 maxsize: int = 10_000) -> None:
+        super().__init__(maxsize=maxsize)
+        self._tenant = tenant_id
+        self._device_field = device_from_field
+        self._path = path
+        self._max_body = max_body
+        src = self
+
+        class _Handler(BaseHTTPRequestHandler):
+            def log_message(self, *a):            # 静音默认的 stderr 访问日志
+                pass
+
+            def do_POST(self):                    # noqa: N802 - stdlib 约定
+                if self.path.split("?", 1)[0] != src._path:
+                    self.send_error(404)
+                    return
+                try:
+                    n = int(self.headers.get("Content-Length", "0"))
+                except ValueError:
+                    self.send_error(400)
+                    return
+                if n <= 0 or n > src._max_body:
+                    self.send_error(413)
+                    return
+                raw = self.rfile.read(n)
+                try:
+                    body = json.loads(raw.decode("utf-8"))
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    self.send_error(400, "invalid JSON")
+                    return
+                tenant = self.headers.get("X-Tenant-Id") or src._tenant
+                device = self.headers.get("X-Device-Sn", "")
+                if not device and src._device_field and isinstance(body, dict):
+                    device = str(body.get(src._device_field) or "")
+                src.push(StreamMessage(
+                    payload=body if isinstance(body, dict) else {"raw": body},
+                    auth={"tenant_id": tenant, "device_sn": device,
+                          "principal": "http-push"},
+                    source="http"))
+                self.send_response(202)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"ok":true}')
+
+        self._server = ThreadingHTTPServer((host, port), _Handler)
+        self._thread = threading.Thread(
+            target=self._server.serve_forever, name="dd-http-push", daemon=True)
+        self._thread.start()
+
+    @property
+    def address(self) -> tuple[str, int]:
+        h, p = self._server.server_address[:2]
+        return str(h), int(p)
+
+    def close(self) -> None:
+        super().close()
+        self._server.shutdown()
+        self._server.server_close()

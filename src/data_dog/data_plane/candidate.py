@@ -74,13 +74,18 @@ class CandidateBuilder:
         self._seq = 0
 
     @staticmethod
-    def _base_key(device_sn: str, component_ref: str, signal: str) -> str:
-        return f"{device_sn}|{component_ref}|{signal}"
+    def _base_key(device_sn: str, component_ref: str, signal: str,
+                  tenant_id: str = "") -> str:
+        """分组键。**含租户**：否则不同租户的同名设备序列号会撞同一 key，
+        被合并成同一条候选（candidate_id 也相同）→ 跨租户数据泄漏/覆盖。
+        租户为空（兼容旧调用）时退化为不含租户，但服务路径总是带租户。"""
+        prefix = f"{tenant_id}|" if tenant_id else ""
+        return f"{prefix}{device_sn}|{component_ref}|{signal}"
 
     def _find_group(self, device_sn: str, component_ref: str, signal: str,
-                    occurred_at: str) -> _Group:
+                    occurred_at: str, tenant_id: str = "") -> _Group:
         """找到应归入的组：同信号、且仍在合并窗口内；否则开新组。"""
-        base = self._base_key(device_sn, component_ref, signal)
+        base = self._base_key(device_sn, component_ref, signal, tenant_id)
         now_dt = _parse_time(occurred_at)
         open_key = self._open.get(base)
         if open_key is not None:
@@ -105,12 +110,14 @@ class CandidateBuilder:
 
     def add(self, *, device_sn: str, component_ref: str, metrics: dict[str, Any],
             hits: list[dict[str, Any]], occurred_at: str, received_at: str,
-            raw_ref: str = "", baseline: dict[str, float] | None = None) -> None:
+            raw_ref: str = "", baseline: dict[str, float] | None = None,
+            tenant_id: str = "") -> None:
         """加入一个事件的所有命中（同一事件多规则命中 → 归到各自的 signal）。"""
         for h in hits:
             rule_id = h["rule_id"]
             signal = _signal_of(rule_id, h.get("field", ""))
-            g = self._find_group(device_sn, component_ref, signal, occurred_at)
+            g = self._find_group(device_sn, component_ref, signal, occurred_at,
+                                 tenant_id)
             g.window_end = occurred_at
             g.sample_count += 1
             g.last_dt = _parse_time(occurred_at) or g.last_dt

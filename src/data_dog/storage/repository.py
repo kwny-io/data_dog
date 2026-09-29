@@ -174,9 +174,12 @@ def save_report(session: Session, report: Any, *, tenant_id: str) -> None:
     row.summary = d.get("summary", "")
     row.candidate_refs = list(d.get("candidate_refs", []))
     row.hypotheses = [_as_dict(h) for h in d.get("hypotheses", [])]
+    row.counter_evidence_refs = list(d.get("counter_evidence_refs", []) or [])
     row.missing_evidence = list(d.get("missing_evidence", []))
+    row.risk_window = d.get("risk_window")
     row.recommended_actions = list(d.get("recommended_actions", []))
     row.correlation_group_id = d.get("correlation_group_id")
+    row.linked_candidate_refs = list(d.get("linked_candidate_refs", []) or [])
     row.model_provenance = d.get("model_provenance", {}) or {}
     session.flush()
 
@@ -237,6 +240,14 @@ def list_alerts(session: Session, *, tenant_id: str,
          .filter(M.AlertRow.tenant_id == tenant_id)
          .order_by(M.AlertRow.created_at, M.AlertRow.event_id))
     return _page(q, limit, offset)
+
+
+def count_alerts_by_state(session: Session, *, tenant_id: str) -> dict[str, int]:
+    """按 state 分组统计告警数（租户内）。用 GROUP BY 聚合，不拉全表。"""
+    q = (session.query(M.AlertRow.state, func.count())
+         .filter(M.AlertRow.tenant_id == tenant_id)
+         .group_by(M.AlertRow.state))
+    return {state: int(n) for state, n in q.all()}
 
 
 # ---------------------------------------------------------------- Outbox
@@ -308,6 +319,70 @@ def list_feedback(session: Session, *, tenant_id: str) -> list[dict[str, Any]]:
     return [_row_dict(r) for r in q.all()]
 
 
+def list_feedback_for_event(session: Session, *, tenant_id: str,
+                            event_id: str) -> list[dict[str, Any]]:
+    """取某条告警的反馈（租户内），按时间先后。"""
+    q = (session.query(M.AlertFeedbackRow)
+         .filter(M.AlertFeedbackRow.tenant_id == tenant_id,
+                 M.AlertFeedbackRow.event_id == event_id)
+         .order_by(M.AlertFeedbackRow.created_at))
+    return [_row_dict(r) for r in q.all()]
+
+
+def list_feedback_with_report(session: Session, *, tenant_id: str
+                              ) -> list[dict[str, Any]]:
+    """把每条人工反馈与其**告警对应的 Agent 报告裁决**关联起来（租户内）。
+
+    关联链：`alert_feedback.event_id` → `alerts`（取 investigation_id + 当前状态）
+    → `reports`（取 Agent 当时的 disposition）。这是"反馈回灌评估"的数据基础：
+    有了 (人工 kind, Agent disposition) 的对，才能算一致率/误报率。
+
+    左连接：报告可能尚未落库（如调查失败/告警由别处产生），此时 agent_disposition
+    为 None——**如实返回**，由上层归入 unlabeled，不臆造裁决。
+    """
+    q = (session.query(M.AlertFeedbackRow, M.AlertRow, M.ReportRow)
+         .outerjoin(M.AlertRow,
+                    (M.AlertRow.tenant_id == M.AlertFeedbackRow.tenant_id)
+                    & (M.AlertRow.event_id == M.AlertFeedbackRow.event_id))
+         .outerjoin(M.ReportRow,
+                    (M.ReportRow.tenant_id == M.AlertFeedbackRow.tenant_id)
+                    & (M.ReportRow.investigation_id == M.AlertRow.investigation_id))
+         .filter(M.AlertFeedbackRow.tenant_id == tenant_id)
+         .order_by(M.AlertFeedbackRow.created_at))
+    out: list[dict[str, Any]] = []
+    for fb, alert, report in q.all():
+        out.append({
+            "event_id": fb.event_id,
+            "kind": fb.kind,
+            "note": fb.note,
+            "created_at": fb.created_at,
+            "investigation_id": alert.investigation_id if alert else "",
+            "alert_state": alert.state if alert else None,
+            "agent_disposition": report.disposition if report else None,
+            "agent_confidence": report.confidence if report else None,
+        })
+    return out
+
+
+def set_alert_state(session: Session, *, tenant_id: str, event_id: str,
+                    to_state: str, reason: str) -> dict[str, Any] | None:
+    """把告警状态改为 `to_state` 并追加审计历史。**不做合法性校验**——由调用方
+    （服务层，持有状态转移表）判断后再调用。返回更新后的行 dict；无此告警返回
+    None（跨租户亦不可见）。"""
+    row = session.get(M.AlertRow, (tenant_id, event_id))
+    if row is None:
+        return None
+    frm = row.state
+    row.state = to_state
+    row.event_revision = int(row.event_revision or 1) + 1
+    hist = list(row.history or [])
+    hist.append({"from": frm, "to": to_state, "reason": reason,
+                 "at": M._now(), "revision": row.event_revision})
+    row.history = hist
+    session.flush()
+    return _row_dict(row)
+
+
 # ---------------------------------------------------------------- 遥测事件
 
 def save_telemetry(session: Session, events: list[Any], *, tenant_id: str) -> int:
@@ -352,3 +427,188 @@ def list_telemetry(session: Session, *, tenant_id: str,
         q = q.filter(M.TelemetryEventRow.device_sn == device_sn)
     q = q.order_by(M.TelemetryEventRow.created_at)
     return [_row_dict(r) for r in q.all()]
+
+
+# ---------------------------------------------------------------- 用户知识文档
+
+def save_knowledge_document(session: Session, *, tenant_id: str,
+                            meta: dict[str, Any],
+                            chunks: list[dict[str, Any]]) -> None:
+    """写入一份用户导入文档及其切片（**幂等**：同 document_id 覆盖）。
+
+    内容寻址：document_id 由内容哈希派生，同内容重复导入 → 同 id。先删该文档
+    的旧切片再写新切片——避免改版内容残留旧块（与"覆盖"语义一致）。
+    """
+    doc_id = meta["document_id"]
+    row = session.get(M.KnowledgeDocumentRow, (tenant_id, doc_id))
+    if row is None:
+        row = M.KnowledgeDocumentRow(tenant_id=tenant_id, document_id=doc_id)
+        session.add(row)
+    row.source_name = meta.get("source_name", "")
+    row.content_sha256 = meta.get("content_sha256", "")
+    row.char_count = int(meta.get("char_count", 0))
+    row.chunk_count = len(chunks)
+    # 覆盖语义：先清旧块
+    (session.query(M.KnowledgeChunkRow)
+     .filter(M.KnowledgeChunkRow.tenant_id == tenant_id,
+             M.KnowledgeChunkRow.document_id == doc_id)
+     .delete(synchronize_session=False))
+    for c in chunks:
+        session.add(M.KnowledgeChunkRow(
+            tenant_id=tenant_id, chunk_id=c["chunk_id"], document_id=doc_id,
+            ordinal=int(c.get("ordinal", 0)), text=c.get("text", "")))
+    session.flush()
+
+
+def list_knowledge_documents(session: Session, *, tenant_id: str
+                             ) -> list[dict[str, Any]]:
+    q = (session.query(M.KnowledgeDocumentRow)
+         .filter(M.KnowledgeDocumentRow.tenant_id == tenant_id)
+         .order_by(M.KnowledgeDocumentRow.created_at, M.KnowledgeDocumentRow.document_id))
+    return [_row_dict(r) for r in q.all()]
+
+
+def get_knowledge_document(session: Session, document_id: str, *,
+                           tenant_id: str) -> dict[str, Any] | None:
+    r = session.get(M.KnowledgeDocumentRow, (tenant_id, document_id))
+    return _row_dict(r) if r else None
+
+
+def list_knowledge_chunks(session: Session, *, tenant_id: str,
+                          document_id: str | None = None) -> list[dict[str, Any]]:
+    """取本租户的切片（可按文档过滤）。检索在内存里做——用户文档量级不大，
+    且词法打分需要看全文，不做 DB 侧 LIKE（分词/大小写在各库上不一致）。"""
+    q = session.query(M.KnowledgeChunkRow).filter(
+        M.KnowledgeChunkRow.tenant_id == tenant_id)
+    if document_id is not None:
+        q = q.filter(M.KnowledgeChunkRow.document_id == document_id)
+    q = q.order_by(M.KnowledgeChunkRow.document_id, M.KnowledgeChunkRow.ordinal)
+    return [_row_dict(r) for r in q.all()]
+
+
+def delete_knowledge_document(session: Session, document_id: str, *,
+                              tenant_id: str) -> bool:
+    """删一份文档及其切片（租户内）。返回是否存在并删除。"""
+    row = session.get(M.KnowledgeDocumentRow, (tenant_id, document_id))
+    if row is None:
+        return False
+    (session.query(M.KnowledgeChunkRow)
+     .filter(M.KnowledgeChunkRow.tenant_id == tenant_id,
+             M.KnowledgeChunkRow.document_id == document_id)
+     .delete(synchronize_session=False))
+    session.delete(row)
+    session.flush()
+    return True
+
+
+# ---------------------------------------------------------------- 调查任务（G1）
+
+# job 的终态：到达后不可再变（防止取消与完成互相覆盖）
+_JOB_TERMINAL = frozenset({"succeeded", "failed", "cancelled"})
+
+
+def create_job(session: Session, *, tenant_id: str, job_id: str,
+               candidate_id: str) -> dict[str, Any]:
+    """写入一条 `pending` job。主键 (tenant_id, job_id)，重复提交同 id → 幂等更新。"""
+    row = session.get(M.InvestigationJobRow, (tenant_id, job_id))
+    if row is None:
+        row = M.InvestigationJobRow(tenant_id=tenant_id, job_id=job_id)
+        session.add(row)
+    row.candidate_id = candidate_id
+    row.status = "pending"
+    row.report_id = None
+    row.error_code = None
+    row.worker_id = ""
+    row.submitted_at = M._now()
+    row.started_at = None
+    row.finished_at = None
+    session.flush()
+    return _row_dict(row)
+
+
+def get_job(session: Session, job_id: str, *,
+            tenant_id: str) -> dict[str, Any] | None:
+    """取单个 job。跨租户（或不存在）→ None（路由返回 404）。"""
+    r = session.get(M.InvestigationJobRow, (tenant_id, job_id))
+    return _row_dict(r) if r else None
+
+
+def list_jobs(session: Session, *, tenant_id: str,
+              status: str | None = None,
+              limit: int | None = None,
+              offset: int = 0) -> list[dict[str, Any]]:
+    q = session.query(M.InvestigationJobRow).filter(
+        M.InvestigationJobRow.tenant_id == tenant_id)
+    if status is not None:
+        q = q.filter(M.InvestigationJobRow.status == status)
+    q = q.order_by(M.InvestigationJobRow.submitted_at, M.InvestigationJobRow.job_id)
+    return _page(q, limit, offset)
+
+
+def count_jobs_by_status(session: Session, *, tenant_id: str | None = None
+                         ) -> dict[str, int]:
+    """按 status 分组计数（不拉全表）。tenant_id=None → 全局（/metrics 用）。"""
+    q = session.query(M.InvestigationJobRow.status, func.count())
+    if tenant_id is not None:
+        q = q.filter(M.InvestigationJobRow.tenant_id == tenant_id)
+    q = q.group_by(M.InvestigationJobRow.status)
+    return {s: int(n) for s, n in q.all()}
+
+
+def claim_job(session: Session, job_id: str, *, tenant_id: str,
+              worker_id: str) -> bool:
+    """把 `pending` job 原子地置为 `running` 并记 worker_id。返回是否领取成功。
+
+    用一条 `UPDATE ... WHERE status='pending'` 的**条件更新**做原子领取：数据库
+    保证并发的两个 worker 只有一个的 WHERE 命中（rowcount=1），另一个 0 行 →
+    返回 False。这比先 SELECT 再 UPDATE 安全（后者在竞态下两个都以为自己是首个）。
+    """
+    res = (session.query(M.InvestigationJobRow)
+           .filter(M.InvestigationJobRow.tenant_id == tenant_id,
+                   M.InvestigationJobRow.job_id == job_id,
+                   M.InvestigationJobRow.status == "pending")
+           .update({"status": "running", "worker_id": worker_id,
+                    "started_at": M._now()}, synchronize_session=False))
+    session.flush()
+    return bool(res)
+
+
+def finish_job(session: Session, job_id: str, *, tenant_id: str,
+               status: str, report_id: str | None = None,
+               error_code: str | None = None) -> bool:
+    """把 job 置为终态（succeeded/failed）。已是终态 → 返回 False（不覆盖）。
+
+    **只有 running 才能到 succeeded/failed**：防止"取消后 worker 才跑完也想写成功"
+    把 cancelled 覆盖回 succeeded（取消是协作式的，见 investigation_jobs 注释）。
+    """
+    if status not in _JOB_TERMINAL:
+        raise ValueError(f"非法终态: {status!r}")
+    expected = "running"
+    res = (session.query(M.InvestigationJobRow)
+           .filter(M.InvestigationJobRow.tenant_id == tenant_id,
+                   M.InvestigationJobRow.job_id == job_id,
+                   M.InvestigationJobRow.status == expected)
+           .update({"status": status, "report_id": report_id,
+                    "error_code": error_code, "finished_at": M._now()},
+                   synchronize_session=False))
+    session.flush()
+    return bool(res)
+
+
+def cancel_job(session: Session, job_id: str, *, tenant_id: str) -> str | None:
+    """请求取消 job。返回取消后的状态，或 None（跨租户/不存在）。
+
+    - `pending` → 直接置 `cancelled`（worker 不会再领走它）。
+    - `running` → 置 `cancelled`（协作式：worker 在步边界看到后停止）；
+      注意此时 report 可能已写，故 worker 侧以 job 是否仍为 running 决定要不要提交产物。
+    - 已终态 → 原样返回当前状态（不改）。
+    """
+    row = session.get(M.InvestigationJobRow, (tenant_id, job_id))
+    if row is None:
+        return None
+    if row.status in _JOB_TERMINAL:
+        return row.status
+    row.status = "cancelled"
+    row.finished_at = M._now()
+    session.flush()
+    return row.status

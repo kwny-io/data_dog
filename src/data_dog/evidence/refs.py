@@ -151,6 +151,14 @@ class EvidenceResolver:
         self.ttl_seconds = ttl_seconds
         self._clock = clock or (lambda: 0.0)
 
+    def replace_source(self, scheme: str, fn: SourceFn) -> None:
+        """替换某 scheme 的数据源（把内置 mock 源换成真实源）。
+
+        典型用法：服务层构造好一个按租户/落库数据反查的 `metricwin` 源后，替换掉
+        默认的占位源——解析、权限、完整性、有效期等逻辑完全不变，只换"去哪取数"。
+        """
+        self._sources[scheme] = fn
+
     def resolve(self, raw: str, *, issued_at: float | None = None,
                 expected_digest: str | None = None) -> dict[str, Any]:
         """解析单个引用，返回统一成功/失败结构。
@@ -213,13 +221,55 @@ def _metricwin_source(authority: str, path: list[str]) -> tuple[bool, Any]:
     mock 环境没有候选索引，这里从候选 id 无法反查部件，因此返回
     一个**结构化占位**并标注 not_indexed，而不是编造指标。
 
-    真实部署应注入一个能按 candidate_id 查回 (component, window, metrics) 的源。
+    真实部署用 `make_candidate_metricwin_source(lookup)` 注入能按 candidate_id
+    反查 (component, window, evidence) 的源，替换掉本占位函数。
     """
     if not authority.startswith("cand_"):
         return False, None
     return True, {"candidate_id": authority,
                   "indexed": False,
                   "note": "mock 源未建立候选索引；接真实 Candidate Store 后返回指标窗口"}
+
+
+def make_candidate_metricwin_source(
+        lookup: Callable[[str], dict[str, Any] | None]) -> SourceFn:
+    """构造一个**按候选 id 反查真实指标窗口**的 metricwin 源。
+
+    `lookup(candidate_id)` 返回候选行 dict（含 `component_ref` / `window_start` /
+    `window_end` / `evidence` / `evidence_refs` 等），或 None（不存在）。服务层把
+    落库的 `candidates` 表接进来即可，本模块**不直接依赖仓储层**（保持 evidence
+    包对存储无关）。
+
+    返回的 payload 是**候选索引的真实内容**（不再是 `not_indexed` 占位）：
+    Agent / 审计方拿到 `metricwin://<candidate_id>` 能读回该候选的部件、窗口与证据摘要。
+
+    `authority` 前缀校验沿用 `cand_`：非候选引用不归本源管，返回 not_found 交由
+    其它源处理（避免把任意 authority 都当候选查）。
+    """
+    def _src(authority: str, path: list[str]) -> tuple[bool, Any]:
+        if not authority.startswith("cand_"):
+            return False, None
+        row = lookup(authority)
+        if row is None:
+            return False, None
+        return True, {
+            "candidate_id": authority,
+            "indexed": True,
+            "device_sn": row.get("device_sn", ""),
+            "component_ref": row.get("component_ref", ""),
+            "signal": row.get("signal", ""),
+            "severity_hint": row.get("severity_hint", ""),
+            "window": {"start": row.get("window_start", ""),
+                       "end": row.get("window_end", "")},
+            "sample_count": int(row.get("sample_count", 0)),
+            "rule_matches": list(row.get("rule_matches", [])),
+            "anomaly_score": float(row.get("anomaly_score", 0.0)),
+            "evidence": list(row.get("evidence", [])),
+            "evidence_refs": list(row.get("evidence_refs", [])),
+            "detector_provenance": row.get("detector_provenance", ""),
+        }
+
+    return _src
 
 
 def _rawlog_source(authority: str, path: list[str]) -> tuple[bool, Any]:

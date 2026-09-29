@@ -88,6 +88,25 @@ def test_report_roundtrip(db_url):
     assert rows[0]["recommended_actions"] == ["降载"]
 
 
+def test_report_roundtrip_preserves_risk_window_and_links(db_url):
+    """回归：`risk_window` / `counter_evidence_refs` / `linked_candidate_refs`
+    曾被 `save_report` 静默丢弃（表无列）。守住这三项往返不丢。"""
+    rep = InvestigationReport(
+        investigation_id="inv_2", disposition="confirmed", confidence=0.8,
+        summary="s", risk_window="24 小时内检查",
+        counter_evidence_refs=["evidence://cand_2/torque"],
+        linked_candidate_refs=["cand_2", "cand_3"],
+    )
+    with session_scope(db_url) as s:
+        repo.save_report(s, rep, tenant_id=T1)
+    with session_scope(db_url) as s:
+        got = repo.get_report(s, "inv_2", tenant_id=T1)
+    assert got is not None
+    assert got["risk_window"] == "24 小时内检查"
+    assert got["counter_evidence_refs"] == ["evidence://cand_2/torque"]
+    assert got["linked_candidate_refs"] == ["cand_2", "cand_3"]
+
+
 # ---------------------------------------------------------------- Alert + Outbox
 
 def test_alert_roundtrip(db_url):
