@@ -22,11 +22,24 @@
 |---|---|---|
 | `/healthz` | GET | **存活探针**：进程活着就 200，不查依赖 |
 | `/readyz` | GET | **就绪探针**：探数据库连通；不通 → 503 |
-| `/metrics` | GET | 进程内指标（计数，JSON） |
+| `/metrics` | GET | 进程内指标（计数，JSON；全局口径不分租户） |
 | `/v1/telemetry` | POST | 接入原始日志 → 候选异常 → 落库 |
+| `/v1/summary` | GET | 聚合：候选 / 告警按状态 / 出箱各计数 |
 | `/v1/candidates` | GET | 查已落库候选（可按设备/部件过滤） |
+| `/v1/candidates/{id}` | GET | 候选项详情 |
+| `/v1/candidates/{id}/evidence` | GET | Agent 所见证据 |
+| `/v1/candidates/{id}/refs` | GET | 结论所挂证据引用 |
 | `/v1/alerts` | GET | 查告警 |
 | `/v1/outbox` | GET | 查待投递队列 |
+| `/v1/reports` | GET | 分页列历史报告 |
+| `/v1/investigations` | POST | 对候选跑 Agent 调查 → 持久化报告（**同步、走 LLM**，不在热路径） |
+| `/v1/investigations/{id}` | GET | 读持久化报告 |
+| `/v1/feedback` | POST | 人工反馈 → 驱动告警状态机 |
+| `/v1/alerts/{id}/feedback` | GET | 读告警反馈历史 |
+| `/v1/eval/feedback` | GET | 反馈回灌：一致率 / 误报率 / 漏报率 |
+| `/v1/knowledge/documents` | POST/GET | 导入 / 列出用户厂商文档 |
+| `/v1/knowledge/search` | GET | 词法检索文档切片 |
+| `/v1/knowledge/documents/{id}` | DELETE | 删除文档及切片 |
 
 ### 存活 vs 就绪，为什么要分开
 
@@ -161,7 +174,7 @@ curl "http://127.0.0.1:8000/v1/candidates?device_sn=device-go2-0001"
 
 ## 7. 回归测试
 
-`tests/test_service.py` 覆盖 11 项：存活/就绪探针、指标、鉴权失败关闭、接入→候选→落库、**正文身份被忽略**、固件不匹配失败关闭、查询过滤、批量上限、重复接入幂等。
+`tests/test_service.py` 覆盖 77 项：存活/就绪探针、指标、鉴权失败关闭、接入→候选→落库、**正文身份被忽略**、固件不匹配失败关闭、查询过滤、批量上限、重复接入幂等；外加多租户隔离（缺租户头 401、跨租户 404、`?tenant_id=` 被忽略）、调查端点、P3 告警落库接线、反馈回灌分类、用户文档导入与检索。
 
 ```bash
 pytest tests/test_service.py -q

@@ -10,7 +10,7 @@
 **同一份代码，本地用 SQLite（零安装），生产用 PostgreSQL；改一个连接串即可，代码不动。**
 
 ```bash
-pytest tests/test_storage.py -q     # 10 项
+pytest tests/test_storage.py -q     # 13 项
 ```
 
 ---
@@ -33,19 +33,26 @@ pytest tests/test_storage.py -q     # 10 项
 | 文件 | 职责 |
 |---|---|
 | `db.py` | 引擎/会话管理、`Base`、`init_db`；`DD_DATABASE_URL` 决定连接串 |
-| `models.py` | ORM 表（6 张，见下） |
-| `repository.py` | 仓储层：领域对象 ↔ 行的转换、幂等 upsert、查询 |
+| `models.py` | ORM 表（8 张，见下） |
+| `repository.py` | 仓储层：领域对象 ↔ 行的转换、幂等 upsert、查询（**所有方法强制 `tenant_id`**） |
+| `migrations.py` | alembic 迁移封装；启动走 `upgrade_head` |
 
 ### 表
 
-| 表 | 内容 | 来源 |
-|---|---|---|
-| `telemetry_events` | 规范化遥测事件 | P2 |
-| `candidates` | 候选异常（§12.3） | P2 |
-| `reports` | 调查报告（§12.4） | Agent |
-| `alerts` | 正式事件（§12.5） | P3 |
-| `alert_outbox` | 上报 outbox（幂等，要求持久） | P3 |
-| `alert_feedback` | 人工/维修反馈 | P3 |
+| 表 | 内容 | 来源 | 主键 |
+|---|---|---|---|
+| `telemetry_events` | 规范化遥测事件 | P2 | `telemetry_id` |
+| `candidates` | 候选异常（§12.3） | P2 | `(tenant_id, candidate_id)` |
+| `reports` | 调查报告（§12.4） | Agent | `(tenant_id, investigation_id)` |
+| `alerts` | 正式事件（§12.5） | P3 | `(tenant_id, event_id)` |
+| `alert_outbox` | 上报 outbox（幂等，要求持久） | P3 | `(tenant_id, idempotency_key, revision)` |
+| `alert_feedback` | 人工/维修反馈 | P3 | `(tenant_id, id)` |
+| `knowledge_documents` | 用户导入的厂商文档元数据 | A7 | `(tenant_id, document_id)` |
+| `knowledge_chunks` | 文档切片文本 | A7 | `(tenant_id, chunk_id)` |
+
+**多租户**：`tenant_id` 进复合主键——确定性 ID（如 `cand_<hash(device_sn|...)>`）会让两个租户同 `device_sn` 撞同一 PK，`_upsert` 就会静默覆盖他人数据。把租户纳入主键是**正确性要求**，不是可选的过滤列。
+
+**数据库强制层（PostgreSQL RLS）**：迁移 `a7b8c9d0e1f2` 对租户表启用 `ROW LEVEL SECURITY` + 策略（`USING`/`WITH CHECK (tenant_id = current_setting('app.tenant_id', true))`）；会话通过 `set_config('app.tenant_id', :t, true)`（事务作用域、绑定参数）注入租户。两条硬边界：**superuser / 表属主默认绕过 RLS** → 生产须用非属主、非 superuser 角色；未设 `app.tenant_id` → 谓词为 NULL → **零行**（失败关闭）。SQLite 无 RLS，本地开发靠上面的应用层隔离。真库验证见 `tests/test_storage_postgres.py`。
 
 **设计取舍**：多态字段（metrics / evidence / hypotheses / history）用 **JSON**（PostgreSQL 为 JSONB，SQLite 存 JSON 文本），关键字段单独建列 + 索引，避免过早拆表。
 
@@ -59,10 +66,10 @@ from data_dog.storage import repository as repo
 
 init_db()                                  # 建表（幂等）
 with session_scope() as s:
-    repo.save_candidates(s, candidates)    # 幂等 upsert
-    repo.upsert_outbox(s, idempotency_key="dev:thermal:e1", revision=1, payload={...})
+    repo.save_candidates(s, candidates, tenant_id="t1")    # 幂等 upsert
+    repo.upsert_outbox(s, tenant_id="t1", idempotency_key="dev:thermal:e1", revision=1, payload={...})
 with session_scope() as s:                 # 新会话（模拟重启）
-    print(repo.list_candidates(s, device_sn="dev-go2-0001"))
+    print(repo.list_candidates(s, tenant_id="t1", device_sn="dev-go2-0001"))
 ```
 
 ---
@@ -91,7 +98,7 @@ postgresql+psycopg://user:pw@host:5432/data_dog        # 生产
 ## 6. 安全
 
 - **无字符串拼接 SQL**：全部走 ORM 的 `session.get` / `session.query` / 绑定参数；
-- 幂等写：按主键 / 复合主键 upsert，重复保存不产生重复记录（`alert_outbox` 用 `(幂等键, revision)` 复合主键强制去重）。
+- 幂等写：按主键 / 复合主键 upsert，重复保存不产生重复记录（`alert_outbox` 用 `(tenant_id, 幂等键, revision)` 复合主键强制去重）。
 
 ---
 
