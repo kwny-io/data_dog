@@ -195,6 +195,7 @@ def _stop_job_runner() -> None:
     if runner is None:
         return
     runner.stop()
+    _set_job_runner(None)
 
 
 def _run_investigation_job(tenant_id: str, candidate_id: str,
@@ -207,7 +208,9 @@ def _run_investigation_job(tenant_id: str, candidate_id: str,
       - 失败 → failed + 有限错误码
     """
     started = time.monotonic()
-    status, report_id, error_code = "failed", None, "execution_failed"
+    status: str = "failed"
+    report_id: str | None = None
+    error_code: str | None = "execution_failed"
     try:
         outcome = _execute_investigation(
             tenant_id, candidate_id, should_cancel=should_cancel)
@@ -808,6 +811,63 @@ def create_app() -> FastAPI:
                 "limit": limit, "offset": offset,
                 "has_more": offset + len(rows) < total, "items": rows}
 
+    # 注意：`/v1/investigations/jobs*` **必须**注册在
+    # `/v1/investigations/{investigation_id}` 之前——否则后者会把 "jobs" 当成
+    # 一个 investigation_id 吃掉（FastAPI 按注册顺序匹配，先注册的优先）。
+    @app.get("/v1/investigations/jobs", tags=["investigate"])
+    def list_investigation_jobs(
+        x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
+        status: str | None = Query(default=None),
+        limit: int = Query(default=_DEFAULT_PAGE_SIZE, ge=1, le=_MAX_PAGE_SIZE),
+        offset: int = Query(default=0, ge=0),
+    ) -> dict[str, Any]:
+        """分页列出本租户的异步调查 job（可按 status 过滤）。"""
+        tenant = _tenant_required(x_tenant_id)
+        with session_scope() as s:
+            rows = repo.list_jobs(s, tenant_id=tenant, status=status,
+                                  limit=limit, offset=offset)
+            total = repo.count_rows(s, M.InvestigationJobRow, tenant_id=tenant)
+        return {"ok": True, "count": len(rows), "total": total,
+                "limit": limit, "offset": offset,
+                "has_more": offset + len(rows) < total,
+                "items": [_job_public(r) for r in rows]}
+
+    @app.get("/v1/investigations/jobs/{job_id}", tags=["investigate"])
+    def get_investigation_job(
+        job_id: str,
+        x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
+    ) -> dict[str, Any]:
+        """查异步调查 job 的状态（跨租户 → 404）。
+
+        status ∈ pending/running/succeeded/failed/cancelled。succeeded 时 `report_id`
+        可拿去 `GET /v1/investigations/{report_id}` 读完整报告。
+        """
+        tenant = _tenant_required(x_tenant_id)
+        with session_scope() as s:
+            job = repo.get_job(s, job_id, tenant_id=tenant)
+        if job is None:
+            raise HTTPException(status_code=404, detail="调查任务不存在")
+        return {"ok": True, "job": _job_public(job)}
+
+    @app.post("/v1/investigations/jobs/{job_id}/cancel", tags=["investigate"])
+    def cancel_investigation_job(
+        job_id: str,
+        x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
+    ) -> dict[str, Any]:
+        """请求取消异步调查 job（跨租户 → 404）。
+
+        **协作式**：pending 的直接取消；running 的置 cancelled，worker 在下一个
+        provider 调用边界停止（已发出的 LLM 调用要等它返回），故报告可能已落库——
+        以 job 的最终状态为准。已终态的任务原样返回，不改。
+        """
+        tenant = _tenant_required(x_tenant_id)
+        with session_scope() as s:
+            new_status = repo.cancel_job(s, job_id, tenant_id=tenant)
+            job = repo.get_job(s, job_id, tenant_id=tenant)
+        if new_status is None or job is None:
+            raise HTTPException(status_code=404, detail="调查任务不存在")
+        return {"ok": True, "job": _job_public(job)}
+
     @app.get("/v1/investigations/{investigation_id}", tags=["query"])
     def get_investigation(
         investigation_id: str,
@@ -856,62 +916,6 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=outcome["http_status"],
                                 detail=outcome["detail"])
         return outcome["response"]
-
-    # ------------------------------------------------ 异步 job（G1）
-
-    @app.get("/v1/investigations/jobs/{job_id}", tags=["investigate"])
-    def get_investigation_job(
-        job_id: str,
-        x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
-    ) -> dict[str, Any]:
-        """查异步调查 job 的状态（跨租户 → 404）。
-
-        status ∈ pending/running/succeeded/failed/cancelled。succeeded 时 `report_id`
-        可拿去 `GET /v1/investigations/{report_id}` 读完整报告。
-        """
-        tenant = _tenant_required(x_tenant_id)
-        with session_scope() as s:
-            job = repo.get_job(s, job_id, tenant_id=tenant)
-        if job is None:
-            raise HTTPException(status_code=404, detail="调查任务不存在")
-        return {"ok": True, "job": _job_public(job)}
-
-    @app.get("/v1/investigations/jobs", tags=["investigate"])
-    def list_investigation_jobs(
-        x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
-        status: str | None = Query(default=None),
-        limit: int = Query(default=_DEFAULT_PAGE_SIZE, ge=1, le=_MAX_PAGE_SIZE),
-        offset: int = Query(default=0, ge=0),
-    ) -> dict[str, Any]:
-        """分页列出本租户的异步调查 job（可按 status 过滤）。"""
-        tenant = _tenant_required(x_tenant_id)
-        with session_scope() as s:
-            rows = repo.list_jobs(s, tenant_id=tenant, status=status,
-                                  limit=limit, offset=offset)
-            total = repo.count_rows(s, M.InvestigationJobRow, tenant_id=tenant)
-        return {"ok": True, "count": len(rows), "total": total,
-                "limit": limit, "offset": offset,
-                "has_more": offset + len(rows) < total,
-                "items": [_job_public(r) for r in rows]}
-
-    @app.post("/v1/investigations/jobs/{job_id}/cancel", tags=["investigate"])
-    def cancel_investigation_job(
-        job_id: str,
-        x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
-    ) -> dict[str, Any]:
-        """请求取消异步调查 job（跨租户 → 404）。
-
-        **协作式**：pending 的直接取消；running 的置 cancelled，worker 在下一个
-        provider 调用边界停止（已发出的 LLM 调用要等它返回），故报告可能已落库——
-        以 job 的最终状态为准。已终态的任务原样返回，不改。
-        """
-        tenant = _tenant_required(x_tenant_id)
-        with session_scope() as s:
-            new_status = repo.cancel_job(s, job_id, tenant_id=tenant)
-            job = repo.get_job(s, job_id, tenant_id=tenant)
-        if new_status is None or job is None:
-            raise HTTPException(status_code=404, detail="调查任务不存在")
-        return {"ok": True, "job": _job_public(job)}
 
     # -------------------------------------------------- 反馈（P3 闭环回灌）
 
