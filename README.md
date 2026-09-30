@@ -13,7 +13,7 @@
 | | 亮点 | 证据 |
 |---|---|---|
 | 🔗 | **全链闭环，一条命令跑通** | 厂商文档 →[P1]→ 算子 →[P2]→ 候选 →[Agent]→ 报告 →[P3]→ 策略门 → SaaS 反馈，`python -m data_dog.e2e.replay_demo` |
-| 🧪 | **348 个测试全绿，全离线确定性** | `pytest -q` → `348 passed, 4 skipped`（30 个测试文件，fake provider，无需 API Key、不联网） |
+| 🧪 | **631 个测试全绿，全离线确定性** | `pytest -q` → `626 passed, 5 skipped`（50 个测试文件，fake provider，无需 API Key、不联网） |
 | 🔒 | **热路径确定性：上报不交给模型判断** | 上不上报由**确定性策略门**（四条件决策表 + 冲突消解）决定，同输入永远同结论；模型只出现在"调查报告"那一步 |
 | 🧱 | **不拿 `eval` 执行厂商字符串** | 自建**受限 DSL**：词法 → AST 解释器，无动态执行原语、函数闭集白名单、编译期类型检查 |
 | 🔍 | **诚实抽取，区分"能证实 / 待确认"** | 官方 SDK 头文件明写电机 **90°C 触发保护** → `verified`；无出处的 75°C → `unconfirmed`，**不冒充厂商事实** |
@@ -23,7 +23,7 @@
 | 📊 | **带 ground truth 的量化评估** | 合成 + MuJoCo 双数据源各 **6/6**；7 个评估 case 含 **2 个对抗性**（提示注入 / 身份伪装） |
 | 🚚 | **能交付：服务 + 容器 + HTTPS** | FastAPI（liveness / readiness 分离）+ Dockerfile + compose（含 Caddy 自动申请 HTTPS）+ Makefile |
 
-**规模**：源码 96 个 Python 文件 / 13830 行，测试 30 个文件 / 5198 行；前端 `web/` 为 Next.js 15 控制台（61 个 TS/TSX 文件）；5 份正式事件 JSON Schema；19 个 `make` 命令。
+**规模**：源码 118 个 Python 文件 / 20664 行，测试 50 个文件 / 9299 行；前端 `web/` 为 Next.js 15 控制台（52 个 TS/TSX 文件）；5 份正式事件 JSON Schema；23 个 `make` 命令。
 
 ---
 
@@ -32,7 +32,7 @@
 - **遥测接入支持真实流**，但**默认不开启**。`src/data_dog/stream/` 提供四种传输的流式源：**文件/日志尾随**（标准库，机器人本机日志最真实）、**HTTP 推送**（标准库）、**MQTT**、**Kafka**（后两者需可选依赖 `.[mqtt]` / `.[kafka]`）。配 `DD_STREAM_ENABLED=1` + `DD_STREAM_SOURCE=...` 即启用，走与 HTTP 入口**同一条**数据面。默认关闭是因为演示/CI 环境没有真实设备——**不是做不到**。评估集的证据仍来自 mock / 合成 / MuJoCo（可复现），故"真实误报率"仍需真实数据回灌才能定论。
 - **多租户已加数据库强制层（PostgreSQL RLS）**。应用层：`tenant_id` 进复合主键、仓储强制过滤、跨租户读 404；数据库层：迁移 `a7b8c9d0e1f2` 对 8 张租户表启用 `ROW LEVEL SECURITY` + 策略（`USING`/`WITH CHECK`）。**适用于 PostgreSQL**；SQLite 无 RLS，本地开发仍是应用层隔离（诚实边界）。另有两条必须知道的边界：**superuser 与表属主默认绕过 RLS** → 生产连接须用**非属主、非 superuser** 角色；未设 `app.tenant_id` → 谓词为 NULL → **零行**（失败关闭）。真库验证见 `tests/test_storage_postgres.py`（建非特权角色，裸 SQL 断言跨租户读写都被挡）。
 - **支持水平扩展**：有状态算子已**外置**到可插拔 `StateStore`（`mutate(key, fn)` 原子 RMW 原语）。后端：`memory`（默认，单副本正确）/ `postgres`（`state_kv` 表，行锁）/ `redis`（WATCH/MULTI/EXEC，需 `.[redis]`）。候选归并（`SharedCandidateBuilder`）与限流桶都在共享后端，故多副本归并/限流一致。**边界**：默认后端随数据库类型自动选（PG→postgres，否则 memory）；用 `DD_STATE_BACKEND` 显式指定；`DD_RATE_BACKEND` 可单独把限流切到 Redis（限流成热路径瓶颈时）。file/MQTT 源多副本会**重复消费**（Kafka 用消费者组、MQTT 用共享订阅主题可避免）。
-- **P4 大工程仍明确不做**：沙箱算子运行时、控制面（Registry / Canary / 回滚 / 签名）、真实多租户 SaaS 的控制面——这些需要团队与设施。
+- **P4 大工程八项已落地**（2026-09-29 重估后）：**P4-1 算子沙箱**、**P4-2 控制面**（Registry/Canary/回滚/签名）、**P4-3 通知/值班/升级 SLA**、**P4-4 K8s/Helm 编排**、**P4-5 车队级分片**、**P4-6 跨地域多活**（应用层）、**P4-7 退化趋势预测**、**P4-8 软实时基准**。各文档带**诚实边界**：硬实时 <1ms 仍为非目标（改述软实时）；多活 RPO>0（非同步复制）；沙箱在 Windows 无 seccomp（子进程 + 资源上限降级）；分片再平衡双读未实现（不声称 exactly-once）。设计见 `docs/p4/`。
 
 > 接真实设备时：走流式源（file/http/mqtt/kafka）或 HTTP `/v1/telemetry`，Agent / 工具逻辑不用改。
 
