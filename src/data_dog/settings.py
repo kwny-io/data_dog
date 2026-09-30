@@ -473,6 +473,43 @@ def canary_max_candidate_multiple() -> float:
     return _get_float("DD_CANARY_MAX_CANDIDATE_MULTIPLE", default=3.0)
 
 
+# ---------------------------------------------------------------- 退化趋势预测（P4-7）
+
+def forecast_horizon_h() -> float:
+    """预测视界（小时）：ETA 超过它不给数——外推越远越不可信。默认 24h。"""
+    return max(0.0, _get_float("DD_FORECAST_HORIZON_H", default=24.0))
+
+
+def forecast_min_conf() -> float:
+    """方向一致性门槛（0..1）：低于它不预测（宁缺勿猜）。默认 0.5。"""
+    return _get_float("DD_FORECAST_MIN_CONF", default=0.5)
+
+
+def forecast_min_samples() -> int:
+    """最少样本数：不足不预测。默认 6。"""
+    return max(1, _get_int("DD_FORECAST_MIN_SAMPLES", default=6))
+
+
+def forecast_thresholds() -> dict[str, float]:
+    """各信号的目标阈值，形如 `temperature:95,current:12`（逗号分隔的 `信号:阈值`）。
+
+    预测「到达该阈值」的 ETA；无阈值的信号不预测（没有目标就无从谈到达）。默认给
+    温度一个保守上限示例——真实阈值应随机型标定。
+    """
+    raw = _get("DD_FORECAST_THRESHOLDS", default="temperature:95")
+    out: dict[str, float] = {}
+    for part in raw.split(","):
+        if ":" not in part:
+            continue
+        k, _, v = part.partition(":")
+        k = k.strip()
+        try:
+            out[k] = float(v.strip())
+        except ValueError:
+            continue
+    return out
+
+
 # ---------------------------------------------------------------- 路径
 
 def project_root() -> str | None:

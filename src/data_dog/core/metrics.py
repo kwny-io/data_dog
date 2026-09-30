@@ -198,6 +198,30 @@ uptime_seconds = Gauge(
     registry=registry,
 )
 
+# ---------------------------------------------------------------- 退化趋势预测（P4-7）
+
+# 预测产出：outcome ∈ {predicted, no_eta}（no_eta=失败关闭，宁缺勿猜）。
+forecast_total = Counter(
+    "data_dog_forecast_total",
+    "退化趋势预测次数（按是否给出 ETA 分类）",
+    labelnames=("outcome",),
+    registry=registry,
+)
+
+# 预测置信度分布（方向一致性 0..1），用于观察预测质量
+forecast_confidence = Histogram(
+    "data_dog_forecast_confidence",
+    "退化趋势预测的置信度（方向一致性）",
+    buckets=(0.1, 0.3, 0.5, 0.7, 0.8, 0.9, 0.95, 1.0),
+    registry=registry,
+)
+
+
+def observe_forecast(has_eta: bool, confidence: float) -> None:
+    """记录一次预测：是否给出 ETA + 置信度。"""
+    forecast_total.labels(outcome="predicted" if has_eta else "no_eta").inc()
+    forecast_confidence.observe(max(0.0, min(1.0, confidence)))
+
 
 def observe_http(method: str, path: str, status: int, duration_s: float) -> None:
     """记录一次 HTTP 请求（path 必须是**路由模板**，不是实际 URL）。"""
