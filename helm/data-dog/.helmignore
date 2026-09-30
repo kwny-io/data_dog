@@ -1,0 +1,11 @@
+# Helm 打包时忽略的本地文件
+.DS_Store
+.git/
+.gitignore
+*.tmproj
+*.bak
+*.orig
+.idea/
+.vscode/
+# 本地覆盖值（含明文密钥）绝不进包
+values.local.yaml

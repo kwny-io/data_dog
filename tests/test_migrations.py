@@ -172,3 +172,47 @@ def test_downgrade_fails_closed_on_tenant_collision(db_path, monkeypatch):
     with pytest.raises(Exception) as ei:
         _downgrade(_url(db_path), _BASELINE)
     assert "无法降级" in str(ei.value) or "duplicate" in str(ei.value).lower()
+
+
+# ---------------------------------------------------------------- 命令行入口（K8s Job 用）
+
+def _head_revision() -> str:
+    """解析当前迁移链的单一 head（不硬编码——每次加迁移都改测试是脆弱做法）。
+
+    `upgrade head` 结束后 DB 的 current 必等于链上唯一的 head；若链上出现
+    **多头**（未 merge 的分叉），这里会因 `get_heads()` 返回多项而暴露。
+    """
+    from alembic.script import ScriptDirectory
+    heads = ScriptDirectory.from_config(
+        migrations.make_config("sqlite://")).get_heads()
+    assert len(heads) == 1, f"迁移链有多个 head（未 merge）: {heads}"
+    return heads[0]
+
+
+def test_cli_upgrade_is_idempotent(db_path, monkeypatch):
+    """`python -m data_dog.storage.migrations upgrade` 幂等：连跑两次都成功。"""
+    monkeypatch.setenv("DD_DATABASE_URL", _url(db_path))
+    assert migrations._main(["upgrade"]) == 0
+    assert migrations.current_revision(_url(db_path)) == _head_revision()
+    assert migrations._main(["upgrade"]) == 0           # 再跑一次不报错
+
+
+def test_cli_current_and_unknown(db_path, monkeypatch, capsys):
+    monkeypatch.setenv("DD_DATABASE_URL", _url(db_path))
+    migrations._main(["upgrade"])
+    capsys.readouterr()                                 # 丢掉 upgrade 的输出
+    assert migrations._main(["current"]) == 0
+    assert capsys.readouterr().out.strip() == _head_revision()
+    # 未知子命令 → 退出码 2（非 0，脚本能据此判失败）
+    assert migrations._main(["bogus"]) == 2
+
+
+def test_dockerfile_ships_migration_assets():
+    """镜像必须带 alembic.ini + alembic/——否则容器内既跑不了迁移 Job，
+    也做不了启动时的 DD_AUTO_MIGRATE（project_root 找不到 alembic.ini）。
+    这曾在 compose 上真实翻车：启动静默记'迁移失败'→ /readyz 永远未就绪。"""
+    dockerfile = migrations.project_root() / "Dockerfile"
+    text = dockerfile.read_text(encoding="utf-8")
+    assert "alembic.ini" in text, "Dockerfile 未 COPY alembic.ini"
+    assert "COPY alembic " in text or "COPY alembic/" in text, \
+        "Dockerfile 未 COPY alembic/（迁移脚本目录）"

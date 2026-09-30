@@ -283,6 +283,28 @@ def test_runner_survives_poll_error():
     assert runner.stats["poll_errors"] == 1     # 掉线被记数，未中断循环
 
 
+def test_runner_observes_consume_latency(plane_factory):
+    """落库后要记消费延迟（收到→落库完成）——否则积压不可观测（P4-8 §3.3）。"""
+    from data_dog.core import metrics
+
+    def hist_count():
+        fam = metrics.stream_consume_latency_seconds
+        return sum(s.value for m in fam.collect() for s in m.samples
+                   if s.name.endswith("_count"))
+
+    before = hist_count()
+    # 入队时刻设成"100ms 前"，保证观测到的是正延迟而非 0
+    past = time.monotonic() - 0.1
+    runner = StreamRunner(
+        plane_factory(),
+        _scripted_source([StreamMessage(
+            payload=json.loads(_raw_line("lat1")),
+            auth={"tenant_id": "t1", "device_sn": "d1"}, enqueued_at=past)]),
+        persist=lambda *a: None)
+    runner.run(stop=threading.Event(), poll_timeout=0.0, max_iters=2)
+    assert hist_count() == before + 1, "每次 flush 应观测一次消费延迟"
+
+
 # ---------------------------------------------------------------- 工厂
 
 def test_factory_builds_file_source(monkeypatch, tmp_path):
@@ -316,6 +338,38 @@ def test_factory_kafka_without_dep_is_clear_error(monkeypatch):
     monkeypatch.setenv("DD_STREAM_SOURCE", "kafka")
     with pytest.raises(RuntimeError, match="kafka-python"):
         build_source()
+
+
+def test_factory_file_multi_replica_fails_closed(monkeypatch, tmp_path):
+    """file 源 + 多副本 → 启动即失败（失败关闭），不静默重复消费。"""
+    f = tmp_path / "r.log"
+    f.write_text("")
+    monkeypatch.setenv("DD_STREAM_SOURCE", "file")
+    monkeypatch.setenv("DD_STREAM_FILE_PATH", str(f))
+    monkeypatch.setenv("DD_STREAM_SHARDS", "3")
+    with pytest.raises(RuntimeError, match="不支持多副本"):
+        build_source()
+
+
+def test_factory_http_multi_replica_fails_closed(monkeypatch):
+    """http 源同样无跨副本协调 → 多副本拒绝。"""
+    monkeypatch.setenv("DD_STREAM_SOURCE", "http")
+    monkeypatch.setenv("DD_STREAM_SHARDS", "2")
+    with pytest.raises(RuntimeError, match="不支持多副本"):
+        build_source()
+
+
+def test_factory_kafka_multi_replica_allowed(monkeypatch):
+    """kafka 靠消费者组 → 多副本放行（这里只验不因多副本被拒）。"""
+    monkeypatch.setenv("DD_STREAM_SOURCE", "kafka")
+    monkeypatch.setenv("DD_STREAM_SHARDS", "4")
+    try:
+        src = build_source()
+    except RuntimeError as e:
+        # 缺 kafka-python 依赖时的报错可以接受；**不能**是多副本拒绝
+        assert "不支持多副本" not in str(e)
+        return
+    assert src.name == "kafka"
 
 
 def _has(mod: str) -> bool:

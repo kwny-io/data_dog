@@ -34,6 +34,24 @@ _log = logging.getLogger("data_dog.stream")
 _PersistFn = Callable[[str, list[Any], list[Any]], None]
 
 
+def _metric_consume_latency(msgs: list[StreamMessage]) -> None:
+    """一批消息落库后，按"最早入队 → 现在"记消费延迟。
+
+    取最早一条：它代表本批最长等待（头部延迟），比取平均更能暴露积压。
+    桶内无产出（全部被拒）也记——被拒同样是"处理完成"，其延迟也应可见。
+    """
+    if not msgs:
+        return
+    stamps = [m.enqueued_at for m in msgs if m.enqueued_at]
+    if not stamps:
+        return
+    try:
+        from ..core import metrics
+        metrics.stream_consume_latency_seconds.observe(time.monotonic() - min(stamps))
+    except Exception:                                       # noqa: BLE001
+        pass
+
+
 def _metric_messages(source_name: str, n: int, source: Any) -> None:
     """记录收消息 + 队列丢弃（背压证据）；指标不可用时静默跳过。"""
     try:
@@ -140,7 +158,13 @@ class StreamRunner:
     # ---- 一批消息 ----
     def _drain(self, msgs: list[StreamMessage]) -> None:
         self.stats["messages"] += len(msgs)
+        now = time.monotonic()
         for msg in msgs:
+            # 源未打点（enqueued_at=0）时补当前时刻，保证消费延迟指标有基线可测；
+            # 源已打点则尊重源侧更准的"到达"时刻。
+            if not msg.enqueued_at:
+                msg = StreamMessage(payload=msg.payload, auth=msg.auth,
+                                    source=msg.source, enqueued_at=now)
             tenant = str((msg.auth or {}).get("tenant_id") or self._default_tenant)
             self._pending[tenant].append(msg)
         _metric_messages(self.source.name, len(msgs), self.source)
@@ -180,6 +204,8 @@ class StreamRunner:
                 self.stats["errors"] += 1
                 _log.error("流式落库失败", extra={
                     "error": f"{type(e).__name__}: {e}", "tenant_id": tenant})
+            # 消费延迟：本桶最早一条的入队时刻 → 此刻落库完成
+            _metric_consume_latency(msgs)
             self.stats["flushes"] += 1
 
     # ---- 主循环 ----

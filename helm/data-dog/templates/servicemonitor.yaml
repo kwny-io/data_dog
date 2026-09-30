@@ -1,0 +1,20 @@
+{{- if .Values.serviceMonitor.enabled }}
+# 需集群已装 Prometheus Operator（提供 ServiceMonitor CRD）。
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "data-dog.fullname" . }}
+  labels:
+    {{- include "data-dog.labels" . | nindent 4 }}
+    {{- with .Values.serviceMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "data-dog.selectorLabels" . | nindent 6 }}
+  endpoints:
+    - port: http
+      path: {{ .Values.serviceMonitor.path }}
+      interval: {{ .Values.serviceMonitor.interval }}
+{{- end }}

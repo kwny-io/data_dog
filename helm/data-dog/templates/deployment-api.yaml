@@ -1,0 +1,92 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "data-dog.fullname" . }}-api
+  labels:
+    {{- include "data-dog.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.api.replicas }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "data-dog.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: api
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0        # 先起新的、再下旧的（配合 /readyz 实现滚动不丢请求）
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        {{- include "data-dog.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: api
+      annotations:
+        # 配置变更即触发滚动：把 config/configmap 内容做校验和挂上去
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with .Values.api.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "data-dog.serviceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: api
+          image: {{ include "data-dog.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["python", "-m", "data_dog.service"]
+          ports:
+            - name: http
+              containerPort: 8000
+          envFrom:
+            {{- include "data-dog.envFrom" . | nindent 12 }}
+          {{- with .Values.api.extraEnv }}
+          env:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.api.probes.liveness.path }}
+              port: http
+            initialDelaySeconds: {{ .Values.api.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.api.probes.liveness.periodSeconds }}
+            timeoutSeconds: {{ .Values.api.probes.liveness.timeoutSeconds }}
+            failureThreshold: {{ .Values.api.probes.liveness.failureThreshold }}
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.api.probes.readiness.path }}
+              port: http
+            initialDelaySeconds: {{ .Values.api.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.api.probes.readiness.periodSeconds }}
+            timeoutSeconds: {{ .Values.api.probes.readiness.timeoutSeconds }}
+            failureThreshold: {{ .Values.api.probes.readiness.failureThreshold }}
+          resources:
+            {{- toYaml .Values.api.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false     # 应用需写 SQLite(本地)/临时目录，暂不锁只读
+            capabilities:
+              drop: ["ALL"]
+      {{- with .Values.api.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.api.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.api.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

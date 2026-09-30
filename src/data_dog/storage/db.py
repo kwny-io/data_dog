@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -42,6 +43,15 @@ def _default_sqlite_url() -> str:
 
 _engine: Engine | None = None
 _SessionLocal: sessionmaker | None = None
+# 保护 (_engine, _SessionLocal) 这对语义绑定的**一致**创建与清空。
+#
+# 真实踩到的故障：异步调查 worker 是后台线程，关停用 `stop(wait=False)` 不等其退出。
+# 于是在「上一测试收尾（monkeypatch 回滚了 DD_DATABASE_URL）→ 下一测试 reset_engine()
+# 之间」的空窗期，残留 worker 仍可能调 get_engine()：此时 env 为空 → 引擎落到**默认库**
+# data_dog.db，并把这份错误引擎写进全局单例 → 下一测试的 session_scope() 连到该空库，
+# 报随机的 `no such table`。根治靠测试侧排干线程（见 tests/conftest.py）；此处加锁是
+# **纵深防御**：保证并发创建/清空下不会出现 `_engine` 与 `_SessionLocal` 撕裂的状态。
+_engine_lock = threading.Lock()
 
 
 class Base(DeclarativeBase):
@@ -58,26 +68,31 @@ def get_engine(url: str | None = None) -> Engine:
     """获取（并缓存）引擎。传入 url 可覆盖（测试用内存库）。"""
     global _engine, _SessionLocal
     target = url or database_url()
-    if _engine is None or url is not None:
-        kwargs: dict[str, Any] = {"future": True}
-        if target.startswith("sqlite"):
-            # SQLite：允许跨线程 + 不要求严格类型
-            kwargs["connect_args"] = {"check_same_thread": False}
-            engine = create_engine(target, **kwargs)
-        else:
-            # PostgreSQL 等：连接池预检，防陈旧连接
-            kwargs["pool_pre_ping"] = True
-            engine = create_engine(target, **kwargs)
-        if url is not None:
-            return engine                      # 临时引擎（测试用，不缓存）
-        _engine = engine
-        _SessionLocal = sessionmaker(bind=_engine, expire_on_commit=False, future=True)
-    return _engine
+    if url is not None:
+        # 临时引擎：不缓存、不碰全局，无需持锁（无共享写）。
+        return _make_engine(target)
+    with _engine_lock:
+        if _engine is None:
+            engine = _make_engine(target)
+            _engine = engine
+            _SessionLocal = sessionmaker(
+                bind=engine, expire_on_commit=False, future=True)
+        return _engine
+
+
+def _make_engine(target: str) -> Engine:
+    kwargs: dict[str, Any] = {"future": True}
+    if target.startswith("sqlite"):
+        # SQLite：允许跨线程 + 不要求严格类型
+        kwargs["connect_args"] = {"check_same_thread": False}
+    else:
+        # PostgreSQL 等：连接池预检，防陈旧连接
+        kwargs["pool_pre_ping"] = True
+    return create_engine(target, **kwargs)
 
 
 def get_sessionmaker() -> sessionmaker:
-    if _SessionLocal is None:
-        get_engine()
+    get_engine()                     # 内部持锁；返回时 _SessionLocal 必已就绪
     assert _SessionLocal is not None
     return _SessionLocal
 
@@ -127,7 +142,8 @@ def init_db(url: str | None = None) -> None:
 def reset_engine() -> None:
     """清空缓存的引擎（测试切换数据库用）。"""
     global _engine, _SessionLocal
-    if _engine is not None:
-        _engine.dispose()
-    _engine = None
-    _SessionLocal = None
+    with _engine_lock:
+        if _engine is not None:
+            _engine.dispose()
+        _engine = None
+        _SessionLocal = None

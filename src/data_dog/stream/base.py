@@ -41,6 +41,9 @@ class StreamMessage:
     payload: dict[str, Any]
     auth: dict[str, Any] | None
     source: str = ""
+    # 消息进入消费循环的时刻（`time.monotonic()`），用于测消费延迟
+    # （收到 → 落库完成）。默认 0 表示"未打点"，此时不计消费延迟。
+    enqueued_at: float = 0.0
 
 
 class StreamSource(ABC):

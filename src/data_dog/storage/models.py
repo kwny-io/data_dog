@@ -272,3 +272,52 @@ class InvestigationJobRow(Base):
     submitted_at: Mapped[float] = mapped_column(Float, default=_now)
     started_at: Mapped[float | None] = mapped_column(Float, nullable=True)
     finished_at: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+
+class OperatorRegistryRow(Base):
+    """算子注册表（P4-2 控制面）：每个 (operator_id, version) 一行。
+
+    这是算子工厂从"demo"变"产品"的落点——版本化注册、签名、灰度、回滚的**持久化**。
+
+    - `state`：复用 `lifecycle.STATES`（Registered/Shadow/Canary/Active/…）。
+    - `dsl_hash`：`sha256(dsl_source)`，签名绑定的内容哈希（改一字节即验签失败）。
+    - `signature`：`{alg, key_id, sig, signed_at}`，验签通过方可注册（失败关闭）。
+    - `rollout`：`{stage, percent, shadow_of}`，canary 流量路由的依据。
+    - `metrics_snapshot`：最近一次门控指标（自动回滚看门狗读它判是否越限）。
+
+    `tenant_id` 进主键：与其余租户表一致（跨租户读 404）；RLS 迁移同步加策略。
+    """
+    __tablename__ = "operator_registry"
+
+    tenant_id: Mapped[str] = mapped_column(String(80), primary_key=True, index=True)
+    operator_id: Mapped[str] = mapped_column(String(120), primary_key=True)
+    version: Mapped[str] = mapped_column(String(40), primary_key=True)
+    state: Mapped[str] = mapped_column(String(30), index=True, default="Registered")
+    dsl_source: Mapped[str] = mapped_column(Text, default="")
+    dsl_hash: Mapped[str] = mapped_column(String(64), index=True, default="")
+    signature: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    rollout: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    metrics_snapshot: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[float] = mapped_column(Float, default=_now)
+    updated_at: Mapped[float] = mapped_column(Float, default=_now, onupdate=_now)
+
+
+class OperatorRolloutEventRow(Base):
+    """算子状态转移台账（P4-2，审计）。
+
+    每次 `transition/rollback/quarantine/canary` 落一行——回答"这个版本什么时候、
+    因何、由谁进的 Canary/被回滚"。与告警的 `history` JSON 不同，这里是**独立表**：
+    审计需按时间/操作人跨算子查询，JSON 数组做不到。
+    """
+    __tablename__ = "operator_rollout_event"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    # 事件保留代理主键（一个版本可有多条转移），租户只作普通列 + 索引。
+    tenant_id: Mapped[str] = mapped_column(String(80), index=True)
+    operator_id: Mapped[str] = mapped_column(String(120), index=True)
+    version: Mapped[str] = mapped_column(String(40), index=True)
+    from_state: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    to_state: Mapped[str] = mapped_column(String(30))
+    reason: Mapped[str] = mapped_column(Text, default="")
+    actor: Mapped[str] = mapped_column(String(120), default="")
+    at: Mapped[float] = mapped_column(Float, default=_now)

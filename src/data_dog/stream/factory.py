@@ -14,12 +14,30 @@ if TYPE_CHECKING:
     pass
 
 
+# 能安全多副本消费的源：kafka 靠消费者组、mqtt 靠共享订阅做跨副本协调。
+# file（单文件）/http（push 接收）无协调 → 只能单副本。
+_MULTI_REPLICA_SAFE = frozenset({"kafka", "mqtt"})
+
+
 def build_source(kind: str | None = None) -> StreamSource:
-    """按配置构造流式源。`kind` 缺省取 `DD_STREAM_SOURCE`。"""
+    """按配置构造流式源。`kind` 缺省取 `DD_STREAM_SOURCE`。
+
+    多副本安全自检（失败关闭，见 docs/p4/04_k8s_helm.md §3.3）：file 源**只能单副本**
+    （单文件无协调，多副本会各尾随一份 → 事件重复处理），配了 `DD_STREAM_SHARDS>1`
+    即**拒绝启动**并说明原因——宁可起不来，不要静默重复消费。
+    """
     kind = (kind or settings.stream_source()).lower()
     tenant = settings.stream_tenant()
     device = settings.stream_device_sn()
     dev_field = settings.stream_device_from_field()
+
+    shards = settings.stream_shards()
+    if shards > 1 and kind not in _MULTI_REPLICA_SAFE:
+        raise RuntimeError(
+            f"流式源 {kind!r} 不支持多副本（DD_STREAM_SHARDS={shards}）："
+            f"只有 {sorted(_MULTI_REPLICA_SAFE)} 能安全多副本消费——"
+            "kafka 靠消费者组、mqtt 靠共享订阅；file/http 无跨副本协调，"
+            "多副本会重复消费。请把 DD_STREAM_SHARDS 设为 1，或改用 kafka/mqtt。")
 
     if kind == "file":
         from .file import FileTailSource, resolve_watch_path

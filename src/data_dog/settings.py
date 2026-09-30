@@ -169,6 +169,17 @@ def stream_enabled() -> bool:
     return _get_bool("DD_STREAM_ENABLED", default=False)
 
 
+def stream_shards() -> int:
+    """流式消费者的**副本数**（K8s 里 `deployment-stream` 的 replicas）。
+
+    这个值**不在消费进程内决定并行度**，而是为了让进程自检：
+    file 源（单文件、无协调）配了多副本 → 启动即失败关闭（见 stream/factory.py），
+    免得多个副本各尾随一份、事件被重复处理而无人察觉。
+    多副本只对 kafka（消费者组）/ mqtt（共享订阅）安全。
+    """
+    return max(1, _get_int("DD_STREAM_SHARDS", default=1))
+
+
 def stream_source() -> str:
     """流式源类型：file / http / mqtt / kafka。"""
     return _get("DD_STREAM_SOURCE", default="file").lower()
@@ -379,6 +390,87 @@ def degradation_queue_backend() -> str:
     memory 状态后端只在同进程内共享。
     """
     return _get("DD_DEGRADATION_QUEUE", default="memory").lower()
+
+
+# ---------------------------------------------------------------- 算子沙箱（P4-1）
+
+def sandbox_kind() -> str:
+    """算子执行器类型：inline（默认，单进程+预算）/ subprocess（进程隔离+资源上限）。
+
+    wasm 为预留档位（未实现）。热路径保持 inline；对**不可信/待审**算子或隔离有
+    硬要求的部署改 subprocess。见 `docs/p4/01_sandbox.md`。
+    """
+    return _get("DD_SANDBOX_KIND", default="inline").lower()
+
+
+def sandbox_wall_s() -> float:
+    """单算子墙钟上限（秒）。默认 50ms，对齐 slo.md §4（热路径须极短）。"""
+    return _get_float("DD_SANDBOX_WALL_S", default=0.05)
+
+
+def sandbox_max_steps() -> int:
+    """解释器步数预算（Tier 0）。默认 10 万，防超长表达式。"""
+    return _get_int("DD_SANDBOX_MAX_STEPS", default=100_000)
+
+
+def sandbox_mem_mb() -> int:
+    """子进程地址空间增量上限（MB，Tier 1）。默认 64。"""
+    return _get_int("DD_SANDBOX_MEM_MB", default=64)
+
+
+def sandbox_cpu_s() -> float:
+    """子进程 CPU 时间上限（秒，Tier 1 rlimit）。默认 0.1。"""
+    return _get_float("DD_SANDBOX_CPU_S", default=0.1)
+
+
+def sandbox_policy():
+    """组装 `SandboxPolicy`（延迟导入避免 settings 依赖 operator_factory）。"""
+    from .operator_factory.sandbox import SandboxPolicy
+    return SandboxPolicy(
+        wall_s=sandbox_wall_s(),
+        max_steps=sandbox_max_steps(),
+        mem_mb=sandbox_mem_mb(),
+        cpu_s=sandbox_cpu_s(),
+        kind=sandbox_kind(),
+    )
+
+
+# ---------------------------------------------------------------- 算子控制面（P4-2）
+
+def operator_signing_key() -> str:
+    """算子制品签名密钥（HMAC 对称密钥）。**不进仓库**，生产环境变量注入。
+
+    空 = 未配置：注册端点将拒绝带签名的注册（失败关闭）。本项提供签名机制，
+    **不提供 KMS/HSM**——密钥托管是运营职责（见 docs/p4/02_control_plane.md §6）。
+    """
+    return _get("DD_OPERATOR_SIGNING_KEY")
+
+
+def operator_pubkey() -> str:
+    """Ed25519 公钥（hex）。与签名密钥二选一：配了它则用非对称验签（验签方无需私钥）。"""
+    return _get("DD_OPERATOR_PUBKEY")
+
+
+def operator_sign_alg() -> str:
+    """签名算法：hmac-sha256（默认，零依赖）/ ed25519（需可选依赖 cryptography）。"""
+    return _get("DD_OPERATOR_SIGN_ALG", default="hmac-sha256").lower()
+
+
+def canary_min_samples() -> int:
+    """看门狗最小样本数：低于此值**不自动判定**（冷启动保守，见 P4-2 §6）。"""
+    return max(1, _get_int("DD_CANARY_MIN_SAMPLES", default=50))
+
+
+def canary_max_crash_rate() -> float:
+    return _get_float("DD_CANARY_MAX_CRASH_RATE", default=0.02)
+
+
+def canary_max_parse_drop() -> float:
+    return _get_float("DD_CANARY_MAX_PARSE_DROP", default=0.05)
+
+
+def canary_max_candidate_multiple() -> float:
+    return _get_float("DD_CANARY_MAX_CANDIDATE_MULTIPLE", default=3.0)
 
 
 # ---------------------------------------------------------------- 路径

@@ -1,0 +1,47 @@
+# P4-8 软实时基准：**不随每次 push 跑**（压测噪声大、耗资源），
+# 改为手动触发（Actions → Bench → Run workflow）或 nightly。
+#
+# 设计取舍：
+# - 用本机 SQLite + 离线 provider 形态保证可复现（不依赖外部 DB/LLM）。
+# - 结果作为 artifact 上传，人工核对后填进 benchmarks/baseline.md——
+#   **不自动改文件、不设门禁**（噪声环境下门禁会误红，违背 P4-8「数字须实测且诚实」）。
+name: Bench
+
+on:
+  workflow_dispatch:
+    inputs:
+      duration:
+        description: "压测时长（秒）"
+        default: "30"
+      write_rps:
+        description: "写入目标 RPS"
+        default: "300"
+  schedule:
+    # 每周一 03:17 UTC（避开整点，减少与其它任务撞峰）
+    - cron: "17 3 * * 1"
+
+jobs:
+  bench:
+    name: 软实时基准（SQLite 形态）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,postgres]"
+      - name: 跑基准
+        env:
+          PORT: "8000"
+          DURATION: ${{ github.event.inputs.duration || '30' }}
+          WRITE_RPS: ${{ github.event.inputs.write_rps || '300' }}
+        run: bash tools/bench.sh
+      - name: 上传报告
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-report
+          path: benchmarks/last_run.txt

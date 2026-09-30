@@ -701,3 +701,138 @@ def prune_checkpoints(session: Session, *, keep: int) -> int:
         session.delete(r)
     session.flush()
     return len(old)
+
+
+# ---------------------------------------------------------------- 算子注册表（P4-2）
+
+def upsert_operator_version(session: Session, *, tenant_id: str, operator_id: str,
+                            version: str, state: str, dsl_source: str,
+                            dsl_hash: str, signature: dict[str, Any],
+                            rollout: dict[str, Any] | None = None) -> dict[str, Any]:
+    """注册/更新一个算子版本（幂等按主键）。返回写入后的行。
+
+    已存在则**仅更新内容与签名**，保留既有 state/rollout——注册一个已存在版本
+    不应把它打回初始态（重注册只是刷新制品，不是重新发布）。
+    """
+    pk = (tenant_id, operator_id, version)
+    row = session.get(M.OperatorRegistryRow, pk)
+    created = row is None
+    if row is None:
+        row = M.OperatorRegistryRow(tenant_id=tenant_id, operator_id=operator_id,
+                                    version=version)
+        session.add(row)
+    row.dsl_source = dsl_source
+    row.dsl_hash = dsl_hash
+    row.signature = signature
+    if created:
+        row.state = state
+        row.rollout = rollout or {}
+        row.metrics_snapshot = {}
+    elif rollout is not None:
+        row.rollout = rollout
+    row.updated_at = M._now()
+    session.flush()
+    return _row_dict(row)
+
+
+def get_operator_version(session: Session, *, tenant_id: str, operator_id: str,
+                         version: str) -> dict[str, Any] | None:
+    """取单个算子版本。跨租户（或不存在）→ None（路由返回 404）。"""
+    r = session.get(M.OperatorRegistryRow, (tenant_id, operator_id, version))
+    return _row_dict(r) if r else None
+
+
+def list_operator_versions(session: Session, *, tenant_id: str,
+                           operator_id: str | None = None
+                           ) -> list[dict[str, Any]]:
+    """列出本租户的算子版本（可按 operator_id 过滤），按创建时间排序。"""
+    q = session.query(M.OperatorRegistryRow).filter(
+        M.OperatorRegistryRow.tenant_id == tenant_id)
+    if operator_id is not None:
+        q = q.filter(M.OperatorRegistryRow.operator_id == operator_id)
+    q = q.order_by(M.OperatorRegistryRow.created_at,
+                   M.OperatorRegistryRow.operator_id,
+                   M.OperatorRegistryRow.version)
+    return [_row_dict(r) for r in q.all()]
+
+
+def list_operators(session: Session, *, tenant_id: str) -> list[dict[str, Any]]:
+    """按 operator_id 聚合：每个算子返回其**当前 Active 版本**（无则最新）。
+    列表端点用。Active 优先，其次按版本创建时间取最新。"""
+    rows = list_operator_versions(session, tenant_id=tenant_id)
+    by_op: dict[str, dict[str, Any]] = {}
+    for r in rows:
+        cur = by_op.get(r["operator_id"])
+        if cur is None:
+            by_op[r["operator_id"]] = r
+            continue
+        # Active 版本优先；否则取创建更晚的
+        r_active = r["state"] == "Active"
+        cur_active = cur["state"] == "Active"
+        if (r_active and not cur_active) or (
+                r_active == cur_active and r["created_at"] > cur["created_at"]):
+            by_op[r["operator_id"]] = r
+    return sorted(by_op.values(), key=lambda x: x["operator_id"])
+
+
+def set_operator_state(session: Session, *, tenant_id: str, operator_id: str,
+                       version: str, state: str,
+                       rollout: dict[str, Any] | None = None,
+                       metrics_snapshot: dict[str, Any] | None = None
+                       ) -> dict[str, Any] | None:
+    """更新一个算子版本的状态（及可选 rollout/指标快照）。**不做合法性校验**——
+    由调用方（registry 领域层，持有状态机）判断后再调用。跨租户/不存在 → None。"""
+    row = session.get(M.OperatorRegistryRow, (tenant_id, operator_id, version))
+    if row is None:
+        return None
+    row.state = state
+    if rollout is not None:
+        row.rollout = rollout
+    if metrics_snapshot is not None:
+        row.metrics_snapshot = metrics_snapshot
+    row.updated_at = M._now()
+    session.flush()
+    return _row_dict(row)
+
+
+def record_rollout_event(session: Session, *, tenant_id: str, operator_id: str,
+                         version: str, from_state: str | None, to_state: str,
+                         reason: str, actor: str) -> None:
+    """追加一条状态转移台账（审计）。"""
+    session.add(M.OperatorRolloutEventRow(
+        tenant_id=tenant_id, operator_id=operator_id, version=version,
+        from_state=from_state, to_state=to_state, reason=reason, actor=actor))
+    session.flush()
+
+
+def list_rollout_events(session: Session, *, tenant_id: str,
+                        operator_id: str, version: str,
+                        limit: int | None = None) -> list[dict[str, Any]]:
+    """取某算子版本的转移台账（租户内），按时间正序。"""
+    q = (session.query(M.OperatorRolloutEventRow)
+         .filter(M.OperatorRolloutEventRow.tenant_id == tenant_id,
+                 M.OperatorRolloutEventRow.operator_id == operator_id,
+                 M.OperatorRolloutEventRow.version == version)
+         .order_by(M.OperatorRolloutEventRow.at, M.OperatorRolloutEventRow.id))
+    rows = q.all()
+    if limit is not None:
+        rows = rows[-limit:]
+    return [_row_dict(r) for r in rows]
+
+
+def find_previous_signed_version(session: Session, *, tenant_id: str,
+                                 operator_id: str,
+                                 before_created_at: float) -> dict[str, Any] | None:
+    """找同一算子**早于**给定时间、且签名非空的最近一个版本——回滚目标。
+
+    回滚是"回到上一签名版本"，不是删除当前版本（对齐 lifecycle 语义）。
+    """
+    q = (session.query(M.OperatorRegistryRow)
+         .filter(M.OperatorRegistryRow.tenant_id == tenant_id,
+                 M.OperatorRegistryRow.operator_id == operator_id,
+                 M.OperatorRegistryRow.created_at < before_created_at)
+         .order_by(M.OperatorRegistryRow.created_at.desc()))
+    for r in q.all():
+        if r.signature:  # 有签名才算"可回滚到的版本"
+            return _row_dict(r)
+    return None

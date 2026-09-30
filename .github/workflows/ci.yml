@@ -129,6 +129,36 @@ jobs:
             dist/sbom.json
           if-no-files-found: warn
 
+  helm:
+    name: Helm chart（lint + 渲染 + 不变量 + kubeconform）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.16.3
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: 安装 PyYAML（verify_chart.py 依赖）
+        run: python -m pip install pyyaml
+      - name: helm lint
+        run: helm lint helm/data-dog
+      - name: 渲染不变量断言（P4-4 验收 1）
+        run: python scripts/verify_chart.py
+      - name: 下载 kubeconform
+        run: |
+          curl -sSL -o kubeconform.tar.gz \
+            https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz
+          tar -xzf kubeconform.tar.gz kubeconform
+          sudo mv kubeconform /usr/local/bin/
+      - name: kubeconform 校验（默认值 + 生产值）
+        run: |
+          helm template dd helm/data-dog \
+            | kubeconform -strict -summary -ignore-missing-schemas
+          helm template dd helm/data-dog -f helm/data-dog/values.prod.yaml \
+            | kubeconform -strict -summary -ignore-missing-schemas
+
   web:
     name: 前端（Next.js 类型检查 + 静态检查 + 单测）
     runs-on: ubuntu-latest
