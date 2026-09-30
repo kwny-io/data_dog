@@ -14,6 +14,14 @@
 只处理**完整的行**（以 `\n` 结尾）；读到半行时把偏移退回到行首，等下次补全，
 避免把一条被切成两半的 JSON 当成坏数据丢弃。
 
+多副本（G5）
+-----------
+单文件无 broker 协调 → 多副本各读各偏移会**重复消费**。故本源可选**租约选主**：
+传入 `lease` 后，`poll` **只在本副本持有租约时读文件**，否则返回空（空转等待）。
+持有者把当前偏移周期性写入共享状态，接管者从**上次共享偏移**续读（`shared_offset`），
+从而不丢不重（末尾少量重放由候选幂等 upsert 兜底）。**file 源本质仍是单消费者**
+——租约只是"选一个"，要真正并行须转 Kafka/MQTT。
+
 身份
 ----
 - `tenant_id` 只从**配置**取（可信信道身份），绝不读正文。
@@ -24,9 +32,12 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .base import StreamMessage, StreamSource
+
+if TYPE_CHECKING:
+    from .lease import Lease
 
 
 class FileTailSource(StreamSource):
@@ -36,7 +47,8 @@ class FileTailSource(StreamSource):
 
     def __init__(self, path: str, *, tenant_id: str, device_sn: str = "",
                  device_from_field: str = "", encoding: str = "utf-8",
-                 start_at_end: bool = True) -> None:
+                 start_at_end: bool = True, lease: Lease | None = None,
+                 shared_offset: bool = False) -> None:
         self._path = Path(path)
         self._tenant = tenant_id
         self._device = device_sn
@@ -46,6 +58,37 @@ class FileTailSource(StreamSource):
         self._buf = b""
         self._start_at_end = start_at_end
         self._opened_once = False
+        self._lease = lease
+        self._shared_offset = shared_offset
+        self._offset_key = f"stream:offset:{self._path}" if shared_offset else ""
+        # 从共享偏移初始化（若有）——接管者续读而非从尾重来
+        self._off_loaded = False
+
+    def coordination(self) -> str:
+        return "lease" if self._lease is not None else "none"
+
+    def lease_holder(self) -> str:
+        """当前租约持有者（无租约返回空串），供 /readyz 展示。"""
+        return self._lease.holder() if self._lease is not None else ""
+
+    def _load_offset(self) -> None:
+        """从共享状态恢复偏移（仅在启用共享偏移且租约存在时）。"""
+        self._off_loaded = True
+        if not self._offset_key or self._lease is None:
+            return
+        rec = self._lease.state.get(self._offset_key)
+        if isinstance(rec, dict) and "off" in rec:
+            self._off = int(rec.get("off") or 0)
+            self._opened_once = True                   # 已有偏移 → 不再是"首次"
+
+    def _save_offset(self) -> None:
+        if not self._offset_key or self._lease is None:
+            return
+        # 存"已完整消费"的位置：退回缓冲区内尚未见换行的半行字节，让接管者
+        # 从该半行的**行首**续读（否则接管会以半行为起点读出一整条坏行）。
+        commit = max(0, self._off - len(self._buf))
+        rec = {"off": int(commit)}
+        self._lease.state.mutate(self._offset_key, lambda _cur: (rec, None))
 
     def _size(self) -> int | None:
         try:
@@ -54,6 +97,15 @@ class FileTailSource(StreamSource):
             return None
 
     def poll(self, timeout: float) -> list[StreamMessage]:
+        # 多副本选主：非持有者不读文件（空转等待）。持有者每轮续约；未持有则
+        # 尝试抢占（空闲/已过期租约 → 接管），确保新副本能顶上、崩溃者的租约
+        # 自然过期后旁人可接管。
+        if self._lease is not None:
+            if not (self._lease.renew() or self._lease.acquire()):
+                return []
+            if not self._off_loaded:
+                self._load_offset()
+
         size = self._size()
         if size is None:
             # 文件还没出现（或刚被删）——不是错误，等下一次 poll
@@ -83,6 +135,7 @@ class FileTailSource(StreamSource):
                 msg = self._parse(raw_line)
                 if msg is not None:
                     out.append(msg)
+            self._save_offset()
         return out
 
     def _parse(self, raw: bytes) -> StreamMessage | None:

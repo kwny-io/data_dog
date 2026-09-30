@@ -167,9 +167,18 @@ eval_feedback.py  回灌：人工标签 vs Agent 处置 → 一致率 / 误报�
   且 **superuser / 表属主默认绕过 RLS** → 生产连接须用非属主、非 superuser 角色。
 - **水平扩展：有状态算子已外置**。`StateStore.mutate(key, fn)` 原子 RMW 原语，
   后端 `memory` / `postgres` / `redis` 可插拔（`DD_STATE_BACKEND`）。候选归并与限流桶
-  都在共享后端，多副本一致。**边界**：file/MQTT 源多副本会重复消费（Kafka 消费者组、
-  MQTT 共享订阅可避免）。
-- **调查端点是同步的**。长超时会占用 worker——**这一条仍未解**，是已知的可扩展性瓶颈。
+  都在共享后端，多副本一致。**流式源多副本消费已按源协调**（各源 `coordination()`，
+  `/readyz` 可见）：Kafka 用消费者组；MQTT 配 `DD_MQTT_SHARE_GROUP` 走共享订阅
+  `$share/<group>/<topic>`（broker 轮询投递，一条消息只给一个副本）；file 用应用层
+  **租约选主**（`DD_STREAM_SHARE_OFFSET` 默认开）——同一时刻只有一个副本读该文件，
+  持有者崩溃后由共享偏移续读。**边界**：file 源本质仍是**单消费者**（租约只"选一个"，
+  要并行须转 Kafka/MQTT）；租约依赖各副本时钟大致同步（须跑 NTP）；租约接管有 ≤TTL 窗口。
+- **调查端点已可异步，默认仍同步**。`DD_INVESTIGATE_ASYNC=1` 时 `POST /v1/investigations`
+  提交即返回 `202 {job_id}`，真实 LLM 调查交给进程内 worker 池（`DD_INVESTIGATE_WORKERS`），
+  worker 立即释放；`GET /v1/investigations/jobs/{job_id}` 轮询、`.../cancel` 取消。
+  多副本不重复执行靠**两层**：共享待办队列 + 数据库条件领取（`UPDATE ... WHERE status='pending'`）。
+  **默认关**（`=0`）——既有前端按同步长任务实现，无预警翻成 202 会直接崩；`?sync=1` 强制走同步。
+  **边界**：进程内线程池**不是**分布式调度器；取消是协作式（等当前步返回）；job 表需保留策略。
 - **P4 明确不做**。沙箱算子运行时、控制面（Registry/Canary/回滚/签名）、真实多租户 SaaS 的控制面。
 
 ---

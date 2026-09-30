@@ -56,6 +56,7 @@ from ..providers.config import load_config
 from ..providers.offline_demo import DeterministicEvidenceProvider
 from ..schemas.events import CandidateEvent, EvidenceSummary
 from ..state import get_state_store
+from ..state.checkpoint import diff_checkpoint, write_checkpoint
 from ..storage import migrations
 from ..storage import models as M
 from ..storage import repository as repo
@@ -112,6 +113,13 @@ class ServiceState:
         # (`_seen`) 跨请求有效，重复投递同一 (key, revision) 只产生一次外部
         # 效果。事件/outbox 的**持久真相**在 DB，这里只是投递端。
         self.saas_adapter = SaaSTestAdapter()
+        # 水位线（G2）：开启时**进程级共享**——流式长驻 plane 让所有消息推进同一条
+        # 水位线，而不是每请求/每 flush 重置。关闭时为 None（旧行为，零回归）。
+        self.watermark: Any = None
+        if settings.watermark_enabled():
+            from ..data_plane.watermark import Watermark
+            self.watermark = Watermark(
+                allowed_lateness_s=settings.allowed_lateness_s())
         try:
             self.resolver = build_demo_resolver(_detector_config())
         except Exception as e:            # 缺厂商文档/依赖时不致命，降级为不可用
@@ -123,8 +131,10 @@ class ServiceState:
         # 候选构建器走**共享后端**：跨副本/跨请求一致地归并同一设备的命中。
         # 单副本（memory 后端）行为等价；多副本（PG/Redis）才真正共享。
         # 每次请求新建实例，但分组状态在共享存储里，故跨请求仍能正确合并。
-        return DataPlane(self.resolver, gateway=self.gateway,
-                         builder=SharedCandidateBuilder(state_store=get_state_store()))
+        builder = SharedCandidateBuilder(state_store=get_state_store(),
+                                         watermark=self.watermark)
+        return DataPlane(self.resolver, gateway=self.gateway, builder=builder,
+                         watermark=self.watermark)
 
 
 _state = ServiceState()
@@ -195,6 +205,53 @@ def _stop_job_runner() -> None:
     if runner is None:
         return
     runner.stop()
+    _set_job_runner(None)
+
+
+# ------------------------------------------------------------------ 状态快照（G3）
+
+_checkpoint_lock = threading.Lock()
+_checkpoint_loop: Any = None
+
+
+def _get_checkpoint_loop():
+    with _checkpoint_lock:
+        return _checkpoint_loop
+
+
+def _set_checkpoint_loop(loop) -> None:
+    global _checkpoint_loop
+    with _checkpoint_lock:
+        _checkpoint_loop = loop
+
+
+def _start_checkpoint_if_enabled() -> None:
+    """起周期状态快照任务（`DD_CHECKPOINT_ENABLED=1`）。
+
+    可选：先尝试 `DD_CHECKPOINT_RESTORE=1` 从最新快照恢复（覆盖=否，只补缺失），
+    再起周期导出。状态后端不可用时静默跳过（不影响 HTTP 服务）。
+    """
+    if not settings.checkpoint_enabled():
+        return
+    from ..state import get_state_store
+    from ..state.checkpoint import CheckpointLoop, restore_latest
+
+    store = get_state_store()
+    if settings.checkpoint_restore():
+        restore_latest(store, overwrite=False)
+    loop = CheckpointLoop(store, interval_s=settings.checkpoint_interval_s(),
+                          keep=settings.checkpoint_keep(),
+                          prefix=settings.checkpoint_prefix())
+    loop.start()
+    _set_checkpoint_loop(loop)
+
+
+def _stop_checkpoint() -> None:
+    loop = _get_checkpoint_loop()
+    if loop is None:
+        return
+    loop.stop()
+    _set_checkpoint_loop(None)
 
 
 def _run_investigation_job(tenant_id: str, candidate_id: str,
@@ -207,7 +264,9 @@ def _run_investigation_job(tenant_id: str, candidate_id: str,
       - 失败 → failed + 有限错误码
     """
     started = time.monotonic()
-    status, report_id, error_code = "failed", None, "execution_failed"
+    status: str = "failed"
+    report_id: str | None = None
+    error_code: str | None = "execution_failed"
     try:
         outcome = _execute_investigation(
             tenant_id, candidate_id, should_cancel=should_cancel)
@@ -313,8 +372,15 @@ async def _lifespan(app: FastAPI):
         # 但配了 DD_INVESTIGATE_ASYNC 的提交会 503——故记 error 级。
         _log.error("异步调查 worker 池启动失败",
                    extra={"error": f"{type(e).__name__}: {e}"})
+    try:
+        _start_checkpoint_if_enabled()
+    except Exception as e:                           # noqa: BLE001
+        # 状态快照是可选增强：起不来不影响服务（只是重启时无法从快照恢复）
+        _log.error("状态快照任务启动失败",
+                   extra={"error": f"{type(e).__name__}: {e}"})
     yield
     _stop_job_runner()
+    _stop_checkpoint()
     _stop_stream()
 
 
@@ -511,7 +577,12 @@ def create_app() -> FastAPI:
                 checks["stream"] = {"ok": False, "error": "消费线程已退出"}
             else:
                 checks["stream"] = {"ok": True, "source": source.name,
+                                    "coordination": source.coordination(),
                                     "stats": runner.stats}
+                # file 源：展示租约归属（一眼看出哪个副本在读）
+                holder = getattr(source, "lease_holder", None)
+                if holder is not None:
+                    checks["stream"]["lease_holder"] = holder
             ready = ready and bool(checks["stream"]["ok"])
 
         # 异步调查 worker 池（仅在启用时检查）：配了异步但池子没跑 = 提交会 503，
@@ -566,6 +637,51 @@ def create_app() -> FastAPI:
                 "error": f"{type(e).__name__}: {e}"})
         return Response(content=metrics.render(),
                         media_type="text/plain; version=0.0.4; charset=utf-8")
+
+    # -------------------------------------------------- 状态运维（G3，token 门控）
+
+    def _require_ops_token(x_ops_token: str | None) -> None:
+        """运维端点鉴权：无 `DD_OPS_TOKEN` → 404（端点不暴露）；有则须匹配。
+
+        状态快照/diff 含各租户算子状态（敏感），故**独立**于 DD_API_KEY 门控——
+        即便开了 API 鉴权，运维端点也只对持 ops token 者开放。
+        """
+        expected = settings.ops_token()
+        if not expected:
+            raise HTTPException(status_code=404, detail="未启用运维端点")
+        if not _api_key_ok(x_ops_token or "", expected):
+            raise HTTPException(status_code=401, detail="缺少或错误的 X-Ops-Token")
+
+    @app.post("/v1/state/checkpoint", tags=["ops"])
+    def state_checkpoint(
+        x_ops_token: str | None = Header(default=None, alias="X-Ops-Token"),
+    ) -> dict[str, Any]:
+        """手动触发一次状态快照（并执行保留策略）。"""
+        _require_ops_token(x_ops_token)
+        store = get_state_store()
+        meta = write_checkpoint(store, prefix=settings.checkpoint_prefix())
+        with session_scope() as s:
+            repo.prune_checkpoints(s, keep=settings.checkpoint_keep())
+        return {"ok": True, "checkpoint": meta}
+
+    @app.get("/v1/state/checkpoints", tags=["ops"])
+    def list_state_checkpoints(
+        x_ops_token: str | None = Header(default=None, alias="X-Ops-Token"),
+    ) -> dict[str, Any]:
+        """列出快照元数据（不含 payload——不一次拉出所有状态词典）。"""
+        _require_ops_token(x_ops_token)
+        with session_scope() as s:
+            items = repo.list_checkpoints(s, limit=settings.checkpoint_keep() * 4)
+        return {"ok": True, "items": items, "total": len(items)}
+
+    @app.get("/v1/state/diff", tags=["ops"])
+    def state_diff(
+        checkpoint_id: str,
+        x_ops_token: str | None = Header(default=None, alias="X-Ops-Token"),
+    ) -> dict[str, Any]:
+        """快照 vs 当前状态差异（新增/变更/删除的 key）——验证恢复正确性。"""
+        _require_ops_token(x_ops_token)
+        return {"ok": True, "diff": diff_checkpoint(get_state_store(), checkpoint_id)}
 
     # -------------------------------------------------- 接入
 
@@ -808,6 +924,63 @@ def create_app() -> FastAPI:
                 "limit": limit, "offset": offset,
                 "has_more": offset + len(rows) < total, "items": rows}
 
+    # 注意：`/v1/investigations/jobs*` **必须**注册在
+    # `/v1/investigations/{investigation_id}` 之前——否则后者会把 "jobs" 当成
+    # 一个 investigation_id 吃掉（FastAPI 按注册顺序匹配，先注册的优先）。
+    @app.get("/v1/investigations/jobs", tags=["investigate"])
+    def list_investigation_jobs(
+        x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
+        status: str | None = Query(default=None),
+        limit: int = Query(default=_DEFAULT_PAGE_SIZE, ge=1, le=_MAX_PAGE_SIZE),
+        offset: int = Query(default=0, ge=0),
+    ) -> dict[str, Any]:
+        """分页列出本租户的异步调查 job（可按 status 过滤）。"""
+        tenant = _tenant_required(x_tenant_id)
+        with session_scope() as s:
+            rows = repo.list_jobs(s, tenant_id=tenant, status=status,
+                                  limit=limit, offset=offset)
+            total = repo.count_rows(s, M.InvestigationJobRow, tenant_id=tenant)
+        return {"ok": True, "count": len(rows), "total": total,
+                "limit": limit, "offset": offset,
+                "has_more": offset + len(rows) < total,
+                "items": [_job_public(r) for r in rows]}
+
+    @app.get("/v1/investigations/jobs/{job_id}", tags=["investigate"])
+    def get_investigation_job(
+        job_id: str,
+        x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
+    ) -> dict[str, Any]:
+        """查异步调查 job 的状态（跨租户 → 404）。
+
+        status ∈ pending/running/succeeded/failed/cancelled。succeeded 时 `report_id`
+        可拿去 `GET /v1/investigations/{report_id}` 读完整报告。
+        """
+        tenant = _tenant_required(x_tenant_id)
+        with session_scope() as s:
+            job = repo.get_job(s, job_id, tenant_id=tenant)
+        if job is None:
+            raise HTTPException(status_code=404, detail="调查任务不存在")
+        return {"ok": True, "job": _job_public(job)}
+
+    @app.post("/v1/investigations/jobs/{job_id}/cancel", tags=["investigate"])
+    def cancel_investigation_job(
+        job_id: str,
+        x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
+    ) -> dict[str, Any]:
+        """请求取消异步调查 job（跨租户 → 404）。
+
+        **协作式**：pending 的直接取消；running 的置 cancelled，worker 在下一个
+        provider 调用边界停止（已发出的 LLM 调用要等它返回），故报告可能已落库——
+        以 job 的最终状态为准。已终态的任务原样返回，不改。
+        """
+        tenant = _tenant_required(x_tenant_id)
+        with session_scope() as s:
+            new_status = repo.cancel_job(s, job_id, tenant_id=tenant)
+            job = repo.get_job(s, job_id, tenant_id=tenant)
+        if new_status is None or job is None:
+            raise HTTPException(status_code=404, detail="调查任务不存在")
+        return {"ok": True, "job": _job_public(job)}
+
     @app.get("/v1/investigations/{investigation_id}", tags=["query"])
     def get_investigation(
         investigation_id: str,
@@ -856,62 +1029,6 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=outcome["http_status"],
                                 detail=outcome["detail"])
         return outcome["response"]
-
-    # ------------------------------------------------ 异步 job（G1）
-
-    @app.get("/v1/investigations/jobs/{job_id}", tags=["investigate"])
-    def get_investigation_job(
-        job_id: str,
-        x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
-    ) -> dict[str, Any]:
-        """查异步调查 job 的状态（跨租户 → 404）。
-
-        status ∈ pending/running/succeeded/failed/cancelled。succeeded 时 `report_id`
-        可拿去 `GET /v1/investigations/{report_id}` 读完整报告。
-        """
-        tenant = _tenant_required(x_tenant_id)
-        with session_scope() as s:
-            job = repo.get_job(s, job_id, tenant_id=tenant)
-        if job is None:
-            raise HTTPException(status_code=404, detail="调查任务不存在")
-        return {"ok": True, "job": _job_public(job)}
-
-    @app.get("/v1/investigations/jobs", tags=["investigate"])
-    def list_investigation_jobs(
-        x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
-        status: str | None = Query(default=None),
-        limit: int = Query(default=_DEFAULT_PAGE_SIZE, ge=1, le=_MAX_PAGE_SIZE),
-        offset: int = Query(default=0, ge=0),
-    ) -> dict[str, Any]:
-        """分页列出本租户的异步调查 job（可按 status 过滤）。"""
-        tenant = _tenant_required(x_tenant_id)
-        with session_scope() as s:
-            rows = repo.list_jobs(s, tenant_id=tenant, status=status,
-                                  limit=limit, offset=offset)
-            total = repo.count_rows(s, M.InvestigationJobRow, tenant_id=tenant)
-        return {"ok": True, "count": len(rows), "total": total,
-                "limit": limit, "offset": offset,
-                "has_more": offset + len(rows) < total,
-                "items": [_job_public(r) for r in rows]}
-
-    @app.post("/v1/investigations/jobs/{job_id}/cancel", tags=["investigate"])
-    def cancel_investigation_job(
-        job_id: str,
-        x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
-    ) -> dict[str, Any]:
-        """请求取消异步调查 job（跨租户 → 404）。
-
-        **协作式**：pending 的直接取消；running 的置 cancelled，worker 在下一个
-        provider 调用边界停止（已发出的 LLM 调用要等它返回），故报告可能已落库——
-        以 job 的最终状态为准。已终态的任务原样返回，不改。
-        """
-        tenant = _tenant_required(x_tenant_id)
-        with session_scope() as s:
-            new_status = repo.cancel_job(s, job_id, tenant_id=tenant)
-            job = repo.get_job(s, job_id, tenant_id=tenant)
-        if new_status is None or job is None:
-            raise HTTPException(status_code=404, detail="调查任务不存在")
-        return {"ok": True, "job": _job_public(job)}
 
     # -------------------------------------------------- 反馈（P3 闭环回灌）
 
@@ -1092,6 +1209,70 @@ def create_app() -> FastAPI:
         if not ok:
             raise HTTPException(status_code=404, detail="文档不存在")
         return {"ok": True, "document_id": document_id, "deleted": True}
+
+    # -------------------------------------------------- 变更记录（G7）
+
+    @app.post("/v1/changes/ingest", tags=["changes"])
+    def ingest_change(
+        payload: dict[str, Any],
+        x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
+    ) -> dict[str, Any]:
+        """变更系统（CMDB/发布系统）把"变了什么"推来落库（租户隔离，幂等）。
+
+        正文（`change_id` 与 `target` 必填，其余可选；未识别的键进 `raw`，
+        对 Agent 返回时展开）：
+
+            {"change_id": "chg-1", "kind": "firmware", "target": "joint_motor.front_left_hip",
+             "applied_at": "2026-09-20T10:00:00Z", "from_version": "1.2.0",
+             "to_version": "1.2.1", "actor": "ops", "source": "cmdb", ...}
+
+        与 `/v1/knowledge/*` 同源：身份只认请求头 `X-Tenant-Id`（缺失 → 401），
+        正文里的同名字段一律被忽略（防越权）。
+
+        **幂等**：同 (租户, change_id) 重复推送**覆盖更新**（不是重复插入），
+        返回 `created=false`；故上游可安心重放。
+        """
+        tenant = _tenant_required(x_tenant_id)
+        body = payload or {}
+        change_id = str(body.get("change_id") or "").strip()
+        target = str(body.get("target") or "").strip()
+        if not change_id:
+            raise HTTPException(status_code=422, detail="需含非空 'change_id'")
+        if not target:
+            raise HTTPException(status_code=422, detail="需含非空 'target'")
+
+        _KNOWN = ("change_id", "kind", "target", "applied_at",
+                  "from_version", "to_version", "actor", "source")
+        record = {
+            "change_id": change_id,
+            "kind": str(body.get("kind") or ""),
+            "target": target,
+            "applied_at": str(body.get("applied_at") or ""),
+            "from_version": str(body.get("from_version") or ""),
+            "to_version": str(body.get("to_version") or ""),
+            "actor": str(body.get("actor") or ""),
+            "source": str(body.get("source") or ""),
+            # 来源特有字段展开给 Agent（对齐内置表形状）
+            "raw": {k: v for k, v in body.items() if k not in _KNOWN},
+        }
+        with session_scope() as s:
+            created = repo.save_change_record(s, tenant_id=tenant, record=record)
+        return {"ok": True, "change_id": change_id, "target": target,
+                "created": created}
+
+    @app.get("/v1/changes", tags=["changes"])
+    def list_changes(
+        x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
+        target: str | None = Query(default=None),
+        limit: int = Query(default=100, ge=1, le=1000),
+        offset: int = Query(default=0, ge=0),
+    ) -> dict[str, Any]:
+        """列出本租户的变更记录（可按 `target` 过滤、分页）。"""
+        tenant = _tenant_required(x_tenant_id)
+        with session_scope() as s:
+            items = repo.list_change_records(
+                s, tenant_id=tenant, target=target, limit=limit, offset=offset)
+        return {"ok": True, "count": len(items), "items": items}
 
     return app
 

@@ -29,19 +29,30 @@ from typing import Any
 from ..schemas.events import CandidateEvent, EvidenceSummary
 from ..state import get_state_store
 from .candidate import _SEV_RANK, _SEV_SCORE, _parse_time, _signal_of
+from .watermark import Watermark
 
 _INDEX_KEY = "candidate:index"
 
 
 class SharedCandidateBuilder:
-    """命中 → 候选，状态在共享后端（多副本一致）。"""
+    """命中 → 候选，状态在共享后端（多副本一致）。
+
+    **事件时间与迟到（G2）**：语义与 `CandidateBuilder` 一致——注入 `watermark` 时
+    合并判定收紧为**有向 + 水位线**（见 `candidate.CandidateBuilder` 文档）；未注入时
+    退回原 `abs(delta) <= merge_window_s`（零回归）。水位线是**每副本一份**的观测
+    （诚实边界：多副本下各见各的到货序，严格共享需按分片维护，对齐 P4-5）。
+    """
 
     def __init__(self, *, merge_window_s: float = 5.0, max_groups: int = 32,
-                 state_store: Any = None, namespace: str = "cand"):
+                 state_store: Any = None, namespace: str = "cand",
+                 watermark: Watermark | None = None):
         self.merge_window_s = merge_window_s
         self.max_groups = max_groups
         self._ns = namespace
         self._state = state_store if state_store is not None else get_state_store()
+        self.watermark = watermark
+        self.late_merged = 0
+        self.late_rejected = 0
         # 本实例（副本）自上次 flush 以来触碰过的组 key。build() 默认只产出这些
         # ——让 HTTP 请求/流式 flush 只返回"自己刚处理出来的候选"，而不是共享
         # 存储里所有设备/租户的全部候选。
@@ -79,9 +90,17 @@ class SharedCandidateBuilder:
                    occurred_at: str, raw_ref: str,
                    baseline: dict[str, float] | None) -> None:
         """把一个命中并入组 g（原地修改）。"""
-        g["window_end"] = occurred_at
         g["sample_count"] = int(g.get("sample_count", 0)) + 1
-        g["last_dt"] = occurred_at
+        # last_dt/window_end 取最大事件时间（乱序并入时不把基准拉回；同进程内版一致）。
+        new_dt = _parse_time(occurred_at)
+        end_dt = _parse_time(g.get("window_end"))
+        if new_dt is None:
+            g["window_end"] = occurred_at
+        elif end_dt is None or new_dt >= end_dt:
+            g["window_end"] = occurred_at
+            last_dt = _parse_time(g.get("last_dt"))
+            if last_dt is None or new_dt > last_dt:
+                g["last_dt"] = occurred_at
         rule_id = h["rule_id"]
         if rule_id not in g["rule_ids"]:
             g["rule_ids"].append(rule_id)
@@ -110,6 +129,8 @@ class SharedCandidateBuilder:
             base = self._base_key(device_sn, component_ref, signal, tenant_id)
             self._register_index(base)
             now_dt = _parse_time(occurred_at)
+            if self.watermark is not None and now_dt is not None:
+                self.watermark.observe(now_dt.timestamp())
 
             def fn(cur: Any, _h=h, _now=now_dt, _b=base, _sig=signal
                    ) -> tuple[Any, Any]:
@@ -122,9 +143,11 @@ class SharedCandidateBuilder:
                     last_dt = _parse_time(last.get("last_dt"))
                     if _now is None or last_dt is None:
                         in_window = True
-                    else:
+                    elif self.watermark is None:
                         in_window = abs(
                             (_now - last_dt).total_seconds()) <= self.merge_window_s
+                    else:
+                        in_window = self._in_window_with_watermark(last_dt, _now)
                 if not in_window:
                     st["seq"] = int(st.get("seq", 0)) + 1
                     groups.append(self._new_group(
@@ -138,6 +161,22 @@ class SharedCandidateBuilder:
                 return st, None
 
             self._state.mutate(base, fn)
+
+    def _in_window_with_watermark(self, last_dt: Any, now_dt: Any) -> bool:
+        """有界迟到语义下的合并判定（与进程内版同构）。"""
+        assert self.watermark is not None
+        delta = (now_dt - last_dt).total_seconds()
+        if 0.0 <= delta <= self.merge_window_s:
+            return True
+        if -self.watermark.allowed_lateness_s <= delta < 0.0:
+            if not self.watermark.is_late(now_dt.timestamp()):
+                self.late_merged += 1
+                return True
+            self.late_rejected += 1
+            return False
+        if delta < 0.0:
+            self.late_rejected += 1
+        return False
 
     def build(self, *, only_touched: bool = True) -> list[CandidateEvent]:
         """产出候选列表（确定性排序：设备→部件→信号→首见时间）。

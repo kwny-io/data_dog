@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from ..schemas.events import CandidateEvent, EvidenceSummary
+from .watermark import Watermark
 
 _SEV_RANK = {"info": 0, "warning": 1, "critical": 2}
 _SEV_SCORE = {"info": 0.3, "warning": 0.7, "critical": 1.0}
@@ -63,15 +64,32 @@ class _Group:
 
 
 class CandidateBuilder:
-    """累积命中 → 按合并窗口归并成候选。"""
+    """累积命中 → 按合并窗口归并成候选。
 
-    def __init__(self, *, merge_window_s: float = 5.0):
+    **事件时间与迟到（G2）**：合并判定从"无界 `abs`"收紧为**有向 + 水位线**：
+
+    - 正常：`0 <= delta <= merge_window_s`（顺序命中）→ 并入。
+    - 迟到：`-allowed_lateness <= delta < 0` 且事件不早于水位线 → 并入，计 `late_merged`
+      （这就是原 `abs` 想表达的"迟到容忍"，但**有界**）。
+    - 太晚：事件早于水位线 → **不与旧组混**，新开组，计 `late_rejected`
+      （无界 `abs` 会把 1 小时前的事件也并进来，这是要修的）。
+
+    **零回归**：未注入 `watermark` 时（默认）退回原 `abs(delta) <= merge_window_s`
+    语义——既有调用点行为逐字节不变；要启用有界迟到语义，构造时传 `Watermark`。
+    """
+
+    def __init__(self, *, merge_window_s: float = 5.0,
+                 watermark: Watermark | None = None):
         self.merge_window_s = merge_window_s
+        self.watermark = watermark
         # 所有已形成的组（含已关闭的）；key 唯一，支持同一信号多段事件
         self._groups: dict[str, _Group] = {}
         # (device, component, signal) → 当前"打开中"的组 key
         self._open: dict[str, str] = {}
         self._seq = 0
+        # 迟到统计（供指标/测试）
+        self.late_merged = 0        # 容忍窗内并入的迟到命中数
+        self.late_rejected = 0      # 太晚（早于水位线）被拒、另开新组的命中数
 
     @staticmethod
     def _base_key(device_sn: str, component_ref: str, signal: str,
@@ -87,15 +105,18 @@ class CandidateBuilder:
         """找到应归入的组：同信号、且仍在合并窗口内；否则开新组。"""
         base = self._base_key(device_sn, component_ref, signal, tenant_id)
         now_dt = _parse_time(occurred_at)
+        if self.watermark is not None and now_dt is not None:
+            self.watermark.observe(now_dt.timestamp())
         open_key = self._open.get(base)
         if open_key is not None:
             g = self._groups[open_key]
-            # 时间可解析且两者都可解析时，判断是否超窗
             if now_dt is None or g.last_dt is None:
                 in_window = True                     # 解析不了 → 保守合并
+            elif self.watermark is None:
+                # 旧语义（零回归）：无界 abs。
+                in_window = abs((now_dt - g.last_dt).total_seconds()) <= self.merge_window_s
             else:
-                delta = abs((now_dt - g.last_dt).total_seconds())
-                in_window = delta <= self.merge_window_s
+                in_window = self._in_window_with_watermark(g, now_dt)
             if in_window:
                 return g
         # 开启新组
@@ -108,6 +129,25 @@ class CandidateBuilder:
         self._open[base] = key
         return g
 
+    def _in_window_with_watermark(self, g: _Group, now_dt: datetime) -> bool:
+        """有界迟到语义下的合并判定（并维护迟到计数）。"""
+        assert self.watermark is not None and g.last_dt is not None
+        delta = (now_dt - g.last_dt).total_seconds()
+        # 正常（顺序）：仍在合并窗口内。
+        if 0.0 <= delta <= self.merge_window_s:
+            return True
+        # 迟到：在容忍窗内且未早于水位线 → 并入（这就是有界的"迟到容忍"）。
+        if -self.watermark.allowed_lateness_s <= delta < 0.0:
+            if not self.watermark.is_late(now_dt.timestamp()):
+                self.late_merged += 1
+                return True
+            self.late_rejected += 1
+            return False
+        # 太晚（早于水位线）或大幅前跳 → 不混入旧组。
+        if delta < 0.0:
+            self.late_rejected += 1
+        return False
+
     def add(self, *, device_sn: str, component_ref: str, metrics: dict[str, Any],
             hits: list[dict[str, Any]], occurred_at: str, received_at: str,
             raw_ref: str = "", baseline: dict[str, float] | None = None,
@@ -118,9 +158,18 @@ class CandidateBuilder:
             signal = _signal_of(rule_id, h.get("field", ""))
             g = self._find_group(device_sn, component_ref, signal, occurred_at,
                                  tenant_id)
-            g.window_end = occurred_at
             g.sample_count += 1
-            g.last_dt = _parse_time(occurred_at) or g.last_dt
+            # last_dt/window_end 取**最大**事件时间：乱序迟到事件并入后不能把组的时间
+            # 基准拉回去，否则后续正常事件会被误判为"大幅前跳"。顺序到达时二者自然
+            # 等于最新事件（与旧行为一致）。
+            new_dt = _parse_time(occurred_at)
+            end_dt = _parse_time(g.window_end)
+            if new_dt is None:
+                g.window_end = occurred_at
+            elif end_dt is None or new_dt >= end_dt:
+                g.window_end = occurred_at
+                if g.last_dt is None or new_dt > g.last_dt:
+                    g.last_dt = new_dt
             if rule_id not in g.rule_ids:
                 g.rule_ids.append(rule_id)
             # 严重度取最高

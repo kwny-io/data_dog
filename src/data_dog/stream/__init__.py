@@ -6,7 +6,8 @@ from __future__ import annotations
 
 from .base import QueueSource, StreamMessage, StreamSource
 from .factory import build_source
+from .lease import Lease, default_owner
 from .runner import StreamRunner
 
-__all__ = ["QueueSource", "StreamMessage", "StreamSource", "StreamRunner",
-           "build_source"]
+__all__ = ["Lease", "QueueSource", "StreamMessage", "StreamSource", "StreamRunner",
+           "build_source", "default_owner"]

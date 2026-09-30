@@ -19,9 +19,11 @@ from .replay import run_e2e
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--with-degradation", action="store_true",
+                    help="加降级段回放（Agent 不可用/队列满/恢复）；默认关，保持输出不变")
     args = ap.parse_args()
 
-    r = run_e2e()
+    r = run_e2e(with_degradation=args.with_degradation)
 
     if args.json:
         print(json.dumps(r.summary(), ensure_ascii=False, indent=2, default=str))
@@ -49,6 +51,12 @@ def main() -> int:
         print(f"     ▸ {verdict}  severity={d.severity}"
               + (f"  命中: {'; '.join(d.reasons)}" if d.report else f"  ({d.suppressed_reason})"))
     print(f"     SaaS 已接收 {r.alerts_delivered} 条正式事件；人工反馈 {len(r.feedback)} 条")
+    if r.degradation:
+        print("\n[降级段 · 旁路] §9.4 Agent 不可用时处置")
+        for d in r.degradation:
+            print(f"     ▸ {d['candidate_id']} → {d['path']}")
+        print(f"     排队 {r.degradation_queued} 条；Agent 恢复 drain 取回 "
+              f"{r.degradation_drained}")
     print("\n" + "=" * 72)
     print("整链贯通 ✅  厂商文档 → 算子 → 候选 → 调查 → 策略门 → SaaS → 反馈")
     print("=" * 72)

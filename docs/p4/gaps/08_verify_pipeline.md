@@ -111,3 +111,27 @@ golden replay → fuzz → diff → 【新】security_scan → 【新】sbom
 
 - 与 **P4-1 沙箱**互补（静态 + 动态）；
 - SBOM 归档与 **P4-2 控制面**（签名/版本）衔接（SBOM 随签名版本存档）。
+
+## 8. 实现状态（已落地）
+
+**已实现**（`skipped ≠ pass` 是核心诚实点，全程贯彻）：
+
+| 交付 | 位置 | 说明 |
+|---|---|---|
+| DSL 静态扫描 | `operator_factory/security_scan.py::scan_dsl_source` / `scan_operator` | 词法→AST→度量（不执行）；检出语法错误/超长表达式/超深嵌套/节点过载/超大常量 |
+| 依赖 SCA | `security_scan.py::scan_dependencies` | `pip-audit` 为**可选依赖**；缺失或执行失败 → `skipped`（附原因），**绝不记 pass**；`runner` 可注入 |
+| SBOM | `operator_factory/sbom.py::generate_sbom` | 装了 `cyclonedx-bom` → 完整解析（`complete=True`）；未装 → 内置最小实现（结构合法 CycloneDX 1.5，`complete=False`，如实标注） |
+| 聚合 | `verification.py::verify_full` | 六步：golden_replay / fuzz / diff / dsl_static / dependency_sca / sbom；返回各步 `pass/fail/skipped` 与计数 |
+| 门控 | `lifecycle.py::_gate` | `Validating` 门读 `scan_findings`，任一 `high`/`critical` → 拒绝；无 findings 回退看 `scan_ok`（向后兼容） |
+| 阈值 | `security_scan.py` | `MAX_EXPR_LEN=400` / `MAX_DEPTH=16` / `MAX_NODES=300` / `MAX_CONST=1e15`（常量，测试据此构造用例） |
+| 可选依赖 | `pyproject.toml` | `scan = ["pip-audit"]`、`sbom = ["cyclonedx-bom"]` |
+| CI | `.github/workflows/ci.yml` | `supply-chain` leg：pip-audit（告警不拦）+ SBOM 上传为 artifact |
+| 测试 | `tests/test_security_scan.py` | 18 项：DSL 各模式 / SCA skipped≠pass / SBOM 合法性 / 门控 / verify_full 结构 |
+
+**验收对照**：§5 七条满足——DSL 检出超深/超大且黄金算子无 finding（1）、SCA 有工具真扫/无工具 skipped 明确标注（2）、SBOM 结构合法 CycloneDX 含组件（3）、critical finding → Validating 拒绝（4）、`verify_full` 各步状态齐全（5）、CI 加 SCA+SBOM artifact（6）、`test_operator_factory*`/回放/Fuzz/差分零回归（7）。全量测试 469 passed / 5 skipped（含 G8 18 项）；ruff/mypy 干净。
+
+**仍未做**（诚实边界，同 §6）：
+- **DSL 静态扫描是启发式**：只找可疑模式（深度/长度/常量），**不能证明无漏洞**；动态防线是 P4-1 沙箱。
+- **SBOM 不递归解析未声明的传递依赖**：最小实现只列**声明**组件；要完整需锁文件 + 递归解析。
+- **CVE 库时效**：SCA 依赖漏洞库更新，离线环境可能过期。
+- **CI 的 SCA 只告警不拦**：现有依赖可能已有已知 CVE，硬拦会让 CI 长期红；真正拦截在算子的 `Validating` 门控。

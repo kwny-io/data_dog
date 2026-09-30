@@ -126,6 +126,42 @@ def redis_url() -> str:
     return _get("DD_REDIS_URL", default="redis://localhost:6379/0")
 
 
+# ---------------------------------------------------------------- 状态快照（G3）
+
+def checkpoint_enabled() -> bool:
+    """是否启用周期状态快照（默认关；多副本/需恢复时开）。"""
+    return _get_bool("DD_CHECKPOINT_ENABLED", default=False)
+
+
+def checkpoint_interval_s() -> float:
+    """周期快照间隔（秒）。也是恢复的 RPO 上界（两次快照间重启会丢这段增量）。"""
+    return max(5.0, _get_float("DD_CHECKPOINT_INTERVAL_S", default=300.0))
+
+
+def checkpoint_keep() -> int:
+    """保留最近多少份快照（防表无限增长）。"""
+    return max(1, _get_int("DD_CHECKPOINT_KEEP", default=5))
+
+
+def checkpoint_restore() -> bool:
+    """启动时是否从最新快照恢复状态。"""
+    return _get_bool("DD_CHECKPOINT_RESTORE", default=False)
+
+
+def checkpoint_prefix() -> str:
+    """快照只导出此前缀匹配的 key（空 = 全部状态）。"""
+    return _get("DD_CHECKPOINT_PREFIX")
+
+
+def ops_token() -> str:
+    """运维端点令牌（`X-Ops-Token`）。空 = 运维端点不暴露（404）。
+
+    状态快照/diff 涉及各租户算子状态，属敏感数据，故**独立**于 `DD_API_KEY`
+    门控——即便开了 API 鉴权，运维端点也只对持 ops token 者开放。
+    """
+    return _get("DD_OPS_TOKEN")
+
+
 # ---------------------------------------------------------------- 流式接入
 
 def stream_enabled() -> bool:
@@ -195,6 +231,26 @@ def stream_kafka_group() -> str:
     return _get("DD_STREAM_KAFKA_GROUP", default="data-dog")
 
 
+# ---------------------------------------------------------------- 多副本协调（G5）
+
+def stream_mqtt_share_group() -> str:
+    """MQTT 共享订阅组名：拼成 `$share/<group>/<topic>`，broker 在组内轮询投递。
+
+    空串 = 不用共享订阅（退回"每个副本收全量"——单副本可接受，多副本会重复）。
+    """
+    return _get("DD_MQTT_SHARE_GROUP", default="data-dog")
+
+
+def stream_file_lease_ttl_s() -> float:
+    """file 源租约 TTL（秒）：持有者崩溃后至多这么久被旁人接管。"""
+    return max(1.0, _get_float("DD_STREAM_LEASE_TTL_S", default=30.0))
+
+
+def stream_share_offset() -> bool:
+    """file 源偏移是否共享（接管者从上次共享偏移续读，而非从头/从尾）。"""
+    return _get_bool("DD_STREAM_SHARE_OFFSET", default=True)
+
+
 # ---------------------------------------------------------------- 限流
 
 def rate_per_sec() -> float:
@@ -260,6 +316,69 @@ def investigate_workers() -> int:
 def investigate_queue_poll_ms() -> int:
     """worker 空转时查共享队列的间隔（毫秒）。"""
     return max(20, _get_int("DD_INVESTIGATE_QUEUE_POLL_MS", default=200))
+
+
+# ---------------------------------------------------------------- 事件时间（G2）
+
+def allowed_lateness_s() -> float:
+    """合并窗口允许的迟到容忍（秒）。事件早于 `watermark`（=最大事件时间-本值）即拒。
+
+    同时也是恢复的 RPO 无关量：纯在线窗口参数。默认 30s——太小丢迟到数据（漏合并），
+    太大增内存/延迟，按真实到达分布调。
+    """
+    return max(0.0, _get_float("DD_ALLOWED_LATENESS_S", default=30.0))
+
+
+def watermark_enabled() -> bool:
+    """是否启用事件时间水位线（有界迟到合并 + 窗口按事件时间有序）。
+
+    默认 **关**：既有多数调用点未传事件时间，开启会改变合并边界；开启后窗口本就按
+    事件时间排序（纯增益），合并从"无界 abs"收紧为"有向 + 水位线"。
+    """
+    return _get_bool("DD_WATERMARK_ENABLED", default=False)
+
+
+# ---------------------------------------------------------------- 变更管理源（G7）
+
+def change_source() -> str:
+    """变更来源：mock（默认，内置表）/ jsonl（文件）/ webhook（CMDB API）。"""
+    return _get("DD_CHANGE_SOURCE", default="mock").lower()
+
+
+def change_jsonl_path() -> str:
+    """jsonl 来源的变更记录文件路径。"""
+    return _get("DD_CHANGE_JSONL_PATH")
+
+
+def change_webhook_url() -> str:
+    """webhook 来源的 CMDB API 地址（请求前过 SSRF 校验）。"""
+    return _get("DD_CHANGE_WEBHOOK_URL")
+
+
+# ---------------------------------------------------------------- 因果时序（G6）
+
+def causal_max_lag_s() -> float:
+    """疑似因果链允许的最大滞后（秒）：因必须早于果且滞后在窗内。
+
+    默认 5s——电气/热传播时标不同，按机型调；太小漏关联、太大引入伪因果。
+    """
+    return max(0.0, _get_float("DD_CAUSAL_MAX_LAG_S", default=5.0))
+
+
+def causal_enabled() -> bool:
+    """是否在证据桥启用因果链查询（默认开：查询只读、零副作用）。"""
+    return _get_bool("DD_CAUSAL_ENABLED", default=True)
+
+
+# ---------------------------------------------------------------- 降级队列（G4）
+
+def degradation_queue_backend() -> str:
+    """降级队列后端：memory（默认，进程内）/ state（共享状态，重启可续 + 多副本共享）。
+
+    `state` 要真跨进程持久/共享，`DD_STATE_BACKEND` 须落在 postgres/redis——
+    memory 状态后端只在同进程内共享。
+    """
+    return _get("DD_DEGRADATION_QUEUE", default="memory").lower()
 
 
 # ---------------------------------------------------------------- 路径

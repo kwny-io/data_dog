@@ -612,3 +612,92 @@ def cancel_job(session: Session, job_id: str, *, tenant_id: str) -> str | None:
     row.finished_at = M._now()
     session.flush()
     return row.status
+
+
+# ---------------------------------------------------------------- 变更记录（G7）
+
+def save_change_record(session: Session, *, tenant_id: str,
+                       record: dict[str, Any]) -> bool:
+    """写入一条变更记录（幂等 upsert，主键 (tenant_id, change_id)）。返回是否新建。"""
+    cid = record["change_id"]
+
+    def apply(r: Any) -> None:
+        r.kind = record.get("kind", "")
+        r.target = record.get("target", "")
+        r.applied_at = record.get("applied_at", "")
+        r.from_version = record.get("from_version", "")
+        r.to_version = record.get("to_version", "")
+        r.actor = record.get("actor", "")
+        r.source = record.get("source", "")
+        r.raw = record.get("raw", {}) or {}
+
+    return _upsert(session, M.ChangeRecordRow, (tenant_id, cid),
+                   {"tenant_id": tenant_id, "change_id": cid}, apply)
+
+
+def list_change_records(session: Session, *, tenant_id: str,
+                        target: str | None = None,
+                        limit: int | None = None,
+                        offset: int = 0) -> list[dict[str, Any]]:
+    """列出本租户的变更记录（可按 target 过滤）。"""
+    q = session.query(M.ChangeRecordRow).filter(
+        M.ChangeRecordRow.tenant_id == tenant_id)
+    if target is not None:
+        q = q.filter(M.ChangeRecordRow.target == target)
+    q = q.order_by(M.ChangeRecordRow.applied_at, M.ChangeRecordRow.change_id)
+    return _page(q, limit, offset)
+
+
+# ---------------------------------------------------------------- 状态快照（G3）
+
+def save_checkpoint(session: Session, *, checkpoint_id: str, prefix: str,
+                    payload: dict[str, Any]) -> dict[str, Any]:
+    """写入一份状态快照。同 id 幂等覆盖（正常每次 id 唯一）。"""
+    row = session.get(M.StateCheckpointRow, checkpoint_id)
+    if row is None:
+        row = M.StateCheckpointRow(checkpoint_id=checkpoint_id)
+        session.add(row)
+    row.prefix = prefix
+    row.n_keys = len(payload)
+    row.payload = payload
+    row.created_at = M._now()
+    session.flush()
+    return _row_dict(row)
+
+
+def get_checkpoint(session: Session, checkpoint_id: str
+                   ) -> dict[str, Any] | None:
+    r = session.get(M.StateCheckpointRow, checkpoint_id)
+    return _row_dict(r) if r else None
+
+
+def latest_checkpoint(session: Session) -> dict[str, Any] | None:
+    """取最近一份快照（按 created_at 倒序）。"""
+    r = (session.query(M.StateCheckpointRow)
+         .order_by(M.StateCheckpointRow.created_at.desc()).first())
+    return _row_dict(r) if r else None
+
+
+def list_checkpoints(session: Session, *, limit: int = 50
+                     ) -> list[dict[str, Any]]:
+    """列出快照元数据（**不含 payload**，避免一次拉出所有状态词典）。"""
+    q = (session.query(M.StateCheckpointRow)
+         .order_by(M.StateCheckpointRow.created_at.desc()).limit(limit))
+    out = []
+    for r in q.all():
+        d = _row_dict(r)
+        d.pop("payload", None)         # 列表只回元数据
+        out.append(d)
+    return out
+
+
+def prune_checkpoints(session: Session, *, keep: int) -> int:
+    """只保留最近 `keep` 份快照，删更旧的。返回删除数（保留策略，防表无限增长）。"""
+    keep = max(0, keep)
+    old = (session.query(M.StateCheckpointRow)
+           .order_by(M.StateCheckpointRow.created_at.desc())
+           .offset(keep).all())
+    for r in old:
+        session.delete(r)
+    session.flush()
+    return len(old)

@@ -109,3 +109,33 @@ Agent 侧 `query_recent_changes(since=...)` → 查表（**启用 `since` 过滤
 ## 7. 依赖
 
 无。对齐 A7（`knowledge_ingest`）已有模式，可借鉴其适配器结构。
+
+## 8. 实现状态（已落地）
+
+**已实现**（`since` 静默忽略已修复；四种来源都真过滤）：
+
+| 交付 | 位置 | 说明 |
+|---|---|---|
+| 适配器与记录 | `evidence/change_source.py` | `ChangeRecord`（`to_dict()` 展开 `detail`，契约向后兼容）+ `ChangeSource` Protocol |
+| mock | `MockChangeSource` | 默认；包装内置 `RECENT_CHANGES`，可注入自定义记录 |
+| jsonl | `JsonlChangeSource` | 逐行 JSON，跳坏行；未识别键进 `detail` |
+| webhook | `WebhookChangeSource` | POST 查 CMDB；**请求前过 `fetch.validate_url`**（SSRF）；本地再复过滤 |
+| db（推送式） | `DbChangeSource` | 查 `change_records` 表；**必须带 `tenant_id`**（RLS 失败关闭） |
+| 过滤 | `_in_window` | ISO/`YYYY-MM-DD HH:MM`/纯日期；**时区归一**（aware/naive 混用不崩）；无法解析→保留（宁多勿漏） |
+| 默认选择 | `default_change_source()` | 按 `DD_CHANGE_SOURCE`（mock/jsonl/webhook）；配了类型却缺参数 → 退回 mock（不静默无数据） |
+| 表 | `storage/models.py::ChangeRecordRow` | 主键 `(tenant_id, change_id)`；`raw` JSON；`target`/`applied_at` 索引 |
+| 仓储 | `repo.save_change_record` / `list_change_records` | 幂等 upsert；列表按 target 过滤 + 分页 |
+| 迁移 | `alembic/versions/20260930_0920_g7_change_records.py` | `d7e8f9a0b1c2`；建表 + 3 索引；PG 上 `ENABLE`+`FORCE` RLS + `tenant_isolation` 策略 |
+| 证据桥 | `service/evidence.py::query_recent_changes` | 走 `ChangeSource`；来源异常降级到内置表并标 `source=builtin_fallback` |
+| 内置源同步修复 | `evidence/store.py::query_recent_changes` | 同样真按 `since` 过滤（此前也忽略） |
+| 工具层 | `tools/investigation.py::query_recent_changes` | 返回加 `source` 标注（契约新增可选字段，旧消费者不受影响） |
+| 配置 | `settings.py` | `DD_CHANGE_SOURCE` / `DD_CHANGE_JSONL_PATH` / `DD_CHANGE_WEBHOOK_URL` |
+| 端点 | `service/app.py` | `POST /v1/changes/ingest`（幂等 upsert，缺 `change_id`/`target`→422）、`GET /v1/changes`（按 target + 分页） |
+| 测试 | `tests/test_change_source.py` | 18 项：过滤语义 / mock / jsonl / webhook SSRF / 推送落库 / 幂等 / 校验 / 租户隔离+401 / 桥降级 / 默认来源选择 |
+
+**验收对照**：§5 七条全部满足——`since` 真过滤（1）、四来源一致断言（2）、推送式端到端（3）、SSRF 拒绝内网 URL 且未发请求（4）、工具签名/返回结构不变（5，仅新增可选 `source`）、租户隔离 + 缺头 401（6）、`test_service_evidence*` 零回归（7）。全量测试 450 passed / 5 skipped（仅 `test_claim_job_is_atomic` 为既有并发抖动，单独跑通过）；ruff/mypy 干净。
+
+**仍未做**（诚实边界，同 §6）：
+- **未绑定具体 CMDB 产品**：`WebhookChangeSource` 是通用骨架，对接 ServiceNow/Jira/自研发布系统需按各自 API 写适配器（几十行）。
+- **`until` 仅适配器内部支持**：工具层签名 `(device_sn, component, since)` 未暴露 `until`（契约不变优先）；需要时在适配器层已就绪。
+- **变更 ≠ 故障**：只记录"变了什么"，因果仍由 Agent 结合证据推断。

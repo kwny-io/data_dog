@@ -67,6 +67,37 @@ class StateStore(ABC):
 
         return bool(self.mutate(f"rate:{key}", fn))
 
+    # ---- 快照 / 恢复（G3：状态检查点）----
+    # 建立在 `keys` + `get` + `mutate` 之上的消费者：后端只需实现 `keys`，
+    # 快照/恢复逻辑只写一遍。
+
+    def keys(self, prefix: str = "") -> list[str]:
+        """列出所有以 `prefix` 开头的 key（无序）。后端应覆写以达到 O(prefix)。"""
+        return []
+
+    def snapshot(self, *, prefix: str = "") -> dict[str, Any]:
+        """导出前缀匹配的所有 key→value（浅层）。供持久化/检查点用。
+
+        **非原子**跨 key：导出期间若有并发写，各 key 可能取自不同瞬间。对"近似"
+        状态够用；要严格一致需在导出期短暂冻结写（见 checkpoint 的诚实边界）。
+        """
+        return {k: self.get(k) for k in self.keys(prefix)}
+
+    def restore(self, data: dict[str, Any], *, overwrite: bool = False) -> int:
+        """从快照恢复状态。`overwrite=False` 时**只补缺失 key**（不覆盖已有）。
+
+        返回实际写入的 key 数。逐 key 原子写（`mutate`），故与并发写不冲突。
+        """
+        written = 0
+        for key, value in data.items():
+            if not overwrite and self.get(key) is not None:
+                continue
+            def _apply(_cur: Any, v: Any = value) -> tuple[Any, Any]:
+                return v, None
+            self.mutate(key, _apply)
+            written += 1
+        return written
+
     def close(self) -> None:                          # noqa: B027 - 有意可选，非抽象
         """释放连接/资源（默认无操作）。"""
 

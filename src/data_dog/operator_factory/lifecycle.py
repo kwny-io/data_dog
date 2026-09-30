@@ -80,8 +80,17 @@ class OperatorLifecycle:
     def _gate(self, target: str, evidence: dict[str, Any] | None) -> GateResult:
         ev = evidence or {}
         if target == "Validating":
-            # 编译/扫描必须通过（这里以 evidence 表达，不接真实扫描器）
-            if ev.get("scan_ok") is False:
+            # 编译/扫描必须通过。G8：`scan_findings` 可由 security_scan 产出
+            # （含 severity）——任一 high/critical → 拒绝；无 findings 时回退看 scan_ok。
+            findings = ev.get("scan_findings")
+            if findings:
+                from .security_scan import BLOCKING
+                blocking = [f for f in findings
+                            if getattr(f, "severity", None) in BLOCKING]
+                if blocking:
+                    sev = blocking[0].severity
+                    return GateResult(False, f"安全扫描发现 {sev} 级问题（{len(blocking)} 项）")
+            elif ev.get("scan_ok") is False:
                 return GateResult(False, "安全扫描未通过")
         if target == "AwaitingApproval":
             # 验证门：Fixture 回放必须全过

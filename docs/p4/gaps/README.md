@@ -6,16 +6,18 @@
 
 ## 清单
 
-| # | 项 | 文件 | 关键位置 |
-|---|---|---|---|
-| G1 | 调查端点异步化 | [01_async_investigation.md](01_async_investigation.md) | `service/app.py:719-782` |
-| G2 | 事件时间 / 水位线 / 迟到事件 | [02_watermark.md](02_watermark.md) | `data_plane/chain.py:120`、`candidate.py:97` |
-| G3 | StateStore checkpoint / 恢复 | [03_checkpoint.md](03_checkpoint.md) | `state/base.py`、`state_kv` 表 |
-| G4 | 降级队列持久化 + 接入 e2e | [04_degradation_queue.md](04_degradation_queue.md) | `agent/degradation.py:84`、`e2e/replay.py` |
-| G5 | 流式源多副本协调 | [05_replica_coordination.md](05_replica_coordination.md) | `stream/bus.py`、`stream/file.py` |
-| G6 | 跨部件因果时序 + 拓扑链 | [06_causal_topology.md](06_causal_topology.md) | `service/evidence.py:125`、`correlation.py` |
-| G7 | 真实变更管理源适配器 | [07_change_source.md](07_change_source.md) | `service/evidence.py:161`、`evidence/store.py:138` |
-| G8 | 算子验证流水线补全（编译扫描 + SBOM） | [08_verify_pipeline.md](08_verify_pipeline.md) | `operator_factory/verification.py` |
+| # | 项 | 文件 | 关键位置 | 状态 |
+|---|---|---|---|---|
+| G1 | 调查端点异步化 | [01_async_investigation.md](01_async_investigation.md) | `service/app.py:719-782` | ✅ 已落地 |
+| G2 | 事件时间 / 水位线 / 迟到事件 | [02_watermark.md](02_watermark.md) | `data_plane/chain.py:120`、`candidate.py:97` | ✅ 已落地 |
+| G3 | StateStore checkpoint / 恢复 | [03_checkpoint.md](03_checkpoint.md) | `state/base.py`、`state_kv` 表 | ✅ 已落地 |
+| G4 | 降级队列持久化 + 接入 e2e | [04_degradation_queue.md](04_degradation_queue.md) | `agent/degradation.py:84`、`e2e/replay.py` | ✅ 已落地 |
+| G5 | 流式源多副本协调 | [05_replica_coordination.md](05_replica_coordination.md) | `stream/bus.py`、`stream/file.py` | ✅ 已落地 |
+| G6 | 跨部件因果时序 + 拓扑链 | [06_causal_topology.md](06_causal_topology.md) | `service/evidence.py:125`、`correlation.py` | ✅ 已落地 |
+| G7 | 真实变更管理源适配器 | [07_change_source.md](07_change_source.md) | `service/evidence.py:161`、`evidence/store.py:138` | ✅ 已落地 |
+| G8 | 算子验证流水线补全（编译扫描 + SBOM） | [08_verify_pipeline.md](08_verify_pipeline.md) | `operator_factory/verification.py` | ✅ 已落地 |
+
+> 每份文档末尾的 **§8 实现状态（已落地）** 记录实际交付、验收对照与仍未做的诚实边界。
 
 ## 与 P4 批的关系
 

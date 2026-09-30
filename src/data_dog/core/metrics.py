@@ -145,6 +145,24 @@ stream_up = Gauge(
     registry=registry,
 )
 
+# ---------------------------------------------------------------- 事件时间 / 迟到（G2）
+
+# 迟到过多（早于水位线）被拒的事件数——静默丢弃是最难排查的错误，故必须可见。
+events_late_total = Counter(
+    "data_dog_events_late_total",
+    "迟到过多（早于水位线）被拒的事件总数",
+    labelnames=("source",),
+    registry=registry,
+)
+
+# 容忍窗内被并入已有组的迟到事件数（"有界的迟到容忍"命中次数）。
+late_merged_total = Counter(
+    "data_dog_late_merged_total",
+    "容忍窗内并入已有组的迟到事件总数",
+    labelnames=("source",),
+    registry=registry,
+)
+
 # ---------------------------------------------------------------- 进程信息（SRE 关注）
 
 info = Gauge(

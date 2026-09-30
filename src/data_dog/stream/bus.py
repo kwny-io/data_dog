@@ -21,9 +21,9 @@
 --------
 - Kafka：配同一个 `group_id`，Kafka 的消费者组协调会让**每个分区**只被组内一个
   副本消费——这正是多副本分工的落点。
-- MQTT：订阅同一 topic 的每个副本都会收到**全量**消息（除非用共享订阅
-  `$share/<group>/<topic>`，本模块透传 topic 字符串，故填共享订阅主题即可）。
-  不填则多副本会重复消费——见 docs 的诚实边界。
+- MQTT：配 `share_group`（`DD_MQTT_SHARE_GROUP`），本模块把订阅主题拼成
+  `$share/<group>/<topic>`，由 broker 在组内轮询投递（MQTT 5 / EMQX 等支持）。
+  不配则每个副本收**全量**、多副本重复消费——见 docs 的诚实边界。
 """
 from __future__ import annotations
 
@@ -40,18 +40,25 @@ def _device_of(body: Any, field: str, default: str) -> str:
 
 
 class MqttSource(QueueSource):
-    """订阅 MQTT topic，把每条消息塞进队列。需要 `paho-mqtt`。"""
+    """订阅 MQTT topic，把每条消息塞进队列。需要 `paho-mqtt`。
+
+    多副本协调：`share_group` 非空时把订阅主题前缀成 `$share/<group>/<topic>`，
+    由 broker 在**同组订阅者之间轮询投递**——一条消息只给一个副本，天然负载均衡。
+    这是 MQTT 5 / EMQX 等 broker 的共享订阅（shared subscription）语义。
+    `share_group=""` 则不前缀（每个副本收全量，仅单副本可接受）。
+    """
 
     name = "mqtt"
 
     def __init__(self, *, url: str, topic: str, tenant_id: str,
                  device_sn: str = "", device_from_field: str = "",
-                 qos: int = 1, maxsize: int = 10_000,
+                 share_group: str = "", qos: int = 1, maxsize: int = 10_000,
                  client: Any = None) -> None:
         super().__init__(maxsize=maxsize)
         self._tenant = tenant_id
         self._device = device_sn
         self._device_field = device_from_field
+        self._share_group = share_group.strip()
         if client is None:
             try:
                 import paho.mqtt.client as mqtt
@@ -63,6 +70,8 @@ class MqttSource(QueueSource):
         self._client = client
         # 用 urlparse 拆 scheme://host:port，兼容 tcp:// / mqtt://
         host, port = _split_url(url, default_port=1883)
+        sub_topic = shared_topic(topic, self._share_group)
+        self._sub_topic = sub_topic
         src = self
 
         def on_message(_c, _u, m):                         # noqa: ANN001
@@ -81,8 +90,11 @@ class MqttSource(QueueSource):
 
         self._client.on_message = on_message
         self._client.connect(host, port, keepalive=60)
-        self._client.subscribe(topic, qos=qos)
+        self._client.subscribe(sub_topic, qos=qos)
         self._client.loop_start()
+
+    def coordination(self) -> str:
+        return "broker-group" if self._share_group else "none"
 
     def close(self) -> None:
         super().close()
@@ -148,6 +160,9 @@ class KafkaSource(QueueSource):
                     source=f"kafka:{_tp.topic}"))
         return out
 
+    def coordination(self) -> str:
+        return "broker-group"
+
     def close(self) -> None:
         super().close()
         try:
@@ -156,11 +171,23 @@ class KafkaSource(QueueSource):
             pass
 
 
+def shared_topic(topic: str, share_group: str) -> str:
+    """把 topic 拼成 MQTT 共享订阅形式 `$share/<group>/<topic>`。
+
+    `share_group` 为空 → 原样返回（不启用共享订阅）。已带 `$share/` 前缀的
+    topic 不再重复加前缀（幂等，避免误配双前缀）。
+    """
+    g = share_group.strip()
+    if not g or topic.startswith("$share/"):
+        return topic
+    return f"$share/{g}/{topic}"
+
+
 def _split_url(url: str, *, default_port: int) -> tuple[str, int]:
     """解析 `scheme://host:port`（无 scheme 时按 host:port 处理）。"""
     s = url.split("://", 1)[1] if "://" in url else url
     if ":" in s:
-        host, _, port = s.rsplit(":", 1)
+        host, port = s.rsplit(":", 1)
         try:
             return host, int(port)
         except ValueError:

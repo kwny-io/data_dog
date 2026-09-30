@@ -116,3 +116,44 @@ def infer_causal_links(
 ## 7. 依赖
 
 - 无强前置。与 **P4-7 退化预测** 互补（一个查因果序，一个查趋势）。
+
+## 8. 实现状态（已落地）
+
+已实现，新增 `tests/test_topology.py`（7 项）与 `tests/test_causal.py`（11 项），
+并在 `test_correlation.py` / `test_service_evidence.py` 补 5 项；全量 433 通过 / 5 跳过。
+落地时相对本设计的**调整与诚实边界**，如实记录：
+
+- **拓扑表落在 `data_plane/topology.py`**：`ComponentNode(ref, parent, domain, kind)`
+  + `TOPOLOGY` + `ancestors/children/propagate_path/domain_of/is_known/parent_of`。
+  当前 5 个部件**确实同一供电域**（`power_bus`），故 `domain` 对它们不产生区分——
+  domain 的价值在引入 `sensor_bus` 等其它总线后才显现（接口已就位，表待录）。
+  供电链：`battery.main → controller.main → joint_motor.*`。
+- **兼容别名保证零回归**：`correlation.COMPONENT_POWER_DOMAIN` 改为由 `TOPOLOGY`
+  **派生**（不再是硬编码字典），`component_power_domain()` 转调 `topology.domain_of`。
+  既有测试（`test_correlation.py::test_topology_power_domain_link`）逐条不改即绿。
+- **`ALLOWED_COMPONENTS` 由 `TOPOLOGY` 派生**（`evidence/store.py`）：消除"白名单与
+  拓扑各写一份、可能漂移"的散落硬编码；`test_topology.py` 断言二者相等。
+- **因果是"工程启发式"**：`infer_causal_links` 规则 = ①因严格早于果且 `0<lag<=max_lag`；
+  ②沿 `TOPOLOGY` 有层级关系（祖先 / 兄弟），**无关系不判因果**（拒伪因果）；③置信度随
+  滞后线性衰减（`_BASE_CONF` × `max(0.2, 1-lag/max_lag)`）。这是**有序关联**，不是真正
+  因果推断——文档与工具描述一律用"疑似因果链"。
+- **方向**：`parent_to_child`（上游先动，正常传播）/ `sibling` / `child_to_parent`
+  （子先父后，标 `suspect=True` 仅作提示）。`CausalLink` 冻结、`to_dict` 自描述。
+- **`window_tolerance` 已启用**（此前存而未用）：`correlation.py` 里把窗口起点解析成秒，
+  同设备 + 同电源域 + `|Δ起点| ≤ 容差` 即互为拓扑关联；`linked_group_roles` 补方向
+  （`upstream`/`downstream`/`sibling`）。**解析失败退回精确字符串相等**——既有纯时刻
+  形态（"09:55"）行为不变；默认容差 `"00:05"` 即 300s。
+- **证据桥 `query_causal_chain`**：`RepoEvidenceBridge` 新增，复用抽出的 `_window_events`
+  （同部件 + 邻居，附 `occurred_at_s`）→ `infer_causal_links`。**无事件时间的事件不参与**
+  （不拿 0.0 硬凑）；未在拓扑登记的部件不参与。工具层 `query_causal_chain` 用 `getattr`
+  探测证据源是否支持——**不支持则返回空链**（不冒充有数据），故未进 `EvidenceSource`
+  Protocol 的必需集，旧证据源无需改。
+- **settings**：`DD_CAUSAL_MAX_LAG_S`（默认 5）、`DD_CAUSAL_ENABLED`（默认开）。
+- **`NeighborEvent.from_dict`** 容错解析，兼容 `severity_hint` / `severity` 两种键。
+
+仍未解（诚实边界，同 §6）：**"因果"是强提示非确定**（需干预实验 / 完整物理模型）；
+**拓扑表人工维护**，真实车队需按机型录入（本项只给结构与接口）；**滞后窗需按机型调**；
+**单设备内**，不跨设备。报告回填（`hypotheses`/`counter_evidence_refs`）**未做**——
+`query_causal_chain` 已是只读工具、Agent 可自行调用并据 ref 引用证据，但把它**自动**
+写进报告假设是 AgentLoop 编排层的进一步接线，本项未接（沿用现有 ref 机制即可，无需复制
+原文）。

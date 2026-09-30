@@ -29,8 +29,10 @@ def build_source(kind: str | None = None) -> StreamSource:
         resolved = resolve_watch_path(path)
         if resolved is None:
             raise RuntimeError(f"file 源路径无匹配文件：{path}")
+        lease = _file_lease(path) if settings.stream_share_offset() else None
         return FileTailSource(resolved, tenant_id=tenant, device_sn=device,
-                              device_from_field=dev_field)
+                              device_from_field=dev_field, lease=lease,
+                              shared_offset=settings.stream_share_offset())
 
     if kind == "http":
         from .http import HttpPushSource
@@ -43,7 +45,8 @@ def build_source(kind: str | None = None) -> StreamSource:
         from .bus import MqttSource
         return MqttSource(url=settings.stream_mqtt_url(),
                           topic=settings.stream_mqtt_topic(), tenant_id=tenant,
-                          device_sn=device, device_from_field=dev_field)
+                          device_sn=device, device_from_field=dev_field,
+                          share_group=settings.stream_mqtt_share_group())
 
     if kind == "kafka":
         from .bus import KafkaSource
@@ -54,3 +57,11 @@ def build_source(kind: str | None = None) -> StreamSource:
 
     raise RuntimeError(
         f"未知流式源类型：{kind!r}（支持 file/http/mqtt/kafka，见 DD_STREAM_SOURCE）")
+
+
+def _file_lease(path: str):
+    """构造 file 源的选主租约（基于共享状态后端）。"""
+    from ..state import get_state_store
+    from .lease import Lease, default_owner
+    return Lease(get_state_store(), f"stream:lease:file:{path}",
+                 default_owner(), ttl_s=settings.stream_file_lease_ttl_s())

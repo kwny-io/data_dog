@@ -18,17 +18,34 @@ temperature_c、另一处写 temperature，检测逻辑对不上）。
   `operators/generated/*.yaml`，非臆造）判定其是否有异常。命中即作为邻居事件返回。
   仍未做的：跨部件的**因果时序**（如"电压先跌、电流后涨"）与层级拓扑链
   （电池→驱动板→电机）——当前只做"同设备同窗其它部件是否异常"这一层。
-- 近期变更（`query_recent_changes`）复用内置变更表：真实的变更管理源尚未接入，
-  在文档里如实标明，不冒充"已接生产数据源"。
+- 近期变更（`query_recent_changes`）**已接入 `ChangeSource` 适配器**（G7）：
+  按 `DD_CHANGE_SOURCE` 选 mock（内置表）/jsonl/webhook/db（推送式落库），
+  **四种来源都真按 since 过滤**（此前 since 被静默忽略）。来源不可用时降级到
+  内置表并如实标注 `source=builtin_fallback`——不冒充"已接生产数据源"。
 """
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
+from ..data_plane.causal import NeighborEvent, infer_causal_links
 from ..data_plane.scenarios import _STANDARD_NAME
 from ..errors import ToolErrorCode, err
 from ..evidence.detectors import GeneratedRuleDetector, load_detector
-from ..evidence.store import ALLOWED_COMPONENTS, RECENT_CHANGES, VENDOR_KNOWLEDGE
+from ..evidence.store import ALLOWED_COMPONENTS, VENDOR_KNOWLEDGE
+
+
+def _epoch_s(iso: str) -> float | None:
+    """ISO8601 字符串 → epoch 秒；无法解析 → None（该事件不参与因果推导）。"""
+    try:
+        return datetime.fromisoformat(iso.replace("Z", "+00:00")).timestamp()
+    except (ValueError, AttributeError):
+        return None
+
+
+def _source_name(src: Any) -> str:
+    """变更来源的可读名（供 Agent 报告标注"变更数据从哪来"）。"""
+    return type(src).__name__
 
 
 def _detector_for(bridge: RepoEvidenceBridge) -> GeneratedRuleDetector:
@@ -73,11 +90,14 @@ class RepoEvidenceBridge:
     """
 
     def __init__(self, telemetry_rows: list[dict[str, Any]], *, device_sn: str,
-                 detector: GeneratedRuleDetector | None = None):
+                 detector: GeneratedRuleDetector | None = None,
+                 change_source: Any = None):
         self.device_sn = device_sn
         # 邻居检测复用**真实算子规则**（阈值出自 operators/generated/*.yaml）。
         # 注入以便测试；默认惰性加载。
         self._detector = detector
+        # G7：变更来源。注入优先；默认惰性取 `settings` 指定的来源（mock/jsonl/webhook）。
+        self._change_source = change_source
         self._by_component: dict[str, list[dict[str, Any]]] = {}
         for r in telemetry_rows:
             comp = r.get("component_ref", "")
@@ -122,6 +142,51 @@ class RepoEvidenceBridge:
         return [dict(item, retriever="repo_kb")
                 for item in VENDOR_KNOWLEDGE.get(component_type, [])]
 
+    def _denied(self, device_sn: str, component: str) -> dict[str, Any] | None:
+        """统一的越权/设备校验；通过返回 None，否则返回错误 dict。"""
+        if component not in ALLOWED_COMPONENTS:
+            return err(ToolErrorCode.DENIED, component)
+        if device_sn != self.device_sn:
+            return err(ToolErrorCode.DENIED, "device mismatch")
+        return None
+
+    def _window_events(
+        self, component: str, window_start: str, window_end: str,
+        *, include_self: bool, with_time: bool = False,
+    ) -> list[dict[str, Any]]:
+        """扫落库遥测，对窗口内（退化为全部行）的每行跑真实算子，收集命中事件。
+
+        每个事件形如 `{event, component, window, severity_hint, rule_id,
+        observed, threshold}`；`with_time=True` 时附 `occurred_at` / `occurred_at_s`
+        （供因果时序推导用）。
+        """
+        detector = _detector_for(self)
+        events: list[dict[str, Any]] = []
+        for comp, rows in sorted(self._by_component.items()):
+            if comp == component and not include_self:
+                continue                      # 邻居 = 其它部件，不含自身
+            hit_rows = [r for r in rows
+                        if window_start <= r.get("occurred_at", "") <= window_end]
+            if not hit_rows:
+                continue                      # 该部件在此窗内无数据 → 不谈它
+            latest = hit_rows[-1]
+            for h in detector.detect(comp, _standardize(latest.get("metrics"))):
+                ev: dict[str, Any] = {
+                    "event": h["rule_id"],
+                    "component": comp,
+                    "window": f"{window_start}-{window_end}",
+                    "severity_hint": h["severity_hint"],
+                    "rule_id": h["rule_id"],
+                    "observed": h["observed"],
+                    "threshold": h["threshold"],
+                }
+                if with_time:
+                    occ = latest.get("occurred_at", "")
+                    ev["occurred_at"] = occ
+                    ev["occurred_at_s"] = _epoch_s(occ)
+                events.append(ev)
+        return events
+
     def query_neighbor_events(self, device_sn, component, window_start, window_end):
         """查**同设备其它部件**在同一时间窗内是否有异常（真关联，非桩）。
 
@@ -132,33 +197,77 @@ class RepoEvidenceBridge:
         这与内置 `EvidenceStore.query_neighbor_events` 的返回形状一致（见其
         `NEIGHBOR_EVENTS`），故 Agent/工具层无需改动。
         """
-        if component not in ALLOWED_COMPONENTS:
-            return err(ToolErrorCode.DENIED, component)
-        if device_sn != self.device_sn:
-            return err(ToolErrorCode.DENIED, "device mismatch")
-        detector = _detector_for(self)
-        events: list[dict[str, Any]] = []
-        for comp, rows in sorted(self._by_component.items()):
-            if comp == component:
-                continue                      # 邻居 = 其它部件，不含自身
-            hit_rows = [r for r in rows
-                        if window_start <= r.get("occurred_at", "") <= window_end]
-            if not hit_rows:
-                continue                      # 该邻居在此窗内无数据 → 不谈它
-            latest = hit_rows[-1]
-            for h in detector.detect(comp, _standardize(latest.get("metrics"))):
-                events.append({
-                    "event": h["rule_id"],
-                    "component": comp,
-                    "window": f"{window_start}-{window_end}",
-                    "severity_hint": h["severity_hint"],
-                    "rule_id": h["rule_id"],
-                    "observed": h["observed"],
-                    "threshold": h["threshold"],
-                })
-        return events
+        denied = self._denied(device_sn, component)
+        if denied is not None:
+            return denied
+        return self._window_events(component, window_start, window_end,
+                                   include_self=False)
+
+    def query_causal_chain(self, device_sn, component, window_start, window_end):
+        """查该部件窗口内的**疑似因果链**（G6：跨部件、带方向与滞后）。
+
+        与 `query_neighbor_events`（只做同窗共现）不同：本方法把窗口内**本部件 +
+        邻居**的命中事件按**事件时间**排序，用 `infer_causal_links` 找出"先发生 +
+        拓扑合理（沿供电链/兄弟）+ 滞后在窗内"的有序对。
+
+        返回 `{causal_chains: [{cause, effect, lag_s, direction, confidence,
+        suspect}], window, truncated}`：
+        - `direction` = parent_to_child（上游先动，正常传播）/ sibling / child_to_parent；
+        - `suspect=True` 表示方向反了（子先父后），仅作提示、不否认；
+        - 未在拓扑表登记的部件不参与（不硬塞）。
+
+        诚实边界：这是**工程启发式**（时间序 + 拓扑相邻），非真正因果推断，故
+        对外措辞一律"疑似因果链"。
+        """
+        from .. import settings
+        if settings.causal_enabled() is False:
+            return {"causal_chains": [], "window": f"{window_start}-{window_end}",
+                    "truncated": False, "reason": "causal_disabled"}
+        denied = self._denied(device_sn, component)
+        if denied is not None:
+            return denied
+        raw = self._window_events(component, window_start, window_end,
+                                  include_self=True, with_time=True)
+        # 无事件时间的事件不参与因果推导（宁缺毋滥，不拿 0.0 硬凑）
+        timed = [e for e in raw if e.get("occurred_at_s") is not None]
+        nevents = [NeighborEvent(component=e["component"],
+                                 occurred_at_s=e["occurred_at_s"],
+                                 rule_id=e.get("rule_id", ""),
+                                 severity=e.get("severity_hint", ""))
+                   for e in timed]
+        links = infer_causal_links(nevents, max_lag_s=settings.causal_max_lag_s())
+        return {
+            "device_sn": device_sn,
+            "component": component,
+            "window": f"{window_start}-{window_end}",
+            "causal_chains": [link.to_dict() for link in links],
+            "truncated": False,
+        }
+
+    def _changes(self) -> Any:
+        """取变更来源（注入优先；否则按 settings 建默认来源，惰性缓存）。"""
+        if self._change_source is None:
+            from ..evidence.change_source import default_change_source
+            self._change_source = default_change_source()
+        return self._change_source
 
     def query_recent_changes(self, device_sn, component, since):
+        """查某部件近期变更（G7：走 `ChangeSource`，**真按 since 过滤**）。
+
+        此前这里读内置假表且**忽略 since**（静默错误：Agent 以为按时间过滤了、
+        实际拿到很久前的变更）。现改为经 `ChangeSource`，所有实现都真正过滤。
+        """
         if component not in ALLOWED_COMPONENTS:
             return err(ToolErrorCode.DENIED, component)
-        return {"changes": RECENT_CHANGES.get(component, [])}
+        src = self._changes()
+        try:
+            records = src.query(device_sn=device_sn, component=component, since=since)
+        except Exception:                      # noqa: BLE001
+            # 来源不可用不应让调查崩：降级到内置表（并如实标注来源）
+            from ..evidence.change_source import MockChangeSource
+            records = MockChangeSource().query(
+                device_sn=device_sn, component=component, since=since)
+            return {"changes": [r.to_dict() for r in records],
+                    "source": "builtin_fallback"}
+        return {"changes": [r.to_dict() for r in records],
+                "source": _source_name(src)}

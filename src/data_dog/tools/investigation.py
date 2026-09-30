@@ -60,8 +60,31 @@ class InvestigationTools:
         res = self.store.query_recent_changes(device_sn, component, since)
         if isinstance(res, dict) and res.get("ok") is False:
             return res  # 已统一错误（如 denied）
-        return ok({"device_sn": device_sn, "component": component,
-                   "since": since, "changes": res.get("changes", [])})
+        out = {"device_sn": device_sn, "component": component,
+               "since": since, "changes": res.get("changes", [])}
+        if res.get("source"):
+            out["source"] = res["source"]      # G7：标注变更数据来源，便于追责/排查
+        return ok(out)
+
+    def query_causal_chain(
+        self, device_sn: str, component: str, window_start: str, window_end: str
+    ) -> dict[str, Any]:
+        """查该部件的疑似因果链（G6：跨部件、带方向与滞后）。
+
+        与 `query_neighbor_events`（同窗共现）互补：这里给出"先跌的是 X，滞后 t 秒
+        Y 跟着异常"的**有序**关联。证据源若不实现该方法（只实现四查询的最小
+        Protocol）则返回空链——不冒充有数据。
+        """
+        fn = getattr(self.store, "query_causal_chain", None)
+        if fn is None:
+            return ok({"device_sn": device_sn, "component": component,
+                       "window": f"{window_start}-{window_end}",
+                       "causal_chains": [], "truncated": False,
+                       "note": "该证据源未提供因果链"})
+        res = fn(device_sn, component, window_start, window_end)
+        if isinstance(res, dict) and res.get("ok") is False:
+            return res  # 已统一错误（如 denied）
+        return ok(res)
 
     # ---- 工具描述，供模型 / 生成 tool 定义用 ----#
     TOOL_SPECS: dict[str, dict[str, Any]] = {
@@ -119,6 +142,24 @@ class InvestigationTools:
                     "since": {"type": "string", "description": "回溯时间起点，如 2026-08-10"},
                 },
                 "required": ["device_sn", "component", "since"],
+            },
+        },
+        "query_causal_chain": {
+            "name": "query_causal_chain",
+            "description": (
+                "查询某部件在时间窗内的跨部件疑似因果链（带方向与滞后）："
+                "谁先异常、谁随后跟随，沿供电/信号层级。用于区分'因'与'果'，"
+                "比同窗共现更进一步。返回的是工程启发式结果，非确定因果。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "device_sn": {"type": "string"},
+                    "component": {"type": "string", "description": "部件标识，如 joint_motor.front_left_hip"},
+                    "window_start": {"type": "string", "description": "窗口开始，如 09:55"},
+                    "window_end": {"type": "string", "description": "窗口结束，如 10:00"},
+                },
+                "required": ["device_sn", "component", "window_start", "window_end"],
             },
         },
     }

@@ -34,9 +34,13 @@ class E2EResult:
     decisions: list[Any] = field(default_factory=list)
     alerts_delivered: int = 0
     feedback: list[dict[str, Any]] = field(default_factory=list)
+    # 降级段（G4）：仅 `with_degradation=True` 时填充；默认空 → summary 不含该键
+    degradation: list[dict[str, Any]] = field(default_factory=list)
+    degradation_queued: int = 0
+    degradation_drained: list[str] = field(default_factory=list)
 
     def summary(self) -> dict[str, Any]:
-        return {
+        out: dict[str, Any] = {
             "operator": {"id": self.operator_id, "fields": self.operator_fields,
                          "rules": self.operator_rules},
             "data_plane": {"ingested": self.ingested, "resolved": self.resolved,
@@ -46,6 +50,14 @@ class E2EResult:
             "alerting": {"decisions": [d.report for d in self.decisions],
                          "delivered": self.alerts_delivered},
         }
+        # 仅在开启降级段时加入——关闭时输出与既有回放**逐字节一致**（零回归）。
+        if self.degradation:
+            out["degradation"] = {
+                "paths": [d["path"] for d in self.degradation],
+                "queued": self.degradation_queued,
+                "drained": self.degradation_drained,
+            }
+        return out
 
 
 def _detector_config() -> DetectorConfig:
@@ -121,7 +133,35 @@ def _telemetry_for(metrics: dict[str, Any], peak: float, current: float) -> dict
     }
 
 
-def run_e2e(*, auth: dict[str, Any] | None = None) -> E2EResult:
+def _run_degradation_segment(result: E2EResult) -> None:
+    """降级段（G4，旁路）：把 P2 候选喂给 `DegradationPolicy` 观察三条路径。
+
+    场景（对齐 §9.4）：
+      1. Agent 不可用 → 普通候选排队、硬规则候选直报；
+      2. 队列满 → 溢出候选退化为直报（不无限堆积）；
+      3. Agent 恢复 → drain 取回排队候选。
+
+    只写 `result.degradation*`，不改主链（reports/decisions）；关闭时这些字段为空。
+    """
+    from ..agent.degradation import DegradationPolicy
+
+    cands = result.candidates
+
+    # 场景 1+2：Agent 不可用，队列容量故意设小以观察溢出。
+    capacity = max(1, len(cands) - 1)
+    down = DegradationPolicy(agent_available=False, queue_capacity=capacity)
+    down_decisions = down.decide_batch(cands)
+    result.degradation = [d.to_dict() for d in down_decisions]
+    result.degradation_queued = len(down.queued)
+
+    # 场景 3：Agent 恢复 → drain 取回（不重复调查，仅验证队列可续）。
+    drained = down.drain()
+    down.agent_available = True
+    result.degradation_drained = drained
+
+
+def run_e2e(*, auth: dict[str, Any] | None = None,
+            with_degradation: bool = False) -> E2EResult:
     auth = auth or {"tenant_id": "tenant-real", "device_sn": "device-go2-0001"}
     result = E2EResult()
 
@@ -150,6 +190,11 @@ def run_e2e(*, auth: dict[str, Any] | None = None) -> E2EResult:
 
     if not result.candidates:
         return result
+
+    # ---- 降级段（G4，默认关）：候选在 Agent 不可用/可用/队列满下的处置 ----
+    # 旁路观测，不改主链；开启时才填充 result.degradation → 关闭时输出零回归。
+    if with_degradation:
+        _run_degradation_segment(result)
 
     # ---- 桥接证据源：把候选部件对应的高温遥测喂给 Agent ----
     # 取最后一个规范化事件里该部件的温度作为峰值

@@ -57,6 +57,25 @@ def _metric_candidates(n: int) -> None:
         pass
 
 
+def _metric_late(builder: Any, seen: dict[str, Any]) -> None:
+    """把候选构建器的迟到计数按**增量**记进 Prometheus（G2）。
+
+    静默丢迟到数据是最难排查的错误，故 `late_rejected`（早于水位线被拒）与
+    `late_merged`（容忍窗内并入）都必须可见。
+    """
+    try:
+        from ..core import metrics
+        for attr, counter in (("late_merged", metrics.late_merged_total),
+                              ("late_rejected", metrics.events_late_total)):
+            cur = int(getattr(builder, attr, 0) or 0)
+            delta = cur - int(seen.get(attr, 0))
+            if delta > 0:
+                counter.labels(source="stream").inc(delta)
+                seen[attr] = cur
+    except Exception:                                    # noqa: BLE001
+        pass
+
+
 def _metric_data_plane(plane: Any, seen: dict[str, Any]) -> None:
     """把**长驻** plane 的累计统计按**增量**记进 Prometheus 指标。
 
@@ -149,6 +168,7 @@ class StreamRunner:
                     self.stats["rejected"] += 1
             # 把本批数据面统计并入全局指标（否则流式侧的拒绝在 /metrics 不可见）
             _metric_data_plane(self.plane, self._metric_seen)
+            _metric_late(self.plane.builder, self._metric_seen)
             cands = self.plane.builder.build()             # only_touched
             self.stats["normalized"] += len(norms)
             self.stats["candidates"] += len(cands)

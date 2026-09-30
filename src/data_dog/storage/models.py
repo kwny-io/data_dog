@@ -9,6 +9,7 @@
   alert_feedback     人工/维修反馈
   knowledge_documents/chunks  用户导入的厂商文档（A7）
   investigation_job  异步调查任务的执行状态（G1）
+  state_checkpoint   共享状态的周期快照（G3）
 
 设计取舍：
   - 复杂/多态字段（metrics、hypotheses、evidence…）用 **JSON**（PostgreSQL 为 JSONB，
@@ -171,6 +172,32 @@ class KnowledgeDocumentRow(Base):
     created_at: Mapped[float] = mapped_column(Float, default=_now)
 
 
+class ChangeRecordRow(Base):
+    """变更记录（G7：推送式变更管理源）。
+
+    变更系统（CMDB/发布系统）调 `POST /v1/changes/ingest` 把"变了什么"落此表，
+    Agent 的 `query_recent_changes` 查库并**真按 since 过滤**。与内置假表
+    `RECENT_CHANGES` 不同：这是**真实接入**的持久化载体，租户隔离。
+
+    主键 (tenant_id, change_id)：change_id 由来源系统给出，跨租户可能重名。
+    `raw` 存来源特有字段（what/note/relevance…），对 Agent 返回时展开，
+    保持与内置表一致的形状。
+    """
+    __tablename__ = "change_records"
+
+    tenant_id: Mapped[str] = mapped_column(String(80), primary_key=True, index=True)
+    change_id: Mapped[str] = mapped_column(String(120), primary_key=True)
+    kind: Mapped[str] = mapped_column(String(40), default="")
+    target: Mapped[str] = mapped_column(String(120), index=True, default="")
+    applied_at: Mapped[str] = mapped_column(String(40), index=True, default="")
+    from_version: Mapped[str] = mapped_column(String(80), default="")
+    to_version: Mapped[str] = mapped_column(String(80), default="")
+    actor: Mapped[str] = mapped_column(String(120), default="")
+    source: Mapped[str] = mapped_column(String(80), default="")
+    raw: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[float] = mapped_column(Float, default=_now)
+
+
 class StateKvRow(Base):
     """跨副本共享状态（限流桶 / 候选分组）。
 
@@ -185,6 +212,27 @@ class StateKvRow(Base):
     key: Mapped[str] = mapped_column(String(300), primary_key=True)
     value: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     updated_at: Mapped[float] = mapped_column(Float, default=_now)
+
+
+class StateCheckpointRow(Base):
+    """共享状态的**周期快照**（G3：checkpoint / 恢复）。
+
+    状态已外置（`state_kv`）可跨副本共享，但**重启/淘汰后无"上次算到哪"**。
+    每次快照导出一份状态词典（按 prefix 过滤）存于此表，供恢复与对账。
+
+    语义边界（诚实）：这**不是**流处理器的精确一次 checkpoint——快照是**周期**的，
+    两次快照之间重启会丢这段增量（RPO = 间隔）。它是"状态词典的周期快照"。
+
+    `payload` 存状态词典（可含租户维度），故为**敏感数据**——访问控制/加密属运营职责。
+    主键 checkpoint_id = chk_<ts>_<hash>（时间有序，便于取最新 / 按保留数清理）。
+    """
+    __tablename__ = "state_checkpoint"
+
+    checkpoint_id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    prefix: Mapped[str] = mapped_column(String(300), default="")
+    n_keys: Mapped[int] = mapped_column(Integer, default=0)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[float] = mapped_column(Float, default=_now, index=True)
 
 
 class KnowledgeChunkRow(Base):

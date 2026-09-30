@@ -18,12 +18,19 @@ D 现有链路默认「Agent 在线」：候选进 `AgentLoop.investigate` 出�
 与 §14.2 的关系：本模块决定**候选该不该进调查**（上游分流），
 `alerting/policy.py` 决定**调查完了该不该上报**（下游门控）。两者互补。
 
-与真实队列的关系：本模块只做**决策**，不做传输。队列是可注入的有界结构，
-接入真实 MQ（Kafka / NATS / Redis Stream）时替换 `_queue` 即可，决策逻辑不变。
+与真实队列的关系：本模块只做**决策**，不做传输。队列是可注入的有界后端
+（`degradation_queue.QueueBackend`）——默认进程内，可换共享状态/真 MQ，决策逻辑不变。
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+
+from .degradation_queue import (
+    InMemoryQueue,
+    QueueBackend,
+    QueueItem,
+    make_item,
+)
 
 # 严重硬规则信号：命中任一即视为"确定性上报"路径（fail-safe）。
 # 刻意用明确的错误码/事件特征，不用过于宽泛的模式（如单字符 "E_"），
@@ -78,15 +85,16 @@ class DegradationPolicy:
     Args:
         agent_available: Agent（LLM 调查链路）当前是否可用。
         queue_capacity: 排队上限；超出则退化为直接上报，保证「不无限堆积」。
+        queue: 有界待办队列后端（默认进程内；换 `StateStoreQueue` 则持久/多副本共享）。
     """
     agent_available: bool = True
     queue_capacity: int = 100
-    _queue: list[str] = field(default_factory=list, repr=False)
+    queue: QueueBackend = field(default_factory=InMemoryQueue)
 
     @property
     def queued(self) -> list[str]:
         """当前排队中的候选 id（副本，外部不能改内部状态）。"""
-        return list(self._queue)
+        return [it.candidate_id for it in self.queue.items()]
 
     def decide(self, candidate) -> DegradationDecision:
         """对单个候选做出处置决策（纯函数式，除排队副作用外无隐藏状态）。
@@ -104,13 +112,16 @@ class DegradationPolicy:
                 candidate.severity_hint)
 
         # 2) Agent 不可用：排队；队列满则退化为直报。
+        #    push 是原子「查长度 + 追加」——多副本下不会各自以为没满而超发。
         if not self.agent_available:
-            if len(self._queue) >= self.queue_capacity:
+            accepted = self.queue.push(
+                make_item(cid, candidate.severity_hint),
+                capacity=self.queue_capacity)
+            if not accepted:
                 return DegradationDecision(
                     cid, DIRECT_REPORT,
                     "Agent 不可用且候选队列已满，仅保留聚合证据按严重度直接上报。",
                     candidate.severity_hint)
-            self._queue.append(cid)
             return DegradationDecision(
                 cid, QUEUE_FOR_AGENT,
                 "Agent 不可用，中低风险候选排队等待 Agent 恢复后复核。",
@@ -126,11 +137,13 @@ class DegradationPolicy:
         return [self.decide(c) for c in candidates]
 
     def drain(self) -> list[str]:
-        """取出并清空队列（Agent 恢复后取回待复核候选）。"""
-        out = list(self._queue)
-        self._queue.clear()
-        return out
+        """取出并清空队列（Agent 恢复后取回待复核候选），返回其 candidate_id。"""
+        return [it.candidate_id for it in self.queue.drain()]
+
+    def drain_items(self) -> list[QueueItem]:
+        """同 `drain`，但返回完整队列项（含 severity/attempts，供恢复后重放）。"""
+        return self.queue.drain()
 
     def reset(self) -> None:
         """清空队列（测试/演示用）。"""
-        self._queue.clear()
+        self.queue.reset()

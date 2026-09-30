@@ -119,3 +119,50 @@ def test_recent_changes_available():
     b = RepoEvidenceBridge(_rows(), device_sn="dev-1")
     changes = b.query_recent_changes("dev-1", "joint_motor.front_left_hip", "2026-08-10")
     assert "changes" in changes
+
+
+# ---------------------------------------------------------------- G6 因果链
+
+def test_causal_chain_parent_to_child():
+    """电池先异常（t=0）、电机后异常（t=2s）、拓扑同链（电池是电机祖先）
+    → 产出 parent_to_child 因果链，lag=2.0。"""
+    rows = [
+        {"device_sn": "dev-1", "occurred_at": "2026-08-13T10:00:00Z",
+         "component_ref": "battery.main", "metrics": {"soc": 0.1}},   # BATT_SOC_LOW
+        {"device_sn": "dev-1", "occurred_at": "2026-08-13T10:00:02Z",
+         "component_ref": "joint_motor.front_left_hip",              # 温度异常
+         "metrics": {"temperature": 96, "current": 12.0}},
+    ]
+    b = RepoEvidenceBridge(rows, device_sn="dev-1")
+    res = b.query_causal_chain("dev-1", "joint_motor.front_left_hip",
+                               "2026-08-13T10:00:00Z", "2026-08-13T10:00:05Z")
+    chains = res["causal_chains"]
+    assert chains, "应产出因果链"
+    lk = chains[0]
+    assert lk["cause_ref"] == "battery.main"
+    assert lk["effect_ref"] == "joint_motor.front_left_hip"
+    assert lk["lag_s"] == 2.0
+    assert lk["direction"] == "parent_to_child"
+    assert lk["suspect"] is False
+
+
+def test_causal_chain_denied_for_unknown_component():
+    b = RepoEvidenceBridge(_rows(), device_sn="dev-1")
+    res = b.query_causal_chain("dev-1", "not_in_allowlist", "a", "b")
+    assert isinstance(res, dict) and res.get("ok") is False
+
+
+def test_causal_chain_non_monotonic_events_no_link():
+    """同期异常（无先后）→ 无因果链。"""
+    rows = [
+        {"device_sn": "dev-1", "occurred_at": "2026-08-13T10:00:00Z",
+         "component_ref": "battery.main", "metrics": {"soc": 0.1}},
+        {"device_sn": "dev-1", "occurred_at": "2026-08-13T10:00:00Z",
+         "component_ref": "joint_motor.front_left_hip",
+         "metrics": {"temperature": 96}},
+    ]
+    b = RepoEvidenceBridge(rows, device_sn="dev-1")
+    res = b.query_causal_chain("dev-1", "joint_motor.front_left_hip",
+                               "2026-08-13T10:00:00Z", "2026-08-13T10:00:05Z")
+    assert res["causal_chains"] == []
+

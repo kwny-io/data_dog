@@ -118,32 +118,58 @@ class WindowFeature:
 
 
 class WindowBuffer:
-    """按 (device, component) 维护事件时间序列并算窗口特征。"""
+    """按 (device, component) 维护事件时间序列并算窗口特征。
+
+    **事件时间有序（G2）**：样本按 `(occurred_at_s, seq)` 有序插入，乱序到达不再
+    污染 `mean/slope/max/last`。未提供 `occurred_at_s` 时退化为到达顺序（用内部
+    自增 `seq` 当时间键）——与旧行为一致（零回归，旧调用点无需改）。
+
+    诚实边界：同一 buffer **不要**混用"给时间"与"不给时间"的调用——不给时间的样本
+    以 `seq` 为时间键（小整数），会排到真实 epoch 时间之前。一个 buffer 一种用法。
+    """
 
     def __init__(self, size: int = 30):
         self.size = size
-        self._series: dict[str, dict[str, list[float]]] = {}
+        # key → 有序样本列表 [(t, seq, metrics_dict), ...]
+        self._samples: dict[str, list[tuple[float, int, dict[str, float]]]] = {}
+        self._seq = 0
 
-    def push(self, key: str, metrics: dict[str, Any]) -> None:
-        s = self._series.setdefault(key, {})
-        for k, v in metrics.items():
-            if isinstance(v, bool) or not isinstance(v, (int, float)):
-                continue
-            s.setdefault(k, []).append(float(v))
-            if len(s[k]) > self.size:
-                s[k].pop(0)
+    def push(self, key: str, metrics: dict[str, Any],
+             occurred_at_s: float | None = None) -> None:
+        self._seq += 1
+        seq = self._seq
+        t = float(occurred_at_s) if occurred_at_s is not None else float(seq)
+        clean = {k: float(v) for k, v in metrics.items()
+                 if not isinstance(v, bool) and isinstance(v, (int, float))}
+        buf = self._samples.setdefault(key, [])
+        entry = (t, seq, clean)
+        # 有序插入：找到第一个 (t, seq) 更大的位置（乱序事件插入到正确位置）。
+        lo, hi = 0, len(buf)
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if (buf[mid][0], buf[mid][1]) <= (t, seq):
+                lo = mid + 1
+            else:
+                hi = mid
+        buf.insert(lo, entry)
+        if len(buf) > self.size:
+            buf.pop(0)                      # 淘汰**事件时间最早**的样本
 
     def features(self, key: str) -> WindowFeature:
-        s = self._series.get(key, {})
+        buf = self._samples.get(key, [])
+        series: dict[str, list[float]] = {}
+        for _t, _seq, metrics in buf:
+            for k, v in metrics.items():
+                series.setdefault(k, []).append(v)
         f = WindowFeature()
-        for k, vals in s.items():
+        for k, vals in series.items():
             if not vals:
                 continue
             f.mean[k] = sum(vals) / len(vals)
             f.last[k] = vals[-1]
             f.max[k] = max(vals)
             f.slope[k] = _slope(vals)
-        f.count = max((len(v) for v in s.values()), default=0)
+        f.count = max((len(v) for v in series.values()), default=0)
         return f
 
 

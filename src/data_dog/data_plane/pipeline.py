@@ -28,6 +28,7 @@ from .chain import (
 from .events import NormalizedTelemetryEvent, RawLogEnvelope
 from .gateway import TelemetryGateway
 from .resolver import CompatibilityResolver, OperatorBinding
+from .watermark import Watermark
 
 
 @dataclass
@@ -57,16 +58,24 @@ class DataPlane:
                  normalizer: Normalizer | None = None,
                  status_normalizer: StatusCodeNormalizer | None = None,
                  enricher: Enricher | None = None,
-                 builder: Any | None = None):
+                 builder: Any | None = None,
+                 watermark: Watermark | None = None):
         self.resolver = resolver
         self.gateway = gateway or TelemetryGateway()
         self.normalizer = normalizer or Normalizer()
         self.status_normalizer = status_normalizer or StatusCodeNormalizer()
         self.enricher = enricher or Enricher()
         self.window = WindowBuffer(size=window_size)
+        # 事件时间水位线（G2）：None 时窗口按到达顺序、合并不设界（旧行为，零回归）。
+        # 传入 Watermark 后：窗口按事件时间有序、合并收紧为有界迟到。
+        self.watermark = watermark
         # 候选构建器可注入：单机/测试用内存版（CandidateBuilder），多副本用
         # 共享后端版（SharedCandidateBuilder）。二者产出同形 CandidateEvent。
-        self.builder = builder if builder is not None else CandidateBuilder()
+        # 默认构建器继承 plane 的水位线，保证窗口/合并同一基准。
+        if builder is not None:
+            self.builder = builder
+        else:
+            self.builder = CandidateBuilder(watermark=watermark)
         self.stats = DataPlaneStats()
 
     # ---- 单个事件 ----
@@ -128,9 +137,10 @@ class DataPlane:
             if b is not None:
                 baseline[fld] = b
 
-        # 窗口特征
+        # 窗口特征（G2：传入事件时间，使窗口按事件时间有序；未启用水位线时
+        # 事件时间仍被采用，乱序不会污染 mean/slope——这是纯增益，无回归）。
         key = f"{env.device_sn}|{component}"
-        self.window.push(key, metrics)
+        self.window.push(key, metrics, occurred_at_s=_epoch_s(env.occurred_at))
 
         norm = NormalizedTelemetryEvent(
             event_id=env.event_id, tenant_id=env.tenant_id, device_sn=env.device_sn,
@@ -202,6 +212,13 @@ def _component_of(env: RawLogEnvelope) -> str:
     if env.component_hint:
         return env.component_hint
     return "unknown.unknown"
+
+
+def _epoch_s(occurred_at: Any) -> float | None:
+    """把 occurred_at 解析成 epoch 秒（供窗口按事件时间排序）；解析不了返回 None。"""
+    from .candidate import _parse_time
+    dt = _parse_time(occurred_at)
+    return None if dt is None else dt.timestamp()
 
 
 def _gateway_reason(err_obj: Any) -> str:

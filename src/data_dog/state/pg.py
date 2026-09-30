@@ -70,6 +70,17 @@ class PostgresStateStore(StateStore):
         cur = row[0] if row is not None else None
         return None if cur == {} else cur
 
+    def keys(self, prefix: str = "") -> list[str]:
+        with self._engine.connect() as conn:
+            if prefix:
+                rows = conn.execute(
+                    text("SELECT key FROM state_kv WHERE key LIKE :p ESCAPE '\\'"),
+                    {"p": _like_prefix(prefix)},
+                ).fetchall()
+            else:
+                rows = conn.execute(text("SELECT key FROM state_kv")).fetchall()
+        return [r[0] for r in rows]
+
     def delete(self, key: str) -> None:
         with self._engine.begin() as conn:
             conn.execute(text("DELETE FROM state_kv WHERE key = :k"), {"k": key})
@@ -81,3 +92,9 @@ class PostgresStateStore(StateStore):
 def _dump(value: Any) -> str:
     import json
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def _like_prefix(prefix: str) -> str:
+    """把 prefix 转成 LIKE 模式，转义 `%`/`_`/`\\`（否则前缀里的这些字符会被当通配符）。"""
+    esc = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return esc + "%"

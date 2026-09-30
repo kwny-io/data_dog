@@ -65,6 +65,19 @@ class RedisStateStore(StateStore):
     def get(self, key: str) -> Any:
         return self._load(key)
 
+    def keys(self, prefix: str = "") -> list[str]:
+        # 用 SCAN 游标迭代而非 KEYS：KEYS 会阻塞整个 Redis（大库上是生产事故）。
+        pattern = f"{prefix}*" if prefix else "*"
+        out: list[str] = []
+        cursor = 0
+        while True:
+            cursor, batch = self._client.scan(cursor=cursor, match=pattern,
+                                              count=500)
+            out.extend(batch)
+            if cursor == 0:
+                break
+        return out
+
     def delete(self, key: str) -> None:
         self._client.delete(key)
 

@@ -114,3 +114,21 @@ GET  /v1/investigations/{id}       查报告（**保持现状**，id 既可是 r
 ## 7. 依赖
 
 无强依赖。**本项是当前缺口批里优先级最高的一项**（唯一挡着端到端水平扩展的点）。
+
+## 8. 实现状态（已落地）
+
+已实现，`361 passed` 全绿（新增 `tests/test_async_investigation.py` 13 项）。落地时相对
+本设计的三处调整，如实记录：
+
+- **默认仍是同步**（`DD_INVESTIGATE_ASYNC` 默认 0）。理由：既有前端按"同步长任务"
+  实现，无预警地翻成 202 会直接崩。异步是**开启项**，前端改用轮询后再打开。同步/异步
+  **共用同一段执行逻辑**（`_execute_investigation`），不是两套实现。
+- **多副本不重复靠两层**：① 共享待办队列（`state_kv` 全局 key，多副本 `mutate` 原子
+  取件）；② 条件领取（`UPDATE ... WHERE status='pending'`，数据库保证只有一个 rowcount=1）。
+  第②层是**最终防线**——即使队列语义在某后端退化也不会重复执行。
+- **取消是原子的单条 UPDATE**（非"先查后改"）：`cancel_job` 单条语句把非终态置
+  `cancelled`，与 worker 的 `finish_job`（`WHERE status='running'`）在数据库层互斥——
+  取消与完成谁也不能覆盖谁。被取消的 job 的 `report_id` 保持 `NULL`。
+
+仍未解（诚实边界，同 §6）：进程内线程池**不是**分布式调度器；job 表需保留策略；
+取件与领取之间崩溃的 job 会停留 pending（需运维扫重投）。

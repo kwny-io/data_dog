@@ -116,3 +116,36 @@ class Watermark:
 
 - 可独立做（G2 是纯 `data_plane` 内改动）。
 - 与 **P4-5 分片** 衔接：水位线应按分片维护。
+
+## 8. 实现状态（已落地）
+
+已实现，新增 `tests/test_watermark.py` 12 项；`test_data_plane.py`、`test_state_store.py`、
+`test_stream.py` 合并/窗口断言零回归。落地时相对本设计的调整，如实记录：
+
+- **水位线默认关**（`DD_WATERMARK_ENABLED=0`，容忍 `DD_ALLOWED_LATENESS_S=30`）。
+  `DataPlane(builder=None)` 时才把 watermark 传给默认 `CandidateBuilder`；**构建器是
+  注入的**（服务走 `SharedCandidateBuilder`）时，由服务层保证 window 与 builder 拿到
+  **同一个** `ServiceState.watermark`（进程级共享），避免两处水位线漂移。
+- **零回归靠"未注入即旧语义"**：`CandidateBuilder` / `SharedCandidateBuilder` 未收到
+  `watermark` 时，合并判定**逐字节保留**原 `abs(delta) <= merge_window_s`；注入后才收紧为
+  **有向 + 水位线**（`0<=delta<=window` 正常 / `-lateness<=delta<0 且不早于水位线` 并入 /
+  更早则新开组）。这样既有调用点与既有测试不需要任何改动。
+- **`WindowBuffer` 改为按事件时间有序插入**（`(occurred_at_s, seq)` 二分插入；淘汰最早
+  事件时间的样本）。**不给时间时退化为到达顺序**（内部 `seq` 当时间键）——旧调用点行为
+  不变。`pipeline.process_one` **始终**传事件时间（纯增益：乱序不再污染 `mean/slope`）。
+- **`last_dt`/`window_end` 取最大事件时间**：乱序迟到事件并入后不把组的时间基准拉回，
+  否则后续正常事件会被误判为"大幅前跳"。顺序到达时二者自然等于最新事件（旧行为）。
+- **迟到指标**：`events_late_total{source}`（早于水位线被拒）+ `late_merged_total{source}`
+  （容忍窗内并入）。流式侧按**增量**上报（长驻 plane 的计数是累计值，见 runner 的 `_metric_seen`）。
+- **确定性**：`candidate_id` 由组 key 派生（不含时间），并入迟到事件只改 `sample_count`，
+  **ID 稳定**——单测 `test_candidate_id_stable_after_late_merge` 与
+  `test_deterministic_candidate_set_regardless_of_arrival_order` 覆盖。
+- **`_in_window_with_watermark` 在进程内版与共享版各写一份**（同构）：共享版的判定必须
+  在 `mutate` 闭包内（读的是共享状态里的 `last_dt`），无法直接复用进程内版的方法体。
+  两处逻辑保持同步是**有意的重复**（注释已标注），改一处需改两处。
+
+仍未解（诚实边界，同 §6）：**容忍窗口是权衡**（默认 30s，按真实分布调）；**不保证
+exactly-once**（水位线 + 计数是工程近似）；**水位线每副本各一份**——多副本下各见各的到货
+序，严格共享需按分片维护（对齐 P4-5，未做）。本项**未做水位线驱动的 flush**（§3.5）：
+现有 flush 仍是"源安静即落库 + flush_max 到量"，对低流量可见性已够；水位线驱动关窗是
+进一步优化，留待需要时。

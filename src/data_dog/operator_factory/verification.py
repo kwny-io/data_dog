@@ -14,7 +14,7 @@ import random
 from dataclasses import dataclass, field
 from typing import Any
 
-from .pipeline import Operator
+from .pipeline import Operator, replay_all
 
 # ---------------------------------------------------------------- Fuzz
 
@@ -125,3 +125,111 @@ def diff_replay(old: Operator, new: Operator, fixtures: list[Any],
         reason = "差异在白名单内" if ok else f"未解释的差异（only_new={only_new}, allowed={sorted(allowed)}）"
         out.entries.append(DiffEntry(fx.fixture_id, only_old, only_new, ok, reason))
     return out
+
+
+# ---------------------------------------------------------------- 聚合验证（G8）
+
+@dataclass
+class StepResult:
+    """验证流水线中一步的结果。`status` ∈ {pass, fail, skipped}——**skipped ≠ pass**。"""
+    step: str
+    status: str
+    detail: str = ""
+
+    @property
+    def ok(self) -> bool:
+        # skipped 不算失败（不拦），但也**不是**通过——由调用方据 status 区分
+        return self.status != "fail"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"step": self.step, "status": self.status, "detail": self.detail}
+
+
+@dataclass
+class FullVerifyResult:
+    steps: list[StepResult] = field(default_factory=list)
+
+    @property
+    def ok(self) -> bool:
+        return all(s.ok for s in self.steps)
+
+    @property
+    def any_blocking_failure(self) -> bool:
+        return any(s.status == "fail" for s in self.steps)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "ok": self.ok,
+            "steps": [s.to_dict() for s in self.steps],
+            "summary": {
+                "pass": sum(1 for s in self.steps if s.status == "pass"),
+                "fail": sum(1 for s in self.steps if s.status == "fail"),
+                "skipped": sum(1 for s in self.steps if s.status == "skipped"),
+            },
+        }
+
+
+def verify_full(
+    op: Operator,
+    fixtures: list[Any],
+    *,
+    old: Operator | None = None,
+    expected_new_hits: dict[str, list[str]] | None = None,
+    lockfile: str = "",
+    sca_runner: Any = None,
+    fuzz_iterations: int = 200,
+    fuzz_seed: int = 20260913,
+    sbom_out: str = "",
+) -> FullVerifyResult:
+    """跑完整验证流水线并返回各步结构化结果（§8.4）。
+
+    顺序：黄金回放 → Fuzz → 差分（需 old） → 安全扫描（DSL 静态 + 依赖 SCA） → SBOM。
+    任一步 `fail` → 整体 `ok=False`（对齐 lifecycle 门控：critical/high → Rejected）。
+    **工具缺失的步是 `skipped`，不拦、也不冒充通过**。
+    """
+    from .sbom import generate_sbom
+    from .security_scan import scan_dependencies, scan_operator
+
+    steps: list[StepResult] = []
+
+    # 1. 黄金回放
+    rep = replay_all(op, fixtures)
+    steps.append(StepResult(
+        "golden_replay",
+        "pass" if rep["n"] and rep["passed"] == rep["n"] else
+        ("fail" if rep["n"] else "skipped"),
+        f"{rep['passed']}/{rep['n']} 通过"))
+
+    # 2. Fuzz
+    fz = fuzz_operator(op, iterations=fuzz_iterations, seed=fuzz_seed)
+    steps.append(StepResult("fuzz", "pass" if fz.ok else "fail",
+                            f"{fz.n} 用例，{fz.crashes} 崩溃"))
+
+    # 3. 差分（有旧版才做）
+    if old is None:
+        steps.append(StepResult("diff", "skipped", "未提供旧版本算子"))
+    else:
+        dr = diff_replay(old, op, fixtures, expected_new_hits=expected_new_hits)
+        steps.append(StepResult("diff", "pass" if dr.ok else "fail",
+                                f"{len(dr.entries)} 个 Fixture"))
+
+    # 4. 安全扫描：DSL 静态
+    sr = scan_operator(op)
+    steps.append(StepResult("dsl_static", sr.status,
+                            f"{len(sr.findings)} finding"))
+
+    # 5. 安全扫描：依赖 SCA（可选工具 → 可能 skipped，非 pass）
+    dep = scan_dependencies(lockfile=lockfile, runner=sca_runner)
+    steps.append(StepResult("dependency_sca", dep.status, dep.note or
+                            f"{len(dep.findings)} finding"))
+
+    # 6. SBOM
+    try:
+        bom = generate_sbom(out_path=sbom_out)
+        steps.append(StepResult("sbom", "pass",
+                                f"{len(bom.bom.get('components', []))} 组件"
+                                f"（{bom.generator}, complete={bom.complete}）"))
+    except Exception as e:                          # noqa: BLE001
+        steps.append(StepResult("sbom", "fail", f"SBOM 生成失败: {e}"))
+
+    return FullVerifyResult(steps=steps)

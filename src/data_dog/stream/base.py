@@ -19,9 +19,11 @@
 - 本地文件源（file）：文件是可信本地输入，默认身份来自配置；可选从每行正文取
   device_sn（见 `FileTailSource` 的文档），但仍不取 tenant_id。
 
-诚实边界：本模块只提供**进程内**轮询循环。没有做"多副本分工消费一个 topic"的
-消费者组协调（Kafka 的 group 协调由 Kafka 自己做；file/mqtt 多副本会重复消费）。
-要水平扩展，用 Kafka（自带消费者组）或给每个副本分不同的文件/topic。
+诚实边界：本模块只提供**进程内**轮询循环。多副本分工消费靠各源自己的协调
+（见各源的 `coordination()`）：Kafka 用消费者组（broker 协调，已正确）；MQTT 用
+共享订阅 `$share/<group>/<topic>`（broker 轮询投递）；file 用应用层**租约选主**
+（`lease.py`，同时刻只有一个副本读该文件）。file 源本质仍是**单消费者**——租约只是
+"选一个"，要真正并行须转 Kafka/MQTT。
 """
 from __future__ import annotations
 
@@ -49,6 +51,14 @@ class StreamSource(ABC):
     @abstractmethod
     def poll(self, timeout: float) -> list[StreamMessage]:
         """取一批消息（至多一次 poll 的量）；`timeout` 秒内无新消息则返回空列表。"""
+
+    def coordination(self) -> str:
+        """多副本协调模式：`'broker-group' | 'lease' | 'none'`。
+
+        供 `/readyz` 与运维一眼看出"这个源靠什么保证多副本不重复消费"。
+        默认 `'none'`（无协调：多副本会重复消费，见本模块头部边界说明）。
+        """
+        return "none"
 
     def close(self) -> None:                       # noqa: B027 - 有意可选，非抽象
         pass

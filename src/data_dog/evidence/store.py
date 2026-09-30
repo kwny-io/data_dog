@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from typing import Any, Protocol
 
+from ..data_plane.topology import TOPOLOGY as _TOPOLOGY
 from ..errors import ToolErrorCode, err
 from .detectors import load_detector
 
@@ -44,14 +45,11 @@ class EvidenceSource(Protocol):
         self, device_sn: str, component: str, since: str
     ) -> dict[str, Any]: ...
 
-# 可查询的部件范围白名单（模拟权限控制）
-ALLOWED_COMPONENTS = {
-    "joint_motor.front_left_hip",
-    "joint_motor.front_right_hip",
-    "joint_motor.front_left_knee",
-    "battery.main",
-    "controller.main",
-}
+
+# 可查询的部件范围白名单（模拟权限控制）。
+# G6：不再手写——由拓扑唯一真相源 `data_plane/topology.py` 的 TOPOLOGY 派生，
+# 消除"白名单与拓扑各写一份、可能漂移"的散落硬编码。
+ALLOWED_COMPONENTS = set(_TOPOLOGY.keys())
 
 # ---- 同设备、同部件在不同时间窗的遥测 ----#
 # 结构：component -> window_key -> metrics dict
@@ -243,9 +241,16 @@ class EvidenceStore:
     def query_recent_changes(
         self, device_sn: str, component: str, since: str
     ) -> dict[str, Any]:
-        """查某部件近期固件/算子/配置变更（用于排查'变更新引入异常'）。"""
+        """查某部件近期固件/算子/配置变更（用于排查'变更新引入异常'）。
+
+        `since` **真正生效**（此前被静默忽略）：用 `change_source._in_window` 过滤，
+        无法解析时间的时间串**保留**（宁多勿漏）。返回形状不变。
+        """
         # 存在部件即检查权限；变更表里无条目的部件返回空列表
         allowed = component in ALLOWED_COMPONENTS
         if not allowed:
             return err(ToolErrorCode.DENIED, component)
-        return {"changes": RECENT_CHANGES.get(component, [])}
+        from .change_source import _in_window
+        items = [it for it in RECENT_CHANGES.get(component, [])
+                 if _in_window(str(it.get("applied_at", "")), since, "")]
+        return {"changes": items}

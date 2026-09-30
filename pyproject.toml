@@ -56,6 +56,14 @@ mqtt = [
 kafka = [
     "kafka-python>=2.0",
 ]
+# 算子编译期安全扫描（G8）：依赖 SCA。缺失时扫描步标记 skipped（非静默通过）。
+scan = [
+    "pip-audit>=2.7",
+]
+# SBOM 生成（G8）：CycloneDX 格式。缺失时用内置最小实现（结构合法，如实标注不完整）。
+sbom = [
+    "cyclonedx-bom>=4.0",
+]
 
 [project.scripts]
 data-dog = "data_dog.cli:app"

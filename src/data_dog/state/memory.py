@@ -33,6 +33,10 @@ class InMemoryStateStore(StateStore):
         with self._lock:
             return self._data.get(key)
 
+    def keys(self, prefix: str = "") -> list[str]:
+        with self._lock:
+            return [k for k in self._data if k.startswith(prefix)]
+
     def delete(self, key: str) -> None:
         with self._lock:
             self._data.pop(key, None)

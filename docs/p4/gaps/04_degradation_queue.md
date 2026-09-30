@@ -93,3 +93,32 @@ class TableQueue: ...         # 可选：专用表（大队列/需要对账时�
 
 - 与 **G3**（state 快照）同源：持久队列可被 checkpoint 覆盖。
 - 无强前置，可独立做。
+
+## 8. 实现状态（已落地）
+
+已实现，全量套件绿（新增 `tests/test_degradation_queue.py` 13 项；`test_degradation.py`
+13 项、`test_e2e.py` 5 项零回归）。落地时相对本设计的调整，如实记录：
+
+- **`push` 把「查长度 + 追加」合并为一步原子操作**，容量由参数传入。原因：旧代码在
+  决策函数里 `len(queue) >= capacity` 判断，多副本下各算各的长度会**超发**；`StateStoreQueue`
+  借 `mutate` 的原子性天然避免。`push` 返回 `bool`（满→False），调用方退化为直报。
+- **`DegradationPolicy` 新增 `queue: QueueBackend` 构造注入**（默认 `InMemoryQueue`，
+  与旧行为逐字节一致）；新增 `drain_items()` 返回完整 `QueueItem`（含 severity/attempts，
+  供恢复后重放），原 `drain()` 仍返回 `candidate_id` 列表（保持既有调用方契约）。
+- **队列项 `QueueItem` 自描述**：`{candidate_id, severity, enqueued_at, attempts}` 的 JSON；
+  `from_dict` **宽容解析**——缺字段用默认值，跨版本恢复不因少字段而崩；底层状态被写成
+  非 list（脏数据）时当作空队列，不崩。
+- **后端选择走 `settings.degradation_queue_backend()`**（`DD_DEGRADATION_QUEUE`，默认
+  `memory`；`state` → `StateStoreQueue`）。`state` 要真跨进程持久/共享，`DD_STATE_BACKEND`
+  须落在 postgres/redis——memory 状态后端只在同进程内共享（模拟"重启"够用、真重启不够）。
+- **e2e 降级段默认关**（`run_e2e(with_degradation=True)` 或 CLI `--with-degradation`）：
+  关闭时 `summary()` **不含** `degradation` 键，与既有回放逐字节一致（零回归，已实测）。
+  该段是**旁路观测**——不改主链的 reports/decisions。
+- **e2e 实际只跑出 1 个候选且命中硬规则 → `direct_report`**，队列未被撑起（`queued: 0`）。
+  如实说明：现有 e2e 输入不足以触发排队路径；排队/溢出/恢复的行为由单测覆盖。
+
+仍未解（诚实边界，同 §6）：**持久 ≠ 消息队列**（`StateStoreQueue` 是共享状态，不是
+Kafka——无投递确认/消费组/分区；真 MQ 语义需换后端，接口已留位）；**队列项是 candidate_id
+引用**（恢复后重放依赖候选已落库，真相在 `candidates` 表）；**退避/重试不在决策层**
+（`attempts` 只做记录，退避属传输层）；**服务侧接入未做**（§3.4 标为可选，本项只做队列
+持久化 + e2e）。
