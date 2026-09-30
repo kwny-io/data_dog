@@ -836,3 +836,150 @@ def find_previous_signed_version(session: Session, *, tenant_id: str,
         if r.signature:  # 有签名才算"可回滚到的版本"
             return _row_dict(r)
     return None
+
+
+# ---------------------------------------------------------------- 值班表（P4-3）
+
+def upsert_rota(session: Session, *, tenant_id: str, rota_id: str, domain: str,
+                level: int, assignee: str, start_at: float, end_at: float,
+                channel: str = "webhook", target: str = "") -> dict[str, Any]:
+    """写入/更新一条值班条目（按主键幂等）。同一排班反复 PUT 收敛到同一行。"""
+    pk = (tenant_id, rota_id)
+    row = session.get(M.OncallRotaRow, pk)
+    if row is None:
+        row = M.OncallRotaRow(tenant_id=tenant_id, rota_id=rota_id)
+        session.add(row)
+    row.domain = domain
+    row.level = int(level)
+    row.assignee = assignee
+    row.start_at = float(start_at)
+    row.end_at = float(end_at)
+    row.channel = channel or "webhook"
+    row.target = target or ""
+    session.flush()
+    return _row_dict(row)
+
+
+def list_rota(session: Session, *, tenant_id: str,
+              domain: str | None = None) -> list[dict[str, Any]]:
+    """列出本租户的值班条目（可按领域过滤），按起始时间排序。"""
+    q = session.query(M.OncallRotaRow).filter(
+        M.OncallRotaRow.tenant_id == tenant_id)
+    if domain is not None:
+        q = q.filter(M.OncallRotaRow.domain == domain)
+    q = q.order_by(M.OncallRotaRow.start_at, M.OncallRotaRow.level)
+    return [_row_dict(r) for r in q.all()]
+
+
+def delete_rota(session: Session, *, tenant_id: str, rota_id: str) -> bool:
+    """删除一条值班条目。返回是否删除（不存在 → False）。"""
+    row = session.get(M.OncallRotaRow, (tenant_id, rota_id))
+    if row is None:
+        return False
+    session.delete(row)
+    session.flush()
+    return True
+
+
+# ---------------------------------------------------------------- 告警投递台账（P4-3）
+
+def upsert_delivery(session: Session, *, tenant_id: str, delivery_id: str,
+                    event_id: str, level: int, channel: str, target: str,
+                    assignee: str, status: str, sent_at: float | None,
+                    ack_deadline: float | None, last_error: str = "",
+                    bump_attempts: bool = True, domain: str = "*") -> dict[str, Any]:
+    """写入/更新一条投递台账（按 (tenant_id, delivery_id) 幂等）。
+
+    `delivery_id = hash(event_id, level)` → 同一告警同一级只投一次；重复触发是**更新**
+    （attempts+1、刷新 sent_at/deadline）而非新增行——这正是"幂等"的落点。
+    """
+    pk = (tenant_id, delivery_id)
+    row = session.get(M.AlertDeliveryRow, pk)
+    if row is None:
+        row = M.AlertDeliveryRow(tenant_id=tenant_id, delivery_id=delivery_id)
+        session.add(row)
+        attempts = 1 if bump_attempts else 0
+    else:
+        attempts = int(row.attempts or 0) + (1 if bump_attempts else 0)
+    row.event_id = event_id
+    row.level = int(level)
+    row.domain = domain or "*"
+    row.channel = channel
+    row.target = target
+    row.assignee = assignee
+    row.status = status
+    row.attempts = attempts
+    row.sent_at = sent_at
+    row.ack_deadline = ack_deadline
+    if last_error:
+        row.last_error = last_error
+    session.flush()
+    return _row_dict(row)
+
+
+def get_delivery(session: Session, *, tenant_id: str,
+                 delivery_id: str) -> dict[str, Any] | None:
+    r = session.get(M.AlertDeliveryRow, (tenant_id, delivery_id))
+    return _row_dict(r) if r else None
+
+
+def list_deliveries(session: Session, *, tenant_id: str,
+                    event_id: str | None = None, status: str | None = None,
+                    limit: int | None = None) -> list[dict[str, Any]]:
+    """列出本租户的投递记录（可按告警/状态过滤），按创建时间排序。"""
+    q = session.query(M.AlertDeliveryRow).filter(
+        M.AlertDeliveryRow.tenant_id == tenant_id)
+    if event_id is not None:
+        q = q.filter(M.AlertDeliveryRow.event_id == event_id)
+    if status is not None:
+        q = q.filter(M.AlertDeliveryRow.status == status)
+    q = q.order_by(M.AlertDeliveryRow.created_at, M.AlertDeliveryRow.delivery_id)
+    return _page(q, limit, 0)
+
+
+def ack_deliveries(session: Session, *, tenant_id: str, event_id: str,
+                   at: float) -> int:
+    """把某告警**所有 pending** 投递标记为 acked（停止升级）。返回改动条数。
+
+    ack 是"人看到了"，故同一告警当前还在等待的所有级别一起停——一处确认即止损，
+    不要求逐级 ack。
+    """
+    q = (session.query(M.AlertDeliveryRow)
+         .filter(M.AlertDeliveryRow.tenant_id == tenant_id,
+                 M.AlertDeliveryRow.event_id == event_id,
+                 M.AlertDeliveryRow.status == "pending"))
+    n = 0
+    for row in q.all():
+        row.status = "acked"
+        row.acked_at = at
+        n += 1
+    session.flush()
+    return n
+
+
+def set_delivery_status(session: Session, *, tenant_id: str, delivery_id: str,
+                        status: str, last_error: str = "") -> None:
+    """更新单条投递状态（升级/失败时用）。"""
+    row = session.get(M.AlertDeliveryRow, (tenant_id, delivery_id))
+    if row is None:
+        return
+    row.status = status
+    if last_error:
+        row.last_error = last_error
+    session.flush()
+
+
+def list_due_deliveries(session: Session, *, now: float,
+                        limit: int | None = None) -> list[dict[str, Any]]:
+    """扫**所有租户**中「pending 且已过 ack_deadline」的投递（升级 sweeper 用）。
+
+    **故意不按租户过滤**：升级引擎是系统级后台进程，须跨租户找出所有超时未确认的
+    告警——与请求路径的租户作用域规则不同，此处是受控的系统扫描。调用方（sweeper）
+    对每条命中的行按其自带 tenant_id 单独会话处理（RLS 下逐租户放行）。
+    """
+    q = (session.query(M.AlertDeliveryRow)
+         .filter(M.AlertDeliveryRow.status == "pending",
+                 M.AlertDeliveryRow.ack_deadline.isnot(None),
+                 M.AlertDeliveryRow.ack_deadline <= now)
+         .order_by(M.AlertDeliveryRow.ack_deadline))
+    return _page(q, limit, 0)

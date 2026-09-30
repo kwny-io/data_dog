@@ -321,3 +321,56 @@ class OperatorRolloutEventRow(Base):
     reason: Mapped[str] = mapped_column(Text, default="")
     actor: Mapped[str] = mapped_column(String(120), default="")
     at: Mapped[float] = mapped_column(Float, default=_now)
+
+
+class OncallRotaRow(Base):
+    """值班表（P4-3）：谁在什么时段值班，按领域与级别。
+
+    一条 = 一个 (领域, 级别, 时间窗) 的排班。查"当前谁值班"在应用层做（`oncall.py`）：
+    取 `start_at <= now < end_at` 且领域匹配的**级别最低**条目（一线优先）。
+
+    `rota_id = hash(domain|level|start_at)` 确定性派生：同一排班反复 PUT 收敛到同一
+    行。`tenant_id` 进主键（与其余租户表一致）；RLS 迁移同步加策略。
+    """
+    __tablename__ = "oncall_rota"
+
+    tenant_id: Mapped[str] = mapped_column(String(80), primary_key=True, index=True)
+    rota_id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    domain: Mapped[str] = mapped_column(String(120), index=True, default="*")
+    level: Mapped[int] = mapped_column(Integer, default=1)
+    assignee: Mapped[str] = mapped_column(String(120), default="")
+    start_at: Mapped[float] = mapped_column(Float, default=_now)
+    end_at: Mapped[float] = mapped_column(Float, default=_now)
+    channel: Mapped[str] = mapped_column(String(40), default="webhook")
+    target: Mapped[str] = mapped_column(String(400), default="")
+    created_at: Mapped[float] = mapped_column(Float, default=_now)
+
+
+class AlertDeliveryRow(Base):
+    """告警投递台账（P4-3）：每次投递尝试一行，兼作**升级计时**依据。
+
+    幂等：`delivery_id = hash(event_id, level)` —— 同一告警同一级只投一次（重复触发
+    是 UPSERT 更新而非新增行）。
+
+    - `status`：pending（已发待 ack）/ acked（有人确认）/ escalated（超 SLA 已升级）
+      / failed（到最高级仍无 ack，升级链尽头）。
+    - `ack_deadline`：超此未被 ack → 升级到 `level+1`（写新行）。
+    - `attempts` / `last_error`：投递失败的审计（重投由升级引擎按 SLA 节奏重发）。
+    """
+    __tablename__ = "alert_delivery"
+
+    tenant_id: Mapped[str] = mapped_column(String(80), primary_key=True, index=True)
+    delivery_id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    event_id: Mapped[str] = mapped_column(String(80), index=True)
+    level: Mapped[int] = mapped_column(Integer, default=1)
+    domain: Mapped[str] = mapped_column(String(120), default="*")
+    channel: Mapped[str] = mapped_column(String(40), default="webhook")
+    target: Mapped[str] = mapped_column(String(400), default="")
+    assignee: Mapped[str] = mapped_column(String(120), default="")
+    status: Mapped[str] = mapped_column(String(20), index=True, default="pending")
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    sent_at: Mapped[float | None] = mapped_column(Float, nullable=True)
+    acked_at: Mapped[float | None] = mapped_column(Float, nullable=True)
+    ack_deadline: Mapped[float | None] = mapped_column(Float, nullable=True)
+    last_error: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[float] = mapped_column(Float, default=_now)

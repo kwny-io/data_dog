@@ -36,6 +36,14 @@ config:
   DD_PROJECT_ROOT: /app
   DD_VENDOR_DOCS: /app/vendor_docs
   DD_OPERATORS_DIR: /app/operators
+  # 通知/值班/升级（P4-3）。默认关：告警流止于 SaaS adapter（落库审计）。
+  # ⚠ 打开后**升级 sweeper 是 API 副本的进程内线程**——多副本会各自扫、重复升级
+  #   （虽因幂等键收敛到同一行，仍会重复投递）。多副本启用前需加租约（见
+  #   docs/p4/03_notify_oncall.md §6）。单副本可安全打开。
+  DD_NOTIFY_ENABLED: "0"
+  # 通知目标的 SSRF 门：默认失败关闭（拒内网/回环）。受信内网才置 1。
+  DD_NOTIFY_ALLOW_PRIVATE: "0"
+  DD_NOTIFY_ACK_SLA_S: "300"
 
 # ---- 敏感配置（不进 values 明文；由外部 Secret 注入）----
 # secret.existingSecret 非空 → 用它；否则用 secret.create 由本 chart 建
@@ -49,6 +57,11 @@ secret:
     DD_API_KEY: ""
     DD_OPERATOR_SIGNING_KEY: ""
     DD_REDIS_URL: ""
+    # 通知凭据（P4-3）：**不进 values 明文**，由外部 Secret 注入。
+    DD_SMTP_HOST: ""
+    DD_SMTP_USER: ""
+    DD_SMTP_PASSWORD: ""
+    DD_IM_WEBHOOK_URL: ""
 
 # ---- API 工作负载（无状态，可任意扩缩）----
 api:

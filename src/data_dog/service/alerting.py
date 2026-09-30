@@ -186,6 +186,33 @@ def report_alert(
     }
 
 
+def notify_alert(tenant_id: str, event_id: str) -> dict[str, Any]:
+    """在告警产生后按值班表派发首次通知（P4-3）。返回结果摘要。
+
+    **只在 `DD_NOTIFY_ENABLED=1` 时动作**——默认关：告警流止于 SaaS adapter（落库
+    审计），不主动外发。开启后按值班表取一线值班人，经 NotifierRegistry 投递并落
+    `alert_delivery` 台账（ack_deadline 起算）。
+
+    无值班人 → 失败关闭（`dispatched=False, reason=no_oncall`），**不假装已通知**。
+
+    调用点：`_execute_investigation` 在**告警落库事务提交之后**调用（独立会话），
+    避免与落库事务争同一连接锁。
+    """
+    from .. import settings
+    from ..alerting.escalation import EscalationEngine
+    from ..storage import repository as repo
+    from ..storage.db import session_scope
+
+    if not settings.notify_enabled():
+        return {"dispatched": False, "reason": "disabled"}
+    with session_scope(tenant_id=tenant_id) as s:
+        alert = repo.get_alert(s, event_id, tenant_id=tenant_id)
+    if alert is None:
+        return {"dispatched": False, "reason": "no_alert"}
+    return EscalationEngine().dispatch(
+        tenant_id=tenant_id, alert=alert).to_dict() | {"dispatched": True}
+
+
 def _payload(event: AlertEvent, decision: Any) -> dict[str, Any]:
     """投递载荷：对齐 §12.5（业务摘要 + 受控证据 Receipt，不含明文设备号）。"""
     return {

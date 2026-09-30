@@ -64,7 +64,7 @@ from ..storage import repository as repo
 from ..storage.db import database_url as _database_url
 from ..storage.db import get_engine, reset_tenant_context, session_scope, set_tenant_context
 from ..tools.investigation import InvestigationTools
-from .alerting import report_alert
+from .alerting import notify_alert, report_alert
 from .evidence import RepoEvidenceBridge
 
 _log = get_logger(__name__)
@@ -255,6 +255,49 @@ def _stop_checkpoint() -> None:
     _set_checkpoint_loop(None)
 
 
+# ------------------------------------------------------------------ 告警升级 sweeper（P4-3）
+
+# 进程内单例。lifespan 起、关停时停；测试可读其 alive 断言。
+_escalation_lock = threading.Lock()
+_escalation: Any = None
+
+
+def _get_escalation():
+    with _escalation_lock:
+        return _escalation
+
+
+def _set_escalation(sweeper) -> None:
+    global _escalation
+    with _escalation_lock:
+        _escalation = sweeper
+
+
+def _start_escalation_if_enabled() -> None:
+    """起告警升级 sweeper（`DD_NOTIFY_ENABLED=1`）。
+
+    默认关：不配 `DD_NOTIFY_ENABLED` 时告警流止于 SaaS adapter（落库审计），不主动
+    外发、不升级。开启后才按值班表派发并计时升级。
+    """
+    if not settings.notify_enabled():
+        return
+    from ..alerting.escalation import EscalationEngine, EscalationSweeper
+
+    sweeper = EscalationSweeper(EscalationEngine())
+    sweeper.start()
+    _set_escalation(sweeper)
+    _log.info("告警升级 sweeper 已启动", extra={
+        "interval_s": settings.notify_sweep_interval_s()})
+
+
+def _stop_escalation() -> None:
+    sweeper = _get_escalation()
+    if sweeper is None:
+        return
+    sweeper.stop()
+    _set_escalation(None)
+
+
 def _run_investigation_job(tenant_id: str, candidate_id: str,
                            should_cancel) -> dict[str, Any]:
     """worker 的执行回调：跑一次调查，返回 job 终态结果（不抛异常给 worker）。
@@ -379,7 +422,14 @@ async def _lifespan(app: FastAPI):
         # 状态快照是可选增强：起不来不影响服务（只是重启时无法从快照恢复）
         _log.error("状态快照任务启动失败",
                    extra={"error": f"{type(e).__name__}: {e}"})
+    try:
+        _start_escalation_if_enabled()
+    except Exception as e:                           # noqa: BLE001
+        # 升级 sweeper 是可选增强：起不来不影响 HTTP 服务（只是无人自动升级告警）
+        _log.error("告警升级 sweeper 启动失败",
+                   extra={"error": f"{type(e).__name__}: {e}"})
     yield
+    _stop_escalation()
     _stop_job_runner()
     _stop_checkpoint()
     _stop_stream()
@@ -1517,6 +1567,106 @@ def create_app() -> FastAPI:
                 "device_sn": cand["device_sn"], "signal": signal,
                 "metric": metric, "forecast": fc.to_dict()}
 
+    # -------------------------------------------------- 通知 / 值班 / 升级（P4-3）
+
+    @app.post("/v1/alerts/{event_id}/ack", tags=["notify"])
+    def ack_alert(
+        event_id: str,
+        x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
+    ) -> dict[str, Any]:
+        """确认告警（停止升级）：该告警所有 pending 投递置 acked。
+
+        幂等：重复 ack 不会二次改动（第二次改动条数为 0）。被确认意味着有人接手，
+        若告警状态允许则一并推进到 `recovering`（转移不合法则只 ack，不硬造状态）。
+        """
+        from ..alerting.escalation import EscalationEngine
+        tenant = _tenant_required(x_tenant_id)
+        with session_scope() as s:
+            if repo.get_alert(s, event_id, tenant_id=tenant) is None:
+                raise HTTPException(status_code=404, detail="告警不存在")
+        engine = EscalationEngine()
+        acked = engine.ack(tenant_id=tenant, event_id=event_id)
+        return {"ok": True, "event_id": event_id, "acked": acked}
+
+    @app.get("/v1/oncall", tags=["notify"])
+    def get_oncall(
+        x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
+        domain: str | None = None,
+        at: float | None = None,
+    ) -> dict[str, Any]:
+        """当前值班表。`domain` 可选过滤；`at`（epoch 秒）可选指定时刻。
+
+        另给 `resolved`：在 `at`（默认现在）解析出的"当前一线值班人"（无则回退更
+        高级别）——这就是告警实际会派给谁。
+        """
+        from ..alerting.oncall import current_oncall, rows_to_entries
+        tenant = _tenant_required(x_tenant_id)
+        now = float(at) if at is not None else time.time()
+        with session_scope() as s:
+            rows = repo.list_rota(s, tenant_id=tenant, domain=domain)
+        entries = rows_to_entries(rows)
+        resolved = current_oncall(entries, domain=domain, at=now)
+        return {"ok": True, "count": len(rows),
+                "items": [e.to_dict() for e in entries],
+                "resolved": resolved.to_dict() if resolved else None}
+
+    @app.put("/v1/oncall", tags=["notify"])
+    def put_oncall(
+        payload: dict[str, Any],
+        x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
+    ) -> dict[str, Any]:
+        """设置一条值班（`{domain, level, assignee, start_at, end_at, channel, target}`）。
+
+        `rota_id` 由 (domain, level, start_at) 确定性派生——同一排班反复 PUT 收敛到
+        同一行。`start_at`/`end_at` 为 epoch 秒（`end_at` 须晚于 `start_at`）。
+        """
+        from ..alerting.oncall import make_rota_id
+        tenant = _tenant_required(x_tenant_id)
+        body = payload or {}
+        try:
+            domain = str(body.get("domain") or "*")
+            level = int(body.get("level", 1))
+            assignee = str(body.get("assignee") or "")
+            start_at = float(body["start_at"])
+            end_at = float(body["end_at"])
+        except (KeyError, TypeError, ValueError):
+            raise HTTPException(
+                status_code=422,
+                detail="需含 {domain?, level, assignee, start_at, end_at}（时间为 epoch 秒）"
+            ) from None
+        if level < 1:
+            raise HTTPException(status_code=422, detail="level 须 ≥ 1")
+        if end_at <= start_at:
+            raise HTTPException(status_code=422, detail="end_at 须晚于 start_at")
+        channel = str(body.get("channel") or "webhook")
+        target = str(body.get("target") or "")
+        rota_id = make_rota_id(domain, level, start_at)
+        with session_scope() as s:
+            row = repo.upsert_rota(
+                s, tenant_id=tenant, rota_id=rota_id, domain=domain,
+                level=level, assignee=assignee, start_at=start_at,
+                end_at=end_at, channel=channel, target=target)
+        return {"ok": True, "rota": row}
+
+    @app.get("/v1/notifications", tags=["notify"])
+    def list_notifications(
+        x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
+        event_id: str | None = None,
+        status: str | None = None,
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        """投递记录（审计）：每次通知尝试一行，含状态/值班人/ack 截止。
+
+        可按 `event_id` / `status` 过滤。这是回答"这条告警到底通知到谁、确认了没"
+        的落点。
+        """
+        tenant = _tenant_required(x_tenant_id)
+        with session_scope() as s:
+            rows = repo.list_deliveries(s, tenant_id=tenant,
+                                        event_id=event_id, status=status,
+                                        limit=limit)
+        return {"ok": True, "count": len(rows), "items": rows}
+
     return app
 
 
@@ -1697,6 +1847,18 @@ def _execute_investigation(tenant: str, candidate_id: str, *,
         _log.warning("P3 上报失败", extra={"error": f"{type(e).__name__}: {e}"})
         alerting_result = {"reported": False,
                            "reason": f"{type(e).__name__}: {e}"}
+
+    # ---- P4-3：按值班表派发通知（默认关；无值班人则失败关闭）----
+    # 在告警落库事务**提交之后**（独立会话）做，避免与落库事务争同一连接锁。
+    if alerting_result.get("reported") and alerting_result.get("new"):
+        try:
+            alerting_result["dispatch"] = notify_alert(
+                tenant, str(alerting_result.get("event_id", "")))
+        except Exception as e:                      # noqa: BLE001
+            _log.warning("P4-3 通知派发失败",
+                         extra={"error": f"{type(e).__name__}: {e}"})
+            alerting_result["dispatch"] = {"dispatched": False,
+                                           "reason": f"{type(e).__name__}: {e}"}
 
     report_dict = report.to_dict()
     usage = report_dict.get("model_provenance", {}).get("usage", {})

@@ -510,6 +510,94 @@ def forecast_thresholds() -> dict[str, float]:
     return out
 
 
+# ---------------------------------------------------------------- 通知 / 值班 / 升级（P4-3）
+
+def notify_enabled() -> bool:
+    """是否在调查产事件后**主动投递通知**（默认关）。
+
+    默认关：既有部署的告警流止于 SaaS adapter（落库审计）；开启后才会按值班表
+    派发到 webhook/邮件/IM。开启即意味着"会真的往外发消息"，故默认不干扰。
+    """
+    return _get_bool("DD_NOTIFY_ENABLED", default=False)
+
+
+def notify_ack_sla_s() -> float:
+    """一线（level=1）确认 SLA（秒）：超此未 ack → 升级到下一级。默认 300s。"""
+    return max(1.0, _get_float("DD_NOTIFY_ACK_SLA_S", default=300.0))
+
+
+def notify_sla_l2_s() -> float:
+    """二线（level=2）SLA（秒）。默认 600s。"""
+    return max(1.0, _get_float("DD_NOTIFY_SLA_L2_S", default=600.0))
+
+
+def notify_sla_l3_s() -> float:
+    """三线/专家（level=3）SLA（秒）。默认 900s。"""
+    return max(1.0, _get_float("DD_NOTIFY_SLA_L3_S", default=900.0))
+
+
+def notify_max_level() -> int:
+    """升级链最高级（含）。到顶仍无 ack → 该投递链记为 failed（不无限升级）。默认 3。"""
+    return max(1, _get_int("DD_NOTIFY_MAX_LEVEL", default=3))
+
+
+def notify_sla_for_level(level: int) -> float:
+    """按级取 SLA；>3 级退回 level-1 的默认档（stay bounded）。"""
+    table = {1: notify_ack_sla_s(), 2: notify_sla_l2_s(), 3: notify_sla_l3_s()}
+    return table.get(level, notify_sla_l3_s())
+
+
+def notify_sweep_interval_s() -> float:
+    """升级 sweeper 的扫描间隔（秒）。默认 15s。"""
+    return max(1.0, _get_float("DD_NOTIFY_SWEEP_INTERVAL_S", default=15.0))
+
+
+def notify_http_timeout_s() -> float:
+    """webhook/IM 通知的 HTTP 超时（秒）。默认 5s。"""
+    return max(0.1, _get_float("DD_NOTIFY_HTTP_TIMEOUT_S", default=5.0))
+
+
+def notify_allow_private_targets() -> bool:
+    """是否允许通知目标指向内网/回环地址。
+
+    默认 **False**（失败关闭）：webhook/IM 目标过 `data_plane.fetch.validate_url`
+    的 SSRF 校验，内网 URL 被拒——**别让"通知"变成 SSRF 入口**。仅本地测试/受信
+    内网部署才置 1。邮件（SMTP）目标不是 URL，不受此开关约束。
+    """
+    return _get_bool("DD_NOTIFY_ALLOW_PRIVATE", default=False)
+
+
+def smtp_host() -> str:
+    """SMTP 服务器（EmailNotifier 用）。空 = 未配（邮件通道不可用）。"""
+    return _get("DD_SMTP_HOST")
+
+
+def smtp_port() -> int:
+    return _get_int("DD_SMTP_PORT", default=587)
+
+
+def smtp_user() -> str:
+    """SMTP 用户名/发件地址。**凭据走环境变量，不进仓库**。"""
+    return _get("DD_SMTP_USER")
+
+
+def smtp_password() -> str:
+    return _get("DD_SMTP_PASSWORD")
+
+
+def smtp_from() -> str:
+    """发件人（From）。空则退回 `smtp_user`。"""
+    return _get("DD_SMTP_FROM") or smtp_user()
+
+
+def im_webhook_url() -> str:
+    """IM 群机器人（飞书/钉钉/企微）webhook URL。空 = IM 通道不可用。
+
+    走 SSRF 校验（与 webhook 同）。凭据在 URL 里，**不进仓库**，环境变量注入。
+    """
+    return _get("DD_IM_WEBHOOK_URL")
+
+
 # ---------------------------------------------------------------- 路径
 
 def project_root() -> str | None:
