@@ -35,7 +35,7 @@ def main() -> int:
     # 只导入 ServiceState 类（不 import app 模块）——这样不触发 `app = create_app()`
     # 的模块级副作用，消费者进程不白建一个 FastAPI 应用与其进程级 gateway/SaaS 适配器。
     from ..service.app import ServiceState
-    from ..stream import StreamRunner, build_source
+    from ..stream import StreamRunner, build_router, build_source
 
     state = ServiceState()
 
@@ -69,7 +69,8 @@ def main() -> int:
     signal.signal(signal.SIGTERM, _on_signal)
     signal.signal(signal.SIGINT, _on_signal)
 
-    runner = StreamRunner(plane, source, default_tenant=settings.stream_tenant())
+    runner = StreamRunner(plane, source, default_tenant=settings.stream_tenant(),
+                          router=build_router(source))
     print(f"[stream-worker] 已启动：source={source.name} "
           f"shards={settings.stream_shards()}", file=sys.stderr)
     runner.run(stop=stop)                                # 阻塞直到停机

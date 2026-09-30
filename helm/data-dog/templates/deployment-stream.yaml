@@ -55,6 +55,18 @@ spec:
               value: {{ .Values.stream.source | quote }}
             - name: DD_STREAM_SHARDS
               value: {{ .Values.stream.replicas | quote }}
+            # 分片副本身份：用 Pod 名（每副本唯一）。仅对"每个副本收全量"的源生效
+            # （coordination=none）；kafka/mqtt 共享订阅由 broker 分区，客户端不再过滤。
+            - name: DD_REPLICA_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            {{- with .Values.stream.replicaMembers }}
+            # 集群成员列表：所有副本必须看到**相同**的列表（否则归属判定不一致→丢事件）。
+            # 用有状态集/headless service 得到稳定名后填入；留空则不启用客户端分片。
+            - name: DD_REPLICA_MEMBERS
+              value: {{ join "," . | quote }}
+            {{- end }}
             {{- with .Values.stream.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

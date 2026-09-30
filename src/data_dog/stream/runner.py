@@ -75,6 +75,23 @@ def _metric_candidates(n: int) -> None:
         pass
 
 
+def _metric_shard(stats: dict[str, Any], seen: dict[str, Any]) -> None:
+    """把分片跳过计数按**增量**记进 Prometheus（P4-5）。
+
+    分片过滤"让路"掉的消息必须可见——若某副本的 key 判定与集群不一致，会表现为
+    异常高的 shard_skipped（本副本全让路、没人接手）。增量记法避免重复累加。
+    """
+    try:
+        from ..core import metrics
+        cur = int(stats.get("shard_skipped", 0))
+        delta = cur - int(seen.get("shard_skipped", 0))
+        if delta > 0:
+            metrics.shard_skipped_total.inc(delta)
+            seen["shard_skipped"] = cur
+    except Exception:                                    # noqa: BLE001
+        pass
+
+
 def _metric_late(builder: Any, seen: dict[str, Any]) -> None:
     """把候选构建器的迟到计数按**增量**记进 Prometheus（G2）。
 
@@ -127,16 +144,19 @@ class StreamRunner:
 
     def __init__(self, plane: Any, source: StreamSource, *,
                  persist: _PersistFn | None = None, flush_max: int = 200,
-                 default_tenant: str = "") -> None:
+                 default_tenant: str = "", router: Any = None) -> None:
         self.plane = plane
         self.source = source
         self._persist_fn = persist
         self.flush_max = max(1, flush_max)
         self._default_tenant = default_tenant
+        # 分片路由（P4-5）：非空且启用时，**只在"每个副本都收全量"的源**上过滤——
+        # 本副本只处理归属自己的键，其余交给属主副本。默认 None（不过滤）。
+        self._router = router
         self._pending: dict[str, list[StreamMessage]] = defaultdict(list)
         self.stats = {"messages": 0, "normalized": 0, "rejected": 0,
                       "candidates": 0, "flushes": 0, "errors": 0,
-                      "poll_errors": 0}
+                      "poll_errors": 0, "shard_skipped": 0}
         # 长驻 plane 累计统计的"上次已记"快照（按增量转成 Prometheus 计数）
         self._metric_seen: dict[str, Any] = {}
 
@@ -155,6 +175,16 @@ class StreamRunner:
             if cands:
                 repo.save_candidates(s, cands, tenant_id=tenant)
 
+    # ---- 分片归属（P4-5）----
+    def _owns(self, msg: StreamMessage, tenant: str) -> bool:
+        """本副本是否该处理这条消息。无 router / router 未启用 → 恒真（不过滤）。"""
+        if self._router is None:
+            return True
+        from .sharding import shard_key
+        device = str((msg.auth or {}).get("device_sn") or "")
+        key = shard_key(tenant_id=tenant, device_sn=device)
+        return bool(self._router.owns(key))
+
     # ---- 一批消息 ----
     def _drain(self, msgs: list[StreamMessage]) -> None:
         self.stats["messages"] += len(msgs)
@@ -166,8 +196,14 @@ class StreamRunner:
                 msg = StreamMessage(payload=msg.payload, auth=msg.auth,
                                     source=msg.source, enqueued_at=now)
             tenant = str((msg.auth or {}).get("tenant_id") or self._default_tenant)
+            # 分片过滤：不归本副本的键**不改动**——交给属主副本消费。
+            # 同设备所有事件恒落同一键 → 恒去同一副本，窗口状态不分裂。
+            if not self._owns(msg, tenant):
+                self.stats["shard_skipped"] += 1
+                continue
             self._pending[tenant].append(msg)
         _metric_messages(self.source.name, len(msgs), self.source)
+        _metric_shard(self.stats, self._metric_seen)
         if sum(len(v) for v in self._pending.values()) >= self.flush_max:
             self.flush()
 

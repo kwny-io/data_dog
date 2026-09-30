@@ -92,3 +92,82 @@ def pick_owner(key: str, replicas: list[str]) -> str:
 - **缺口-5 多副本协调**（前置）：先有"不重复消费"，分片才有意义。
 - **P4-4 K8s**（并列）：成员列表来自编排层。
 - **P4-8 loadgen**（共用工具）：吞吐实测。
+
+---
+
+## 8. 实现与验收（已落地）
+
+### 8.1 落地的文件
+
+| 文件 | 动作 | 说明 |
+|---|---|---|
+| `src/data_dog/stream/sharding.py` | **新建** | `shard_key` / `pick_shard` / `pick_owner`（rendezvous）+ `ShardRouter` |
+| `src/data_dog/stream/runner.py` | 改 | `StreamRunner` 加 `router` 参数 + `_owns()` 过滤（默认不过滤） |
+| `src/data_dog/stream/factory.py` | 改 | **新建** `build_router(source)`：按源协调模式决定是否启用 |
+| `src/data_dog/stream/__init__.py` | 改 | 导出 `ShardRouter` / `build_router` / `pick_owner` / `pick_shard` / `shard_key` |
+| `src/data_dog/settings.py` | 改 | 加 `DD_REPLICA_ID` / `DD_REPLICA_MEMBERS` / `DD_SHARD_COUNT` |
+| `src/data_dog/core/metrics.py` | 改 | 加 `shard_skipped_total` / `shard_enabled` |
+| `src/data_dog/service/app.py` | 改 | 起流时装配 router + 设 gauge |
+| `src/data_dog/service/stream_worker.py` | 改 | 独立消费者进程装配 router |
+| `helm/data-dog/templates/deployment-stream.yaml` | 改 | downward API 注入 `DD_REPLICA_ID`（Pod 名）+ 成员列表 |
+| `helm/data-dog/values.yaml` | 改 | 加 `stream.replicaMembers` |
+| `tests/test_sharding.py` | **新建** | 24 条 |
+
+### 8.2 一处「看似对、其实会静默丢数据」的设计坑（已在代码层钉死）
+
+**坑**：`ShardRouter.owns()` 对「自己不在成员列表」的副本返回**恒假**——本意是"失败
+关闭，不抢别人的键"。但若成员列表配错（典型：用 Deployment 的随机 Pod 名去对一份静态
+成员列表），**每个副本都认为自己不拥有任何键 → 所有消息被跳过 → 静默丢数据**，且无
+报错（`shard_skipped` 疯涨但没人看）。
+
+**修法**：`build_router` 加自检——**配了成员列表而本副本 id 不在其中 → 启动即抛错**，
+拒绝启动（与 `stream/factory.py` 的 file+多副本自检同一哲学）。要正确用分片，须让副本
+id 稳定可枚举（StatefulSet 的 `stream-0/1/2`），或对 kafka/mqtt（broker 已分区）**留空**
+成员列表。测试 `test_build_router_self_not_in_members_fails_closed` 钉住此路径。
+
+### 8.3 为什么分片过滤**不**对 kafka/mqtt 启用（关键正确性）
+
+broker 端（Kafka 消费者组 / MQTT 共享订阅）**已经**把每条消息派给唯一副本。若客户端再
+叠加一层 rendezvous 过滤，且两侧判定**不一致**，消息会：既不被 broker 派到属主、又被
+当前副本以"不归我"丢弃 → **丢事件**。故 `build_router` **只在
+`source.coordination()=="none"`**（每副本收全量）时启用。这是"两层分区叠加"的正确性陷阱，
+测试 `test_build_router_disabled_for_broker_group` 钉住。
+
+### 8.4 验收对照（§5 六条）
+
+| # | 验收项 | 怎么验 | 状态 |
+|---|---|---|---|
+| 1 | 确定性路由 + 分布均匀 | `test_pick_owner_deterministic` / `test_distribution_reasonably_uniform`（1000 键 4 副本，各 150–350） | ✅ |
+| 2 | 最小扰动（N→N+1 迁移 ≈1/N） | `test_minimal_disruption_on_add/remove_replica`（4→5 迁移 12%、4→3 迁移 25%） | ✅ |
+| 3 | 同设备不跨副本漂移 | `test_runner_same_device_never_split_across_replicas` / `test_runner_filters_non_owned_keys` | ✅ |
+| 4 | 限流总量正确 | **不适用**——限流桶本就按 `tenant\|device` 在**共享后端**（G5），分片只改"谁处理"、**不改令牌桶键**，故总量恒 = 配置值。**未新增专门测试**（语义未变，非"已测通过"） | ➖ |
+| 5 | 再平衡无丢失 | **部分**——路由重映射已验（§5.2）；"双读"防丢**未实现**（见诚实边界） | 🟡 |
+| 6 | >100 台吞吐实测 | 见 §8.5 | ✅ |
+
+### 8.5 吞吐实测（`loadgen`，>100 台）
+
+**环境**：本机 Windows 11 / Python 3.12.6 / SQLite + 离线 provider（排除 DB/LLM 外因）
+**命令**：`python tools/loadgen.py --url http://127.0.0.1:8821 --mode write --devices 120 --rps 300 --duration 15 --tenant bench-p45 --verify-server --assert-no-llm`
+
+| 场景 | 设备数 | 目标 RPS | 实测吞吐 | P50 | P95 | P99 | max | 错误 |
+|---|---|---|---|---|---|---|---|---|
+| 遥测写入（120 台） | 120 | 300 | **36 req/s** | 3040ms | 6078ms | **7843ms** | 9782ms | **0** |
+
+- 两侧一致性（客户端 vs 服务端直方图）偏差 0.2% ✓；热路径零 LLM ✓。
+- **36 req/s 与 P4-8 baseline 形态 A（35 req/s）一致**——说明分片逻辑本身**不引入额外开销**
+  （过滤是纯内存哈希，未走 DB）。此处量的是**单实例热路径写入**，非"分片后的集群总吞吐"。
+- **为何不更高**：本机 SQLite 单写入者串行化是主因（见 `benchmarks/baseline.md` 归因），
+  **与分片无关**。分片的收益在**多实例集群**：N 个副本各处理 1/N 的键，总吞吐近线性放大，
+  但**本机单进程无法实测集群总吞吐**——故此处如实只报单实例数字。
+
+### 8.6 诚实边界（补充 §6）
+
+- **再平衡"双读"未实现**（§5.5 部分达成）：路由能在成员变更瞬间正确重映射，但**已在途**
+  的消息可能仍发给旧属主——迁移窗口内的重复/丢失**未被双读消除**。要严格无丢需事务性
+  消费或迁移期双读，属更大工程。当前实现**不声称** exactly-once。
+- **分片过滤只在"每副本收全量"的源生效**：kafka/mqtt 靠 broker 分区，**客户端不分片**。
+  故"车队级分片"当前仅在**无协调的源**（如无共享订阅的 MQTT，或应用层扇出）上由本模块
+  实现；对 kafka/mqtt 而言，分片是 **broker 的职责**，本模块提供的是**选择正确源与校验**。
+- **本机吞吐 ≠ 集群吞吐**：§8.5 量的是单实例；集群总吞吐需在生产多副本环境实测。
+- **成员列表一致性是外部依赖**：rendezvous 正确性依赖所有副本看到**相同**列表（K8s
+  headless service / etcd / Redis）。列表不一致 → 归属判定分裂，本模块**无法自愈**。

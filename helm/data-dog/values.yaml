@@ -97,6 +97,12 @@ stream:
   replicas: 1
   # 源类型：kafka / mqtt / file（决定多副本是否安全——file 多副本会被拒绝启动）
   source: file
+  # 车队级分片（P4-5）：**仅对"每个副本收全量"的源**（coordination=none）生效。
+  # kafka/mqtt 共享订阅由 broker 分区，留空即可（客户端不再过滤，避免叠加丢事件）。
+  # ⚠ 非空时：所有副本必须看到**相同**列表，且本副本 id 必须属于该列表；否则进程
+  #   启动即失败关闭（防"跳过所有消息"的静默丢数据）。id 来自 Pod 名（见模板），
+  #   故应配合 StatefulSet 使用以得到稳定可枚举的 Pod 名（如 stream-0,stream-1,…）。
+  replicaMembers: []
   resources:
     requests: { cpu: 100m, memory: 256Mi }
     limits:   { cpu: 500m, memory: 512Mi }

@@ -171,6 +171,23 @@ stream_consume_latency_seconds = Histogram(
     registry=registry,
 )
 
+# ---------------------------------------------------------------- 车队级分片（P4-5）
+
+# 因不归本副本而被跳过的消息数（客户端分片过滤的证据）。持续 >0 说明本副本在
+# "让路"给属主；等量放大到全集群应≈总量（每键恰一个属主）。
+shard_skipped_total = Counter(
+    "data_dog_shard_skipped_total",
+    "因分片归属非本副本而跳过的消息数",
+    registry=registry,
+)
+
+# 本副本是否启用了客户端分片过滤（1=启用，0=未启用/单副本）
+shard_enabled = Gauge(
+    "data_dog_shard_enabled",
+    "本副本是否启用客户端分片过滤（1=启用，0=未启用）",
+    registry=registry,
+)
+
 # ---------------------------------------------------------------- 进程信息（SRE 关注）
 
 info = Gauge(

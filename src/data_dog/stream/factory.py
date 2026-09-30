@@ -83,3 +83,38 @@ def _file_lease(path: str):
     from .lease import Lease, default_owner
     return Lease(get_state_store(), f"stream:lease:file:{path}",
                  default_owner(), ttl_s=settings.stream_file_lease_ttl_s())
+
+
+def build_router(source: StreamSource):
+    """按配置 + 源的协调模式，决定是否启用**客户端**分片过滤（P4-5）。
+
+    只在「**每个副本都收全量**」的源上启用——否则会与 broker 端分区叠加而**丢事件**：
+
+    - `coordination()=="broker-group"`（kafka 消费者组 / mqtt 共享订阅）：broker 已把
+      每条消息派给**唯一**副本，客户端再按 rendezvous 过滤若判定不一致 → 消息既不被
+      broker 派到属主、又被当前副本丢弃。**故不启用**，返回 None。
+    - `coordination()=="lease"`（file 选主）：同时刻只有一个副本消费全量，无需过滤。
+    - `coordination()=="none"`（mqtt 无共享订阅等）：每个副本收全量 → **启用**，
+      让每副本只处理归属自己的键。
+
+    单副本（成员 ≤1）或未配成员 → 返回 None（不过滤，行为与从前一致）。
+    """
+    members = settings.stream_replica_members()
+    replica = settings.stream_replica_id()
+    if not members or len(members) <= 1 or not replica:
+        return None
+    # 失败关闭：配了成员列表，但自己不在其中 → 归属判定会认为"我不拥有任何键"，
+    # 于是**跳过所有消息**（静默丢数据）。宁可启动即报错，不要静默丢。
+    # 典型诱因：用 Deployment（Pod 名随机）却填了静态成员列表——应用 StatefulSet 让
+    # Pod 名稳定可枚举，或对 kafka/mqtt（broker 已分区）留空成员列表。
+    if replica not in members:
+        raise RuntimeError(
+            f"分片配置不一致：DD_REPLICA_ID={replica!r} 不在 "
+            f"DD_REPLICA_MEMBERS={members} 中。这会让本副本跳过**所有**消息"
+            "（静默丢数据），故拒绝启动。请让副本 id 属于成员列表（StatefulSet "
+            "的稳定 Pod 名），或对 kafka/mqtt 源留空成员列表（由 broker 分区）。")
+    if source.coordination() != "none":
+        return None
+    from .sharding import ShardRouter
+    return ShardRouter(replica_id=replica, members=members,
+                       shards=settings.stream_shard_count())

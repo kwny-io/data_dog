@@ -242,6 +242,25 @@ def stream_kafka_group() -> str:
     return _get("DD_STREAM_KAFKA_GROUP", default="data-dog")
 
 
+# ---------------------------------------------------------------- 车队级分片（P4-5）
+
+def stream_replica_id() -> str:
+    """本副本的 id（分片路由用）。缺省空串——单副本场景无需配。"""
+    return _get("DD_REPLICA_ID")
+
+
+def stream_replica_members() -> list[str]:
+    """集群里所有消费者副本 id（逗号分隔）。所有副本必须看到**相同**的列表，
+    否则 rendezvous 归属判定不一致 → 丢事件。单副本留空即可。"""
+    raw = _get("DD_REPLICA_MEMBERS")
+    return [m.strip() for m in raw.split(",") if m.strip()] if raw else []
+
+
+def stream_shard_count() -> int:
+    """分片总数（远大于副本数，便于均衡与再平衡）。"""
+    return max(1, _get_int("DD_SHARD_COUNT", default=256))
+
+
 # ---------------------------------------------------------------- 多副本协调（G5）
 
 def stream_mqtt_share_group() -> str:

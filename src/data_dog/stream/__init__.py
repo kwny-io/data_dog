@@ -5,9 +5,11 @@
 from __future__ import annotations
 
 from .base import QueueSource, StreamMessage, StreamSource
-from .factory import build_source
+from .factory import build_router, build_source
 from .lease import Lease, default_owner
 from .runner import StreamRunner
+from .sharding import ShardRouter, pick_owner, pick_shard, shard_key
 
-__all__ = ["Lease", "QueueSource", "StreamMessage", "StreamSource", "StreamRunner",
-           "build_source", "default_owner"]
+__all__ = ["Lease", "QueueSource", "ShardRouter", "StreamMessage", "StreamSource",
+           "StreamRunner", "build_router", "build_source", "default_owner",
+           "pick_owner", "pick_shard", "shard_key"]

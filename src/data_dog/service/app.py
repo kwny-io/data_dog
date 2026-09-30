@@ -439,16 +439,24 @@ def _start_stream_if_enabled() -> None:
     """按 `DD_STREAM_ENABLED` 起流式消费者（长驻 plane + 共享候选构建器）。"""
     if not settings.stream_enabled():
         return
-    from ..stream import StreamRunner, build_source
+    from ..stream import StreamRunner, build_router, build_source
     plane = _state.new_plane()
     if plane is None:
         raise RuntimeError(f"算子绑定不可用，无法启动流式接入：{_state.build_error}")
     source = build_source()
-    runner = StreamRunner(plane, source, default_tenant=settings.stream_tenant())
+    router = build_router(source)
+    runner = StreamRunner(plane, source, default_tenant=settings.stream_tenant(),
+                          router=router)
     thread, stop = runner.start_background()
     _set_stream(runner, source, thread, stop)
+    try:
+        from ..core import metrics
+        metrics.shard_enabled.set(1 if (router and router.enabled) else 0)
+    except Exception:                                # noqa: BLE001
+        pass
     _log.info("流式接入已启动", extra={
-        "source": source.name, "thread": thread.name})
+        "source": source.name, "thread": thread.name,
+        "sharding": bool(router and router.enabled)})
 
 
 def _stop_stream() -> None:
