@@ -17,7 +17,7 @@
 | P4-7 | 退化趋势预测 | [07_degradation_forecast.md](07_degradation_forecast.md) | ✅ **已完成**（2026-09-30） | 无 |
 | P4-3 | 通知/值班/升级 SLA | [03_notify_oncall.md](03_notify_oncall.md) | ✅ **已完成**（2026-09-30） | 无 |
 | P4-5 | 车队级分片 | [05_sharding.md](05_sharding.md) | ✅ **已完成**（2026-09-30） | 缺口-5（多副本协调，另一批） |
-| P4-6 | 跨地域多活 | [06_multi_region.md](06_multi_region.md) | **缓**（ROI 最低，设计给全） | P4-3 P4-5 |
+| P4-6 | 跨地域多活 | [06_multi_region.md](06_multi_region.md) | ✅ **已完成**（2026-10-01，应用层；基础设施部分如实标注「本机做不了」） | P4-3 P4-5 |
 
 ## 与「缺口」批的关系
 

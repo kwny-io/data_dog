@@ -261,6 +261,34 @@ def stream_shard_count() -> int:
     return max(1, _get_int("DD_SHARD_COUNT", default=256))
 
 
+# ---------------------------------------------------------------- 跨地域多活（P4-6）
+
+def region() -> str:
+    """本实例所在区域标识（如 `cn-east` / `cn-north`）。
+
+    用于度量与运维归属（复制延迟标签 `from`/`to`）。缺省空串=未分区（单区部署，
+    与现状行为一致）。**不参与**数据路由——路由按租户/车队就近归属，是编排层决策。
+    """
+    return _get("DD_REGION")
+
+
+def replication_source() -> str:
+    """本实例的复制**上游**区域（订阅谁的变更）。空串=非复制部署。
+
+    只作部署标注与可观测性用途；真正的复制由 PG 逻辑复制 / CDC 承担
+    （见 `docs/p4/06_multi_region.md`），**非应用代码**。
+    """
+    return _get("DD_REPLICATION_SOURCE")
+
+
+def replication_lag_warn_s() -> float:
+    """复制延迟告警阈值（秒）：`dd_replication_lag_seconds` 超过即应告警。
+
+    异步复制下延迟本就 >0；此阈值界定"可接受 vs 需介入"，供 runbook 使用。
+    """
+    return max(0.0, _get_float("DD_REPLICATION_LAG_WARN_S", default=30.0))
+
+
 # ---------------------------------------------------------------- 多副本协调（G5）
 
 def stream_mqtt_share_group() -> str:

@@ -86,3 +86,81 @@
 
 - **P4-4 K8s**（每区一套编排）、**P4-5 分片**（区域≈粗粒度分片）。
 - 确定性 ID 派生（已有）是复制的**天然收敛基础**——这是既有设计的红利。
+
+---
+
+## 8. 实现与验收（已落地 —— 仅应用层可解部分）
+
+> **范围声明**：P4-6 是**大工程**，其验收项**大多需要真实多区基础设施**（多套 PG、
+> DNS/Anycast、etcd/Consul）。本机（单区）**只实现应用层可解的部分**，其余如实
+> 标注「本机做不了」——**不假装已测**。这是与本项目「诚实边界」一致的取舍。
+
+### 8.1 落地的文件
+
+| 文件 | 动作 | 说明 |
+|---|---|---|
+| `src/data_dog/replication/__init__.py` | **新建** | 包导出 |
+| `src/data_dog/replication/conflict.py` | **新建** | `resolve_two` / `merge_alert_state` / `resolve_severity` / `Conflict`（**纯函数**，顺序无关） |
+| `src/data_dog/settings.py` | 改 | 加 `DD_REGION` / `DD_REPLICATION_SOURCE` / `DD_REPLICATION_LAG_WARN_S` |
+| `src/data_dog/core/metrics.py` | 改 | 加 `replication_lag_seconds{from,to}` / `replication_conflicts_total{path}` + observer |
+| `tests/test_conflict_resolution.py` | **新建** | 17 条 |
+| `docs/p4/06_runbook.md` | **新建** | 切换/回切/演练/分歧排查 runbook |
+| `helm/data-dog/values.region.yaml` | **新建** | 区域覆盖**模板**（一份复制成多份，只改 region/source） |
+| `deploy/replication/README.md` + `pglogical-pubsub.yaml.example` | **新建** | 复制链路脚手架（**不可本机验证**） |
+
+### 8.2 核心：消解必须是**纯函数**
+
+跨区域异步双向复制要对，只有一条判据：**两区域最终收敛到同一结果**。故
+`resolve_two` 被设计成**纯函数**并钉住三条代数性质：
+
+| 性质 | 含义 | 为何必须 |
+|---|---|---|
+| **交换律** | `resolve_two(a,b) == resolve_two(b,a)` | 复制顺序/方向不影响结果 |
+| **结合律** | N 路折叠与折叠次序无关 | 复制批次切分不影响结果 |
+| **幂等** | 重复合并不改结果 | 至少一次投递重放安全 |
+
+**踩过的坑**：初版 `resolve_severity` 在 rank **并列**时返回**第一个参数**（`a`），
+于是 `resolve_severity("warning","bogus")` 与 `("bogus","warning")` 结果不同——
+**恰好破坏了消解最核心的交换律**。一个"看起来对"的严重度比较，会静默让两区永远分歧。
+修法：半径并列时**归一**到已知词（`bogus` → `info`），并在 state 持有者选择上引入
+**确定的**次级判据（state 字典序）。测试 `test_commutative` / `test_associative_over_n_way_fold`
+钉住。
+
+### 8.3 消解策略（§3.2 的落地）
+
+| 情形 | 策略 | 理由 |
+|---|---|---|
+| `revision` 不等 | 高者胜（**因果序**） | 高 revision 是低 revision 的后继，取"最新已知" |
+| `revision` 相等（真并发） | severity 取**更严重** | 乐观偏安全：宁多报重报，不漏报重症 |
+| ack（任意 revision） | 取**先到**，且**不可逆** | ack 是"真人接手"的事实，不该被复制抹回未确认 |
+
+> **确定性 ID 让大部分数据无需消解**：`event_id` 由三要素 `sha256` 派生（`alerting/outbox.py`），
+> 两区对同一 Episode 算出**同一个** ID → 复制后是同一条记录，天然收敛。需消解的只有
+> **可变状态**（alert 状态机 / severity / ack）。
+
+### 8.4 验收对照（§5 六条）
+
+| # | 验收项 | 怎么验 | 状态 |
+|---|---|---|---|
+| 1 | 确定性 ID 收敛 | `test_same_episode_same_event_id_across_regions` / `test_different_episode_different_event_id` | ✅ |
+| 2 | 冲突消解确定、可重放 | `test_commutative` / `test_idempotent` / `test_associative_over_n_way_fold` | ✅ |
+| 3 | 就近接入（延迟不跨区） | 需**区域化网络**——本机单区**无法验证** | ➖ **本机做不了** |
+| 4 | 复制延迟指标可见 + 告警阈值 | 指标 `replication_lag_seconds` + 阈值 `DD_REPLICATION_LAG_WARN_S` 已落地；**端到端可见性**需多区 exporter | 🟡 指标/阈值已落地，采集链路未验 |
+| 5 | 故障演练（记录 RPO） | 需**多区 + DNS 切换**——本机**无法演练**（runbook §5 已写步骤） | ➖ **本机做不了** |
+| 6 | 脑裂防护 | 依赖**外部共识（etcd/Consul）** ——本机**无法验证** | ➖ **本机做不了** |
+
+> **诚实标注**：6 条里 **1 条真验（✅）**、**1 条部分（🟡）**、**3 条本机做不了（➖）**。
+> 消解逻辑是**纯函数**，可离线完整验证；但"就近接入 / 演练 / 脑裂"是**基础设施**问题，
+> 写代码解决不了，如实保留为**未验证**。
+
+### 8.5 诚实边界（补充 §6）
+
+- **本机只验了"消解逻辑"**：`resolve_two` 的正确性（纯函数、收敛、可重放）是**代码可证**的；
+  但它在**真实复制链路**下的表现（乱序到达、部分复制、网络分区）**未被本机验证**。
+- **复制链路不可本机验证**：`deploy/replication/*.yaml.example` 是**骨架**，需真实多区
+  PG 才能 apply。落地前必须先建多区环境并按 runbook 演练。
+- **RPO > 0 未实测**：runbook §2 的"记录丢了多少秒"需**真实演练**才能填出数字；
+  本机**没有**这个数字，故**不报**。
+- **不声称 exactly-once / 强一致**：跨区最终一致；RPO 与 RTO 数字待真实演练实测。
+- **ROI 提示**：本项工程量大（多套基础设施），建议**确有跨区需求**后再启动——
+  当前实现是"逻辑就绪 + 脚手架就位"，不是"可上生产"。

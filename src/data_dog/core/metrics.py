@@ -234,6 +234,37 @@ forecast_confidence = Histogram(
 )
 
 
+# ---------------------------------------------------------------- 跨地域复制（P4-6）
+
+# 复制延迟：从上游区域最新已复制事务到本区域可见的时差（秒）。
+# from/to 用区域标识，基数受控（区域数有限，非用户输入）。
+replication_lag_seconds = Gauge(
+    "data_dog_replication_lag_seconds",
+    "跨区域复制延迟（秒）——最后一次已复制变更的时间差",
+    labelnames=("from", "to"),
+    registry=registry,
+)
+
+# 冲突消解计数：按结果分类（causal=按 revision 因果序收敛 /
+# concurrent=真并发按策略收敛）。用于观察双向写冲突的频率与形态。
+replication_conflicts_total = Counter(
+    "data_dog_replication_conflicts_total",
+    "冲突消解次数（按消解路径分类）",
+    labelnames=("path",),
+    registry=registry,
+)
+
+
+def observe_replication_lag(frm: str, to: str, lag_s: float) -> None:
+    """记录一次复制延迟（from=上游区域，to=本区域）。"""
+    replication_lag_seconds.labels(frm=frm, to=to).set(max(0.0, lag_s))
+
+
+def observe_conflict(path: str) -> None:
+    """记录一次冲突消解。path ∈ {causal, concurrent}。"""
+    replication_conflicts_total.labels(path=path).inc()
+
+
 def observe_forecast(has_eta: bool, confidence: float) -> None:
     """记录一次预测：是否给出 ETA + 置信度。"""
     forecast_total.labels(outcome="predicted" if has_eta else "no_eta").inc()

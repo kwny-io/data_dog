@@ -1,0 +1,34 @@
+# P4-6 区域覆盖模板 —— **每个区域复制一份**，改 region/source 两处即可。
+#
+#   # 区域 A：
+#   helm upgrade --install dd-a ./helm/data-dog \
+#     -f ./helm/data-dog/values.prod.yaml \
+#     -f ./helm/data-dog/values.region-a.yaml      # ← 由本模板复制而来
+#
+# 为什么是一个模板而非两份固定文件：区域间**非敏感配置只差 DD_REGION /
+# DD_REPLICATION_SOURCE 两行**，其余（PG 地址、密钥）在各区域的 Secret 里。
+# 复制成两份 95% 重复的文件只会随时间漂移腐烂——用模板 + 一次复制更稳。
+#
+# 每区域需**独立**的秘密（不在本文件）：
+#   - DD_DATABASE_URL：本区域 PG（单元化：每区一套完整栈，本地读写）
+#   - 其余同 values.prod.yaml 的 Secret 约定
+#
+# ⚠ 真正的**复制链路**（PG 逻辑复制 / CDC）不在本 chart 内，见
+#   deploy/replication/ 。本文件只做区域标注与可观测性配置。
+
+config:
+  # 本区域标识（进复制延迟指标标签 from/to、运维归属）。**每个区域唯一**。
+  # 例：cn-east / cn-north / cn-south
+  DD_REGION: cn-east
+
+  # 本区域复制的**上游**区域（订阅谁的变更）。**双向复制**时两区互相填对方。
+  # 仅作标注与可观测性；真正的复制由 PG/CDC 承担，非应用代码。
+  DD_REPLICATION_SOURCE: cn-north
+
+  # 复制延迟告警阈值（秒）。异步复制延迟本就 > 0；此值界定"可接受 vs 需介入"。
+  # 见 docs/p4/06_runbook.md §1。
+  DD_REPLICATION_LAG_WARN_S: "30"
+
+  # 区域化部署仍须外部状态后端（多副本共享）；每区指向**本区**的 PG/Redis。
+  DD_STATE_BACKEND: postgres
+  DD_RATE_BACKEND: redis

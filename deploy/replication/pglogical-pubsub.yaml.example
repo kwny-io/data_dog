@@ -1,0 +1,91 @@
+# PG 逻辑复制（原生 pub/sub）双向配置骨架 —— P4-6 跨区域多活。
+#
+# ⚠ 这是 **.example 骨架**，不是可直接 apply 的清单。真实配置需填入各区域的
+#   连接信息、发布/订阅集、以及需跨区共享的**表清单**（见 README §4）。
+#   本机单区环境**无法验证**其正确性——见 README「诚实边界」。
+#
+# 用法：为每个区域创建一份（region-a / region-b），方向互相指向对方。
+#   区域 A 的角色：PUBLISHER（发布本区变更）+ SUBSCRIBER（订阅 B 区变更）
+#   区域 B 的角色：SUBSCRIBER（订阅 A 区变更）+ PUBLISHER（发布本区变更）
+#
+# 前置（每区 PG 上执行一次）：
+#   CREATE EXTENSION IF NOT EXISTS pglogical;
+#   -- wal_level = logical（需重启 PG）
+#
+# ---- 区域 A：发布侧 ----------------------------------------------------------
+
+# 发布节点（本区）
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pglogical-region-a-publish
+  labels:
+    # 用 label 而非 hardcode，便于按区域筛选与审计
+    data-dog/region: cn-east
+    data-dog/replication-role: publisher
+data:
+  # 建发布节点：本区把自己注册为可被订阅的节点
+  create-node.sql: |
+    SELECT pglogical.create_node(
+      node_name := 'region-a',
+      dsn := 'host=pg-a.internal port=5432 dbname=data_dog user=repl'
+    );
+
+  # ⚠ 显式列举需跨区共享的表（**不要** FOR ALL TABLES）：
+  #   审计/日志类通常本地留存即可，跨区复制只增负担。
+  #   表名以 storage/models.py 为准（此处为示例，落地时按实际表清单填）。
+  create-publication.sql: |
+    SELECT pglogical.create_replication_set(
+      set_name := 'dd_shared',
+      replicate_insert := true,
+      replicate_update := true,
+      replicate_delete := true
+    );
+    SELECT pglogical.replication_set_add_table('dd_shared', 'alerts');
+    SELECT pglogical.replication_set_add_table('dd_shared', 'alert_deliveries');
+    -- 候选/事件因确定性 ID 天然收敛，也纳入共享；
+    -- 纯本地审计表**不**纳入。
+
+---
+# ---- 区域 A：订阅侧（订阅 B 区）----------------------------------------------
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pglogical-region-a-subscribe
+  labels:
+    data-dog/region: cn-east
+    data-dog/replication-role: subscriber
+data:
+  # 订阅对端（B 区）的发布集
+  create-subscription.sql: |
+    SELECT pglogical.create_subscription(
+      subscription_name := 'sub-from-region-b',
+      provider_dsn := 'host=pg-b.internal port=5432 dbname=data_dog user=repl',
+      replication_sets := ARRAY['dd_shared'],
+      -- 异步：不阻塞本地写（**这是 RPO>0 的根源**）。
+      -- synchronous_commit := 'off' 是异步复制的显式声明——要 RPO=0 需多数派
+      -- 同步复制，牺牲可用性，属产品决策。
+      synchronize_structure := false
+    );
+
+  # 复制延迟观测：对端最新已复制 LSN 与本区已回放 LSN 的时差。
+  # 由 exporter 采集后 → dd_replication_lag_seconds{from="cn-north",to="cn-east"}。
+  # （应用侧只看指标，不看 LSN——见 docs/p4/06_runbook.md §1）
+  replication-lag-query.sql: |
+    SELECT
+      application_name,
+      pg_wal_lsn_diff(pg_current_wal_lsn(), replay_lsn) AS lag_bytes,
+      write_lag, flush_lag, replay_lag
+    FROM pg_stat_replication
+    WHERE application_name = 'sub-from-region-b';
+
+# ---- 冲突消解的位置（重要）---------------------------------------------------
+#
+# pglogical 不带应用层消解——它只**搬运**变更。业务状态（alert 状态机 / severity /
+# ack）的**收敛**在应用层做：复制过来的行与本区行按 `resolve_two` 确定性合并
+# （告警取更严重、ack 取先到；revision 作因果序）。见
+# src/data_dog/replication/conflict.py 与 tests/test_conflict_resolution.py。
+#
+# **不要**依赖复制工具的 LWW（last-write-wins）——它依赖时钟，跨区时钟偏移会
+# 导致非确定结果。本项目用 revision 因果序 + 应用层消解替代。
