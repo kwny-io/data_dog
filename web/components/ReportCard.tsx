@@ -4,7 +4,7 @@ import clsx from "clsx";
 
 import { Panel } from "@/components/ui/primitives";
 import { DispositionBadge, HypothesisStatusBadge } from "@/components/badges";
-import { CopyId, FieldName } from "@/components/tech";
+import { CopyId } from "@/components/tech";
 import { TONE_CLASS } from "@/lib/domain";
 import type { InvestigationReport } from "@/lib/api/types";
 
@@ -34,12 +34,7 @@ export function ReportCard({ report }: { report: InvestigationReport }) {
 
       <Panel
         title="可能原因"
-        subtitle={
-          <>
-            {report.hypotheses.length} 条假设，逐条列出支持/反证
-            <FieldName name="hypotheses" className="ml-1.5" />
-          </>
-        }
+        subtitle={`${report.hypotheses.length} 条假设，逐条列出支持 / 反证`}
       >
         {report.hypotheses.length === 0 ? (
           <p className="px-4 py-4 text-sm text-ink-muted">未提出假设。</p>
@@ -64,10 +59,7 @@ export function ReportCard({ report }: { report: InvestigationReport }) {
       </Panel>
 
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-        <Panel
-          title="还缺的证据"
-          subtitle={<FieldName name="missing_evidence" />}
-        >
+        <Panel title="还缺的证据" subtitle="调查中尚未取得、但结论需要的证据">
           {report.missing_evidence.length === 0 ? (
             <p className="px-4 py-4 text-sm text-ink-muted">没有标注缺失证据。</p>
           ) : (
@@ -84,7 +76,7 @@ export function ReportCard({ report }: { report: InvestigationReport }) {
           )}
         </Panel>
 
-        <Panel title="建议动作" subtitle={<FieldName name="recommended_actions" />}>
+        <Panel title="建议动作" subtitle="针对该结论建议的操作">
           {report.recommended_actions.length === 0 ? (
             <p className="px-4 py-4 text-sm text-ink-muted">没有给出建议动作。</p>
           ) : (
@@ -102,15 +94,7 @@ export function ReportCard({ report }: { report: InvestigationReport }) {
         </Panel>
       </div>
 
-      <Panel
-        title="模型来源"
-        subtitle={
-          <>
-            结论由哪个模型、调用多少次产生
-            <FieldName name="model_provenance" className="ml-1.5" />
-          </>
-        }
-      >
+      <Panel title="模型来源" subtitle="结论由哪个模型、调用多少次产生">
         <dl className="grid grid-cols-2 gap-x-4 gap-y-2 px-4 py-3 text-sm sm:grid-cols-4">
           <Field label="供应商" value={String(report.model_provenance.provider ?? "—")} />
           <Field label="模型" value={String(report.model_provenance.model ?? "—")} />

@@ -21,7 +21,7 @@ export default function EvalsPage() {
   const adversarial = EVAL_CASES.filter((c) => c.adversarial).length;
 
   return (
-    <div className="space-y-5">
+    <div className="stagger space-y-5">
       <header className="flex items-end justify-between gap-4">
         <div>
           <h1 className="text-lg font-semibold text-ink">评估看板</h1>
@@ -36,7 +36,7 @@ export default function EvalsPage() {
         <MetricTile
           label="评估用例"
           value={total}
-          hint="evals/cases.py 中定义的行为化用例"
+          hint="离线定义的行为化用例"
         />
         <MetricTile
           label="对抗用例"
@@ -81,15 +81,7 @@ export default function EvalsPage() {
       </div>
 
       {/* Case catalog — REAL. Static configuration, rendered in full. */}
-      <Panel
-        title="评估用例目录"
-        subtitle={
-          <>
-            静态定义，无需端点即可展示
-            <TechValue value="evals/cases.py::CASES" label="来源" className="ml-1.5" />
-          </>
-        }
-      >
+      <Panel title="评估用例目录" subtitle="静态定义，无需端点即可展示">
         <Toolbar>
           <span className="text-xs text-ink-muted">
             共 {total} 个用例，其中 {adversarial} 个对抗用例
@@ -154,19 +146,21 @@ export default function EvalsPage() {
         </DataTable>
       </Panel>
 
-      {/* Sources — reproduce commands, kept from the previous page. */}
-      <Panel title="可复现的评估入口">
+      {/* Reproducible eval entry points. The suite name and what it covers are
+          human-facing; the exact run command is an engineer's detail, so it is
+          demoted behind the technical-field toggle rather than printed at the
+          operator's rank. */}
+      <Panel title="可复现的评估入口" subtitle="四类离线评估：行为 / 合成 / 物理仿真 / 整链回放">
         <ul className="divide-y divide-rule">
           {EVAL_SOURCES.map((s) => (
             <li key={s.name} className="px-4 py-3.5">
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="text-sm font-medium text-ink">{s.name}</span>
-                <Badge tone="suppressed">{s.path}</Badge>
-              </div>
+              <span className="text-sm font-medium text-ink">{s.name}</span>
               <p className="mt-1 text-xs text-ink-muted">{s.note}</p>
-              <code className="reading mt-1.5 block break-all border-l-2 border-rule pl-3 text-xs text-ink">
-                {s.how}
-              </code>
+              <TechValue
+                value={s.how}
+                label="复现命令"
+                className="mt-1.5 block break-all border-l-2 border-rule pl-3 text-[11px]"
+              />
             </li>
           ))}
         </ul>

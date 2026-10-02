@@ -2,53 +2,52 @@
 
 import clsx from "clsx";
 
-import { TechValue } from "@/components/tech";
 import { HScroll } from "@/components/ui/hscroll";
 import {
   ALERT_STATE_LABEL,
   ALERT_STATE_STYLE,
-  ALERT_TRANSITIONS,
   ACTIVE_ALERT_STATES,
   TONE_CLASS,
-  type Tone,
 } from "@/lib/domain";
 import type { AlertState } from "@/lib/api/types";
 
 /**
- * The alert lifecycle, drawn as the real state machine from the backend
- * (`alerting/lifecycle.py::TRANSITIONS`) — not as decorative pills.
+ * The alert lifecycle, drawn as the backend's real state machine.
  *
- * The spec calls this the biggest increment of the rewrite: the P3 loop has
- * never had a frontend before. So the structure is information:
- *  - states are laid out left→right by their position in the flow;
- *  - active states (detected/confirmed/escalated/recovering) are framed;
- *  - edges are drawn from the actual TRANSITIONS map, so the diagram cannot
- *    drift from the backend without the map changing;
- *  - each node shows its live count and is clickable to filter the list.
+ * Read it as a signal path, not a row of pills. The six forward states are
+ * stops on a single spectrum rail — the gradient runs cyan→violet→magenta, so
+ * the direction of travel is legible without arrows — and each stop carries its
+ * live count, because this is a distribution view: where are the alerts right
+ * now. The two bypass states (suppressed / rejected) hang below the rail; they
+ * are side-branches off "detected", not stops on the mainline.
+ *
+ * Every legal transition is enumerated beneath the rail, so the picture is a
+ * complete account of the backend TRANSITIONS map without a routing diagram
+ * that would collapse at narrow widths. Each stop is a filter control.
  */
 
-// Column positions: 0..4 along the flow. Chosen to express the progression
-// detected → confirmed → escalated → recovering → resolved → closed, with the
-// two "parked" states (suppressed/rejected) hanging below detected.
-const LAYOUT: Record<AlertState, { col: number; row: number }> = {
-  detected: { col: 0, row: 0 },
-  confirmed: { col: 1, row: 0 },
-  escalated: { col: 2, row: 0 },
-  recovering: { col: 3, row: 0 },
-  resolved: { col: 4, row: 0 },
-  closed: { col: 5, row: 0 },
-  suppressed: { col: 0, row: 1 },
-  rejected: { col: 1, row: 1 },
-};
+const MAINLINE: AlertState[] = [
+  "detected",
+  "confirmed",
+  "escalated",
+  "recovering",
+  "resolved",
+  "closed",
+];
 
-const EDGE_LABEL: Record<string, string> = {
-  "detected→suppressed": "静默",
-  "detected→rejected": "驳回",
-  "resolved→detected": "复发",
-  "suppressed→detected": "恶化",
-  "rejected→detected": "重启",
-  "confirmed→closed": "直接关闭",
-};
+const SIDE_STATES: AlertState[] = ["suppressed", "rejected"];
+
+/** Transitions that leave the drawn mainline: the branch and back edges. */
+const OFF_RAIL: { from: AlertState; verb: string; to: AlertState }[] = [
+  { from: "detected", verb: "静默", to: "suppressed" },
+  { from: "detected", verb: "驳回", to: "rejected" },
+  { from: "confirmed", verb: "直接关闭", to: "closed" },
+  { from: "escalated", verb: "关闭", to: "closed" },
+  { from: "recovering", verb: "再升级", to: "escalated" },
+  { from: "resolved", verb: "复发", to: "detected" },
+  { from: "suppressed", verb: "恶化", to: "detected" },
+  { from: "rejected", verb: "重启", to: "detected" },
+];
 
 export function AlertStateMachine({
   counts,
@@ -61,148 +60,195 @@ export function AlertStateMachine({
   onSelect?: (state: AlertState | null) => void;
   className?: string;
 }) {
-  const nodes = Object.keys(LAYOUT) as AlertState[];
-  const edges = collectEdges();
+  const countOf = (s: AlertState) => counts?.[s] ?? 0;
+  const interactive = !!onSelect;
 
   return (
     <div className={className}>
       <HScroll>
-        <div
-          className="grid min-w-[720px] gap-x-6 gap-y-8 px-4 py-5"
-          style={{ gridTemplateColumns: "repeat(6, minmax(90px, 1fr))" }}
-        >
-          {nodes.map((state) => {
-            const pos = LAYOUT[state];
-            const style = ALERT_STATE_STYLE[state];
-            const count = counts?.[state] ?? 0;
-            const isSel = selected === state;
-            return (
-              <div
+        <div className="min-w-[640px] px-4 pt-5 pb-4">
+          {/* The rail: six stops along one spectrum hairline. */}
+          <div className="relative flex h-20 items-center justify-between gap-1">
+            <span
+              aria-hidden
+              className="pointer-events-none absolute inset-x-2 top-1/2 h-px -translate-y-1/2 bg-gradient-to-r from-spec-cyan/35 via-spec-violet/40 to-spec-magenta/35"
+            />
+            {MAINLINE.map((state) => (
+              <StateStop
                 key={state}
-                style={{ gridColumn: pos.col + 1, gridRow: pos.row + 1 }}
-                className="flex flex-col items-center gap-1.5"
-              >
-                <StateNode
-                  state={state}
-                  tone={style.tone}
-                  filled={count > 0}
-                  count={count}
-                  selected={isSel}
-                  onClick={() => onSelect?.(isSel ? null : state)}
-                />
-                {/* show the transition verb on the outgoing edge for the mainline */}
-                <EdgeCaption forState={state} />
-              </div>
-            );
-          })}
+                state={state}
+                count={countOf(state)}
+                selected={selected === state}
+                interactive={interactive}
+                onClick={() => onSelect?.(selected === state ? null : state)}
+              />
+            ))}
+          </div>
+
+          {/* Bypass states — side-branches off "detected". */}
+          <div className="relative mt-4 flex flex-wrap items-center gap-x-3 gap-y-2 pl-6">
+            <span
+              aria-hidden
+              className="absolute -top-4 left-[27px] h-4 w-px border-l border-dashed border-rule-strong"
+            />
+            <span className="text-[11px] text-ink-faint">旁路</span>
+            {SIDE_STATES.map((state) => (
+              <StateStop
+                key={state}
+                state={state}
+                count={countOf(state)}
+                selected={selected === state}
+                interactive={interactive}
+                compact
+                onClick={() => onSelect?.(selected === state ? null : state)}
+              />
+            ))}
+            <span className="text-[11px] text-ink-faint">
+              检测后被静默 / 驳回的候选止步于此，仍可回到已检测
+            </span>
+          </div>
         </div>
       </HScroll>
 
-      {/* Legend sits OUTSIDE the scroller (it wraps rather than scrolls), so the
-       *  scroll-edge fade never clips it. The map is data, so the legend states
-       *  the invariants; the English enum names are demoted behind the raw-value
-       *  toggle so it does not read as a parenthesised debug dump. */}
-      <div className="flex flex-wrap items-center gap-x-5 gap-y-2 border-t border-rule px-4 py-3 text-[11px] text-ink-muted">
-        <span className="flex items-center gap-1.5">
-          <span className="inline-block h-2.5 w-2.5 rounded-full bg-ink-faint" aria-hidden />
-          实心＝当前有告警，空心＝无
-        </span>
-        <span className="flex items-center gap-1.5">
-          <span className="inline-block h-3 w-4 border-2 border-rule-strong" aria-hidden />
-          进行中：{ACTIVE_ALERT_STATES.map((s) => ALERT_STATE_LABEL[s]).join("、")}
-          <TechValue value={ACTIVE_ALERT_STATES.join("/")} label="状态枚举" />
-        </span>
-        <span className="flex items-center gap-1.5">
-          <span className="inline-block h-2.5 w-2.5 border border-rule-strong" aria-hidden />
-          终态无出边：{ALERT_STATE_LABEL.closed}
-          <TechValue value="closed" label="状态枚举" />
-        </span>
-        <span className="flex items-center gap-1.5">
-          <span className="reading" aria-hidden>
-            {edges.length}
+      {/* Legend, then the full transition list. */}
+      <div className="space-y-2 border-t border-rule px-4 py-3 text-[11px] text-ink-muted">
+        <div className="flex flex-wrap items-center gap-x-5 gap-y-2">
+          <span className="flex items-center gap-1.5">
+            <span aria-hidden className="inline-block h-2.5 w-2.5 rounded-full bg-ink-faint" />
+            实心＝当前有该状态的告警，空心＝无
           </span>
-          条合法流转，与后端流转表一致
-          <TechValue value="TRANSITIONS" label="来源标识" />
-        </span>
-        {onSelect && (
-          <button
-            type="button"
-            onClick={() => onSelect(null)}
-            className="ml-auto text-primary hover:underline"
-          >
-            清除筛选
-          </button>
-        )}
+          <span className="flex items-center gap-1.5">
+            <span aria-hidden className="inline-block h-3 w-4 border-2 border-rule-strong" />
+            进行中：{ACTIVE_ALERT_STATES.map((s) => ALERT_STATE_LABEL[s]).join("、")}
+          </span>
+          <span className="flex items-center gap-1.5">
+            <span aria-hidden className="inline-block h-2.5 w-2.5 border border-rule-strong" />
+            {ALERT_STATE_LABEL.closed}为终态，无出边
+          </span>
+          {onSelect && (
+            <button
+              type="button"
+              onClick={() => onSelect(null)}
+              className="ml-auto text-primary hover:underline"
+            >
+              清除筛选
+            </button>
+          )}
+        </div>
+        <p className="flex flex-wrap items-center gap-x-2.5 gap-y-1 text-ink-faint">
+          <span>合法流转：</span>
+          <span className="whitespace-nowrap">
+            已检测→确认→已确认→升级→已升级→恢复→恢复中→解决→已解决→关闭→已关闭
+          </span>
+          {OFF_RAIL.map((e, i) => (
+            <span key={i} className="whitespace-nowrap">
+              {ALERT_STATE_LABEL[e.from]}→{e.verb}→{ALERT_STATE_LABEL[e.to]}
+            </span>
+          ))}
+        </p>
       </div>
     </div>
   );
 }
 
-function StateNode({
+function StateStop({
   state,
-  tone,
-  filled,
   count,
   selected,
+  interactive,
+  compact = false,
   onClick,
 }: {
   state: AlertState;
-  tone: Tone;
-  filled: boolean;
   count: number;
   selected: boolean;
+  interactive: boolean;
+  /** The bypass-chip shape, for the states that hang off the rail. */
+  compact?: boolean;
   onClick: () => void;
 }) {
   const style = ALERT_STATE_STYLE[state];
-  const active = ACTIVE_ALERT_STATES.includes(state);
-  const c = TONE_CLASS[tone];
+  const c = TONE_CLASS[style.tone];
+  const lit = count > 0;
+
+  if (compact) {
+    return (
+      <button
+        type="button"
+        onClick={onClick}
+        aria-pressed={selected}
+        title={`${style.zh}：当前 ${count} 条`}
+        className={clsx(
+          "group inline-flex items-center gap-2 rounded-full border px-2.5 py-1 transition-colors",
+          selected
+            ? clsx(c.border, c.bg, c.text)
+            : lit
+              ? clsx(c.border, "text-ink")
+              : "border-rule text-ink-muted",
+          interactive ? "cursor-pointer hover:border-rule-strong" : "cursor-default",
+        )}
+      >
+        <span
+          aria-hidden
+          data-dot
+          className={clsx(
+            "h-2 w-2 rounded-full",
+            lit ? clsx(c.text, "bg-current") : "border border-rule-strong",
+          )}
+        />
+        <span className="text-xs font-medium">{style.zh}</span>
+        <span className={clsx("reading text-xs font-semibold", lit ? "text-ink" : "text-ink-faint")}>
+          {count}
+        </span>
+      </button>
+    );
+  }
+
   return (
     <button
       type="button"
       onClick={onClick}
       aria-pressed={selected}
-      title={`${style.zh}（${state}）：当前 ${count} 条`}
+      title={`${style.zh}：当前 ${count} 条`}
       className={clsx(
-        "group relative flex w-full flex-col items-center gap-1 border bg-panel px-2 py-2.5 transition-colors",
-        c.border,
-        selected && c.bg,
-        active ? "border-2" : "border",
-        "hover:bg-paper-sunken",
+        "relative z-[1] flex h-full flex-1 flex-col items-center justify-center rounded-[var(--radius-token)]",
+        interactive ? "cursor-pointer" : "cursor-default",
       )}
     >
       <span
-        aria-hidden
-        className={clsx("h-2.5 w-2.5 rounded-full", filled ? c.text : "border-2")}
-        style={filled ? { backgroundColor: "currentColor" } : undefined}
-      />
-      <span className={clsx("text-xs font-semibold", c.text)}>{style.zh}</span>
-      <TechValue value={state} label="状态枚举" />
-      <span className={clsx("reading mt-0.5 text-sm font-semibold", count > 0 ? "text-ink" : "text-ink-faint")}>
+        className={clsx(
+          "flex h-6 items-center whitespace-nowrap rounded-full border px-2.5 text-xs font-semibold transition-all",
+          c.border,
+          c.text,
+          selected || lit
+            ? clsx(c.bg, "shadow-[0_0_12px_-3px_currentColor]")
+            : "bg-panel/60",
+          interactive && "group-hover:brightness-110",
+        )}
+      >
+        {style.zh}
+      </span>
+      <span aria-hidden className="relative my-2 flex h-4 w-4 items-center justify-center">
+        <span
+          data-dot
+          className={clsx(
+            "h-3 w-3 rounded-full transition-all",
+            lit
+              ? clsx(c.text, "border-2 border-current bg-current")
+              : "border-2 border-rule-strong bg-panel",
+          )}
+          style={lit ? { boxShadow: "0 0 10px -1px currentColor" } : undefined}
+        />
+        {selected && <span className={clsx("absolute inset-[-3px] rounded-full border", c.border)} />}
+      </span>
+      <span
+        className={clsx(
+          "reading flex h-6 items-center text-base font-semibold",
+          lit ? "text-ink" : "text-ink-faint",
+        )}
+      >
         {count}
       </span>
     </button>
   );
 }
-
-function EdgeCaption({ forState }: { forState: AlertState }) {
-  const captions: Partial<Record<AlertState, string>> = {
-    detected: "→ 确认/抑制/驳回",
-    confirmed: "→ 升级/恢复/关闭",
-    escalated: "→ 恢复/关闭",
-    recovering: "→ 解决/再升级",
-    resolved: "→ 关闭/复发",
-  };
-  const txt = captions[forState];
-  if (!txt) return <span className="h-4" aria-hidden />;
-  return <span className="reading text-[10px] text-ink-faint">{txt}</span>;
-}
-
-function collectEdges(): string[] {
-  const out: string[] = [];
-  for (const [from, tos] of Object.entries(ALERT_TRANSITIONS)) {
-    for (const to of tos) out.push(`${from}→${to}`);
-  }
-  return out;
-}
-
-export { EDGE_LABEL };

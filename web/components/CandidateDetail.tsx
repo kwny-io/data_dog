@@ -105,10 +105,7 @@ export function CandidateDetail({ candidateId, selected }: { candidateId: string
 
       {/* Evidence endpoint (spec §3.5). Absent on the backend today → we show a
        *  labeled placeholder rather than pretending, or hiding it entirely. */}
-      <Panel
-        title="Agent 所见证据"
-        subtitle="GET /v1/candidates/{id}/evidence · 参考窗口对照"
-      >
+      <Panel title="Agent 所见证据" subtitle="该候选的实时指标与参考窗口基线对照">
         {evidenceQ.isPending ? (
           <SkeletonRows rows={3} />
         ) : evidenceQ.isError ? (

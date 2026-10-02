@@ -30,7 +30,6 @@ export function CandidateList({
       title="候选异常"
       subtitle={q.data ? `共 ${q.data.total} 条` : "加载中"}
       className="flex flex-col"
-      ticks
     >
       {q.isPending ? (
         <SkeletonRows rows={6} />
@@ -39,13 +38,7 @@ export function CandidateList({
       ) : q.data.items.length === 0 ? (
         <EmptyState
           title="没有候选异常"
-          hint={
-            <>
-              候选由在线数据面从原始日志产出。先向{" "}
-              <code className="reading">POST /v1/telemetry</code> 提交一批设备日志，
-              解析链会在这里生成候选。
-            </>
-          }
+          hint="候选由在线数据面从原始日志产出。先提交一批设备日志，解析链会在这里生成候选。"
         />
       ) : (
         <>
@@ -65,8 +58,8 @@ export function CandidateList({
                   aria-current={selectedId === c.candidate_id ? "true" : undefined}
                   aria-label={`查看候选 ${componentLabel(c.component_ref)} 详情`}
                   className={clsx(
-                    "row-tick absolute inset-0 z-0 transition-colors group-hover/row:bg-paper-sunken",
-                    selectedId === c.candidate_id && "border-l-primary bg-primary-soft",
+                    "row-tick shine absolute inset-0 z-0 transition-all group-hover/row:bg-paper-sunken group-hover/row:row-tick-active",
+                    selectedId === c.candidate_id && "row-tick-active bg-primary-soft",
                   )}
                 />
                 <div className="pointer-events-none relative z-10 flex w-full items-center gap-2 px-3 py-2.5 text-left">

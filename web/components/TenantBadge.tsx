@@ -35,7 +35,7 @@ export function TenantBadge() {
           onChange={(e) => setDraft(e.target.value)}
           onBlur={() => setEditing(false)}
           onKeyDown={(e) => e.key === "Escape" && setEditing(false)}
-          className="reading h-8 w-40 border border-rule-strong bg-panel px-2 text-xs text-ink"
+          className="reading h-8 w-40 rounded-full border border-rule-strong bg-panel/60 px-3 text-xs text-ink focus:border-spec-violet"
           placeholder="tenant-demo"
         />
       </form>
@@ -50,7 +50,7 @@ export function TenantBadge() {
         setEditing(true);
       }}
       title="切换租户（X-Tenant-Id）"
-      className="inline-flex h-8 items-center gap-1.5 border border-rule-strong bg-panel px-2.5 text-xs text-ink-muted hover:bg-paper-sunken hover:text-ink"
+      className="shine inline-flex h-8 items-center gap-1.5 rounded-full border border-rule-strong bg-panel/50 px-2.5 text-xs text-ink-muted transition-colors hover:border-spec-violet/60 hover:text-ink"
     >
       <span className="text-ink-faint">租户</span>
       <span className="reading font-medium text-ink">{tenant}</span>

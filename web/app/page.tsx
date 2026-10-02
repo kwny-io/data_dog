@@ -5,7 +5,6 @@ import { useMemo } from "react";
 
 import { Panel, MetricTile, EmptyState, ErrorState, SkeletonRows, Button } from "@/components/ui/primitives";
 import { AlertStateMachine } from "@/components/AlertStateMachine";
-import { FieldName, TechValue } from "@/components/tech";
 import { useAlerts, useMetrics, useSummary } from "@/lib/api/queries";
 import { humanize, technicalLine } from "@/lib/errors";
 import {
@@ -58,28 +57,19 @@ export default function DashboardPage() {
   const trend: TrendPoint[] = useMemo(() => buildTrend(requestsByStatus), [requestsByStatus]);
 
   return (
-    <div className="space-y-5">
+    <div className="stagger space-y-5">
       <PageHeading />
 
       {/* Metric row */}
       <section className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
-        <MetricTile label="候选事件总数" value={candidatesTotal.toLocaleString("zh-CN")} hint="库内 candidates 行数" />
+        <MetricTile label="候选事件总数" value={candidatesTotal.toLocaleString("zh-CN")} hint="库内候选事件行数" />
         <MetricTile
           label="活动告警"
           value={activeAlerts}
           tone={activeAlerts > 0 ? "warning" : "confirmed"}
-          hint={
-            <>
-              未终结的告警
-              <TechValue
-                value="detected/confirmed/escalated/recovering"
-                className="ml-1.5"
-                label="状态枚举"
-              />
-            </>
-          }
+          hint="已检测 / 已确认 / 已升级 / 恢复中"
         />
-        <MetricTile label="Outbox 待投递" value={outboxPending} hint="等待投递 SaaS 的告警" tone={outboxPending > 0 ? "warning" : "confirmed"} />
+        <MetricTile label="待投递告警" value={outboxPending} hint="等待投递至外部的告警" tone={outboxPending > 0 ? "warning" : "confirmed"} />
         <MetricTile
           label="请求 P95"
           value={p95 !== undefined ? p95.toFixed(3) : "—"}
@@ -92,12 +82,7 @@ export default function DashboardPage() {
       {/* Trend */}
       <Panel
         title="请求量趋势"
-        subtitle={
-          <>
-            按请求状态分类的累计计数
-            <FieldName name="data_dog_http_requests_total" className="ml-1.5" />
-          </>
-        }
+        subtitle="按请求状态码分类的累计计数"
         actions={
           metrics.isFetching ? <span className="text-[11px] text-ink-faint">刷新中…</span> : null
         }
@@ -113,12 +98,7 @@ export default function DashboardPage() {
         ) : trend.length === 0 ? (
           <EmptyState
             title="还没有请求指标"
-            hint={
-              <>
-                服务启动后尚未记录到 <code className="reading">data_dog_http_requests_total</code>。
-                向 <code className="reading">POST /v1/telemetry</code> 发一批日志即可看到曲线。
-              </>
-            }
+            hint="服务启动后尚未记录到任何 HTTP 请求。提交一批设备日志即可看到曲线。"
             action={
               <Button variant="secondary" onClick={() => metrics.refetch()}>
                 重新读取指标
@@ -136,12 +116,7 @@ export default function DashboardPage() {
       <div className="grid grid-cols-1 gap-5 xl:grid-cols-[1.6fr_1fr]">
         <Panel
           title="告警状态分布"
-          subtitle={
-            <>
-              后端真实状态机 · 点击状态可跳转筛选
-              <FieldName name="alerting/lifecycle.py" className="ml-1.5" />
-            </>
-          }
+          subtitle="当前各状态的告警数量 · 点击状态可跳转筛选"
         >
           {alerts.isPending ? (
             <SkeletonRows rows={4} />
@@ -166,10 +141,7 @@ export default function DashboardPage() {
           )}
         </Panel>
 
-        <Panel
-          title="请求状态码分布"
-          subtitle={<FieldName name="data_dog_http_requests_total{status}" />}
-        >
+        <Panel title="请求状态码分布" subtitle="各状态码的累计请求数">
           {metrics.isPending ? (
             <SkeletonRows rows={4} />
           ) : Object.keys(requestsByStatus).length === 0 ? (
@@ -208,13 +180,13 @@ export default function DashboardPage() {
         <div className="flex flex-wrap gap-3 p-4">
           <Link
             href="/investigate"
-            className="inline-flex items-center gap-2 border border-rule-strong bg-panel px-3 py-2 text-sm text-ink hover:bg-paper-sunken"
+            className="shine inline-flex items-center gap-2 rounded-[var(--radius-token)] border border-rule-strong bg-panel/50 px-3 py-2 text-sm text-ink transition-colors hover:border-spec-violet/60"
           >
             去调查台选一个候选开始调查 →
           </Link>
           <Link
             href="/alerts"
-            className="inline-flex items-center gap-2 border border-rule-strong bg-panel px-3 py-2 text-sm text-ink hover:bg-paper-sunken"
+            className="shine inline-flex items-center gap-2 rounded-[var(--radius-token)] border border-rule-strong bg-panel/50 px-3 py-2 text-sm text-ink transition-colors hover:border-spec-violet/60"
           >
             查看告警状态机 →
           </Link>
@@ -229,14 +201,7 @@ function PageHeading() {
     <div className="flex items-end justify-between gap-4">
       <div>
         <h1 className="text-lg font-semibold text-ink">仪表盘</h1>
-        <p className="mt-1 text-sm text-ink-muted">
-          一眼看服务健康与业务量。
-          <TechValue
-            value="数据来自 /readyz、/metrics 与 /v1/alerts。"
-            className="ml-1"
-            label="数据来源"
-          />
-        </p>
+        <p className="mt-1 text-sm text-ink-muted">一眼看服务健康与业务量。</p>
       </div>
     </div>
   );

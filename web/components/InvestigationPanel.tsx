@@ -5,7 +5,6 @@ import { useEffect, useRef, useState } from "react";
 import { Panel, Button, ErrorState } from "@/components/ui/primitives";
 import { TraceTimeline } from "@/components/TraceTimeline";
 import { ReportCard } from "@/components/ReportCard";
-import { FieldName } from "@/components/tech";
 import { useInvestigate } from "@/lib/api/queries";
 import { humanize, technicalLine } from "@/lib/errors";
 import type { CandidateEvent, InvestigationResult } from "@/lib/api/types";
@@ -78,7 +77,7 @@ export function InvestigationPanel({
       <Panel title="Agent 调查" subtitle="同步调用，最长 90 秒 · 可取消">
         <div className="flex flex-wrap items-center gap-3 px-4 py-3">
           {!mutation.isPending ? (
-            <Button variant="primary" onClick={start}>
+            <Button variant="primary" className="shine-loop" onClick={start}>
               ▶ 开始调查
             </Button>
           ) : (
@@ -130,7 +129,7 @@ export function InvestigationPanel({
           </Panel>
 
           {result.verdict && (
-            <Panel title="一句话结论" subtitle={<FieldName name="verdict" />}>
+            <Panel title="一句话结论">
               <div className="space-y-1.5 px-4 py-4">
                 <p className="text-base font-semibold text-ink">{result.verdict}</p>
                 {result.verdict_detail && (
@@ -165,14 +164,17 @@ function ProgressTrack({ elapsed }: { elapsed: number }) {
   const pct = Math.min(100, (elapsed / 90) * 100);
   return (
     <div
-      className="h-1.5 w-full bg-paper-sunken"
+      className="h-1.5 w-full overflow-hidden rounded-full bg-paper-sunken"
       role="progressbar"
       aria-valuenow={Math.round(pct)}
       aria-valuemin={0}
       aria-valuemax={100}
       aria-label="调查进度（按 90 秒时限估算）"
     >
-      <div className="h-full bg-primary transition-[width]" style={{ width: `${pct}%` }} />
+      <div
+        className="shine-loop relative h-full rounded-full bg-spectrum transition-[width]"
+        style={{ width: `${pct}%` }}
+      />
     </div>
   );
 }

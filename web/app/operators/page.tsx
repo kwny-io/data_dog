@@ -14,7 +14,7 @@ import {
   Toolbar,
   PendingSlot,
 } from "@/components/ui/primitives";
-import { FieldName, TechValue } from "@/components/tech";
+import { TechValue } from "@/components/tech";
 import { useCandidates } from "@/lib/api/queries";
 import { humanize, technicalLine } from "@/lib/errors";
 import { componentLabel } from "@/lib/domain";
@@ -64,7 +64,7 @@ export default function OperatorsPage() {
   const totalFired = operators.reduce((n, o) => n + o.count, 0);
 
   return (
-    <div className="space-y-5">
+    <div className="stagger space-y-5">
       <header>
         <h1 className="text-lg font-semibold text-ink">算子控制面</h1>
         <p className="mt-1 text-sm text-ink-muted">
@@ -86,7 +86,7 @@ export default function OperatorsPage() {
           <div className="reading mt-1.5 text-[26px] font-semibold leading-none text-ink">
             {q.isPending ? "—" : totalFired}
           </div>
-          <div className="mt-1.5 text-xs text-ink-faint">候选 provenance 累计</div>
+          <div className="mt-1.5 text-xs text-ink-faint">候选算子溯源累计</div>
         </Panel>
         <Panel className="px-4 py-3">
           <div className="flex items-center gap-2">
@@ -103,16 +103,7 @@ export default function OperatorsPage() {
       {/* Real, derivable table. */}
       <Panel
         title="触发过的算子"
-        subtitle={
-          q.data ? (
-            <>
-              来自 {q.data.count} 条候选的 provenance
-              <FieldName name="detector_provenance" className="ml-1.5" />
-            </>
-          ) : (
-            "加载中"
-          )
-        }
+        subtitle={q.data ? `来自 ${q.data.count} 条候选的算子溯源` : "加载中"}
       >
         {q.isPending ? (
           <SkeletonRows rows={4} />
@@ -121,7 +112,7 @@ export default function OperatorsPage() {
         ) : operators.length === 0 ? (
           <EmptyState
             title="暂无算子触发记录"
-            hint="当候选产生时，其检测算子的 provenance 会记录在这里。先在仪表盘确认服务收到了日志。"
+            hint="当候选产生时，其检测算子的溯源信息会记录在这里。先在仪表盘确认服务收到了日志。"
           />
         ) : (
           <>
@@ -194,7 +185,7 @@ export default function OperatorsPage() {
 }
 
 function splitProvenance(p: string): [string, string] {
-  if (!p) return ["（无 provenance）", "—"];
+  if (!p) return ["（无溯源信息）", "—"];
   const idx = p.lastIndexOf(":");
   if (idx < 0) return [p, "—"];
   return [p.slice(0, idx), p.slice(idx + 1)];

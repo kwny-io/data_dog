@@ -40,7 +40,7 @@ export default function InvestigatePage() {
   }
 
   return (
-    <div className="space-y-4">
+    <div className="stagger space-y-4">
       <header>
         <h1 className="text-lg font-semibold text-ink">调查台</h1>
         <p className="mt-1 text-sm text-ink-muted">

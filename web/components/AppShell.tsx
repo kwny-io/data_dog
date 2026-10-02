@@ -7,6 +7,7 @@ import { ThemeToggle } from "@/components/ThemeToggle";
 import { TechToggle } from "@/components/TechToggle";
 import { TenantBadge } from "@/components/TenantBadge";
 import { HealthBadge } from "@/components/HealthBadge";
+import { Logo } from "@/components/Logo";
 import clsx from "clsx";
 
 const NAV = [
@@ -34,11 +35,14 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
 function TopBar() {
   return (
-    <header className="sticky top-0 z-30 border-b border-rule-strong bg-panel/95 backdrop-blur supports-[backdrop-filter]:bg-panel/85">
+    <header className="glass sticky top-0 z-30 border-b border-rule">
+      <span
+        aria-hidden
+        className="flow-line pointer-events-none absolute inset-x-0 bottom-[-1px] h-px opacity-70"
+      />
       <div className="mx-auto flex h-14 w-full max-w-[1600px] items-center gap-4 px-4 lg:px-6">
-        <Link href="/" className="flex items-baseline gap-2">
-          <span className="reading text-sm font-semibold tracking-tight text-ink">data_dog</span>
-          <span className="hidden text-xs text-ink-faint sm:inline">遥测故障调查台</span>
+        <Link href="/" aria-label="遥测故障调查台">
+          <Logo />
         </Link>
         <div className="ml-auto flex items-center gap-2">
           <TenantBadge />
@@ -54,7 +58,7 @@ function TopBar() {
 function SideNav({ pathname }: { pathname: string }) {
   return (
     <nav aria-label="主导航" className="hidden w-52 shrink-0 py-5 lg:block">
-      <ul className="space-y-0.5">
+      <ul className="space-y-1">
         {NAV.map((item) => {
           const active = item.href === "/" ? pathname === "/" : pathname.startsWith(item.href);
           return (
@@ -63,15 +67,23 @@ function SideNav({ pathname }: { pathname: string }) {
                 href={item.href}
                 aria-current={active ? "page" : undefined}
                 className={clsx(
-                  // Nav is a distinct interaction plane: a persistent left rule
+                  // Nav is a distinct interaction plane: a persistent left rail
                   // marks it as a link even at rest, so it never reads as plain
-                  // text. Colour is the active/hover enhancement, not the cue.
-                  "block border-l-2 px-3 py-2 text-sm transition-colors",
+                  // text. The active state lights the rail with a travelling
+                  // shimmer (flow-line) — the same "energised edge" as the top
+                  // bar and the primary CTA, so live things share one signature.
+                  "relative block rounded-r-[var(--radius-token)] border-l-2 px-3 py-2 text-sm transition-all",
                   active
-                    ? "border-primary bg-primary-soft font-medium text-primary"
-                    : "border-rule-strong text-ink-muted hover:border-primary hover:bg-paper-sunken hover:text-ink",
+                    ? "border-spec-violet bg-primary-soft font-medium text-primary shadow-[inset_0_0_20px_-8px_var(--glow-ring)]"
+                    : "border-rule-strong text-ink-muted hover:border-spec-cyan hover:bg-paper-sunken hover:text-ink",
                 )}
               >
+                {active && (
+                  <span
+                    aria-hidden
+                    className="flow-line pointer-events-none absolute inset-y-1.5 left-[-2px] w-0.5 rounded-full"
+                  />
+                )}
                 {item.label}
                 <span className="mt-0.5 block text-[11px] text-ink-faint">{item.hint}</span>
               </Link>
@@ -91,7 +103,7 @@ function MobileNav({ pathname }: { pathname: string }) {
   return (
     <nav
       aria-label="主导航"
-      className="border-b border-rule bg-panel/60 lg:hidden"
+      className="glass border-b border-rule lg:hidden"
     >
       <ul className="mx-auto flex w-full max-w-[1600px] gap-1 overflow-x-auto px-4 py-2">
         {NAV.map((item) => {
@@ -102,11 +114,19 @@ function MobileNav({ pathname }: { pathname: string }) {
                 href={item.href}
                 aria-current={active ? "page" : undefined}
                 className={clsx(
-                  "block whitespace-nowrap rounded-[var(--radius-token)] px-2.5 py-1 text-xs",
-                  active ? "bg-primary-soft font-medium text-primary" : "text-ink-muted",
+                  "relative block whitespace-nowrap rounded-full px-2.5 py-1 text-xs transition-colors",
+                  active
+                    ? "bg-gradient-to-r from-spec-violet/25 to-spec-magenta/20 font-medium text-primary"
+                    : "text-ink-muted",
                 )}
               >
                 {item.label}
+                {active && (
+                  <span
+                    aria-hidden
+                    className="pointer-events-none absolute inset-x-2 -bottom-px h-px rounded-full bg-gradient-to-r from-transparent via-spec-violet to-transparent"
+                  />
+                )}
               </Link>
             </li>
           );

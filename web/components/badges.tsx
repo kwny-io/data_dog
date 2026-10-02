@@ -15,22 +15,52 @@ import {
 import type { AlertSeverity, AlertState, Disposition, SeverityHint } from "@/lib/api/types";
 import clsx from "clsx";
 
+/**
+ * StateBox — the state/severity marker, drawn in the same language as the
+ * state-machine node: a squared, tone-bordered plate rather than a pill. The
+ * box is the console's "this is a classified value" shape, so a state reads the
+ * same whether it sits on the machine or in a table row.
+ */
+function StateBox({
+  tone,
+  children,
+  tech,
+  techLabel,
+}: {
+  tone: Tone;
+  children: React.ReactNode;
+  tech?: string;
+  techLabel?: string;
+}) {
+  const c = TONE_CLASS[tone];
+  return (
+    <span
+      className={clsx(
+        "inline-flex items-center gap-1.5 rounded-[var(--radius-token)] border px-2 py-0.5 text-xs font-semibold",
+        c.border,
+        c.text,
+      )}
+    >
+      {children}
+      {tech && <TechValue value={tech} label={techLabel} />}
+    </span>
+  );
+}
+
 export function SeverityBadge({ severity }: { severity: SeverityHint | AlertSeverity | string }) {
   return (
-    <Badge tone={severityTone(severity)} dot filled>
+    <StateBox tone={severityTone(severity)} tech={severity} techLabel="严重度枚举">
       {SEVERITY_LABEL[severity] ?? severity}
-      <TechValue value={severity} label="严重度枚举" className="ml-1" />
-    </Badge>
+    </StateBox>
   );
 }
 
 export function AlertStateBadge({ state }: { state: AlertState }) {
   const s = ALERT_STATE_STYLE[state];
   return (
-    <Badge tone={s.tone} dot filled>
+    <StateBox tone={s.tone} tech={state} techLabel="状态枚举">
       {s.zh}
-      <TechValue value={state} label="状态枚举" className="ml-1" />
-    </Badge>
+    </StateBox>
   );
 }
 

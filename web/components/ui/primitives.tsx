@@ -2,11 +2,20 @@ import clsx from "clsx";
 
 import { TONE_CLASS, type Tone } from "@/lib/domain";
 import { HScroll } from "@/components/ui/hscroll";
+import { Spotlight } from "@/components/ui/Spotlight";
 
 /* ------------------------------------------------------------------ Panel *
- * A drawing sheet: square corners, a hairline rule, a stronger frame, and
- * four corner ticks. Hierarchy comes from line weight, not from shadows —
- * the SaaS rounded-card-with-soft-shadow kit is deliberately avoided. */
+ * A holographic plate: frosted glass over the orb field, soft rounded corners,
+ * a spectrum shimmer along the top edge, and a cool halo. Hierarchy comes from
+ * glow weight and the top rule, not from stacked drop shadows.
+ *
+ * The header is treated as its own stratum, not a title bar:
+ *   - a short spectrum *rake* at the left edge marks the section the way a nav
+ *     rail and the logo frame do — one ornament language across the console;
+ *   - the header separates from the body with a hairline that fades out to the
+ *     right, so it never competes with the top-edge shimmer for attention;
+ *   - the whole plate is a pointer-tracked spotlight, so a live panel answers
+ *     the cursor without any element lighting up on its own. */
 
 export function Panel({
   children,
@@ -14,7 +23,9 @@ export function Panel({
   title,
   subtitle,
   actions,
-  ticks = true,
+  accent = true,
+  lift = true,
+  aside,
   as: Tag = "section",
 }: {
   children: React.ReactNode;
@@ -22,56 +33,54 @@ export function Panel({
   title?: React.ReactNode;
   subtitle?: React.ReactNode;
   actions?: React.ReactNode;
-  ticks?: boolean;
+  /** A fixed aside, pinned to the right of the header (e.g. a status chip).
+   *  Distinct from `actions`, which holds controls. */
+  aside?: React.ReactNode;
+  /** Draw the spectrum shimmer along the top edge. On by default. */
+  accent?: boolean;
+  /** Warm the border + deepen the halo on hover. Off for nested/static plates. */
+  lift?: boolean;
   as?: "section" | "div" | "article";
 }) {
   return (
-    <Tag
+    <Spotlight
+      as={Tag}
       className={clsx(
-        "relative border border-rule-strong bg-panel",
-        "rounded-[var(--radius-token)]",
+        "glass glow relative overflow-hidden",
+        "rounded-[var(--radius-token)] border border-rule",
+        lift && "lift",
         className,
       )}
     >
-      {ticks && (
-        <>
-          <Tick className="left-[-1px] top-[-1px] border-l-2 border-t-2" />
-          <Tick className="right-[-1px] top-[-1px] border-r-2 border-t-2" />
-          <Tick className="bottom-[-1px] left-[-1px] border-b-2 border-l-2" />
-          <Tick className="bottom-[-1px] right-[-1px] border-b-2 border-r-2" />
-        </>
+      {accent && (
+        <span
+          aria-hidden
+          className="pointer-events-none absolute inset-x-0 top-0 z-10 h-px bg-gradient-to-r from-transparent via-spec-violet/60 to-transparent"
+        />
       )}
-      {(title || actions) && (
-        <header className="flex items-baseline justify-between gap-4 border-b border-rule px-4 py-2.5">
-          <div className="min-w-0">
+      {(title || actions || aside) && (
+        <header className="relative z-[1] flex items-baseline justify-between gap-4 border-b border-rule px-4 py-2.5">
+          <div className="panel-rake min-w-0 pl-2.5">
             {title && (
-              <h2 className="text-[13px] font-semibold tracking-wide text-ink">
-                {title}
-              </h2>
+              <h2 className="text-[13px] font-semibold tracking-wide text-ink">{title}</h2>
             )}
             {subtitle && <p className="mt-0.5 text-xs text-ink-muted">{subtitle}</p>}
           </div>
-          {actions && <div className="flex shrink-0 items-center gap-2">{actions}</div>}
+          <div className="flex shrink-0 items-center gap-2">
+            {aside}
+            {actions && <div className="flex shrink-0 items-center gap-2">{actions}</div>}
+          </div>
         </header>
       )}
       {children}
-    </Tag>
-  );
-}
-
-function Tick({ className }: { className: string }) {
-  return (
-    <span
-      aria-hidden
-      className={clsx("pointer-events-none absolute h-2 w-2 border-rule-strong", className)}
-    />
+    </Spotlight>
   );
 }
 
 /* ------------------------------------------------------------- MetricTile *
  * An instrument read-out: label small above, value large in mono below,
- * unit/context as a suffix. Right-aligned numbers would fight the label, so
- * value leads left; the mono face is what signals "this is a measurement". */
+ * unit/context as a suffix. The mono face is what signals "this is a
+ * measurement"; the value carries the tone colour and a soft glow. */
 
 export function MetricTile({
   label,
@@ -92,24 +101,27 @@ export function MetricTile({
   pending?: boolean;
   className?: string;
 }) {
+  const c = TONE_CLASS[tone];
   return (
-    <Panel className={clsx("px-4 py-3", className)}>
-      <div className="text-xs font-medium text-ink-muted">{label}</div>
+    <Panel accent={false} lift className={clsx("px-4 py-3", className)}>
+      {/* A reading instrument: a tone-coloured datum bar sits under the value,
+          so the tile's state is legible from the bar's colour alone even before
+          the number is read — the same "signal, not decoration" rule. */}
+      <div className="eyebrow">{label}</div>
       {pending ? (
         <div className="mt-1.5">
           <span className="reading text-[26px] font-semibold leading-none text-ink-faint">—</span>
-          <span className="ml-2 align-middle text-[10px] uppercase tracking-wide text-ink-faint">
-            待接入
-          </span>
+          <span className="reading ml-2 align-middle text-[10px] text-ink-faint">待接入</span>
         </div>
       ) : (
         <div className="mt-1.5 flex items-baseline gap-1.5">
-          <span className={clsx("reading text-[26px] font-semibold leading-none", TONE_CLASS[tone].text)}>
+          <span className={clsx("reading text-[26px] font-semibold leading-none", c.text)}>
             {value}
           </span>
           {unit && <span className="text-xs text-ink-muted">{unit}</span>}
         </div>
       )}
+      <span aria-hidden className={clsx("mt-2 block h-0.5 w-8 rounded-full bg-current", c.text)} />
       {hint && <div className="mt-1.5 text-xs text-ink-faint">{hint}</div>}
     </Panel>
   );
@@ -134,10 +146,11 @@ export function Badge({
   return (
     <span
       className={clsx(
-        "inline-flex items-center gap-1.5 rounded-[var(--radius-token)] border px-2 py-0.5 text-xs font-medium",
+        "inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-xs font-medium",
         c.text,
         c.border,
-        filled ? c.bg : "bg-transparent",
+        filled ? c.bg : "bg-panel/40",
+        filled && "shadow-[0_0_12px_-2px_currentColor]",
         className,
       )}
     >
@@ -184,7 +197,7 @@ export function PendingSlot({
   return (
     <div
       className={clsx(
-        "flex flex-col gap-1.5 border border-dashed border-rule-strong px-3 py-2.5",
+        "flex flex-col gap-1.5 rounded-[var(--radius-token)] border border-dashed border-rule-strong bg-panel/30 px-3 py-2.5",
         className,
       )}
       role="group"
@@ -207,7 +220,7 @@ export function PendingSlot({
         </p>
       )}
       {command && (
-        <code className="reading mt-0.5 block break-all border-l-2 border-rule pl-2.5 text-[11px] text-ink">
+        <code className="reading mt-0.5 block break-all rounded-r-[var(--radius-token)] border-l-2 border-spec-violet/50 pl-2.5 text-[11px] text-ink">
           {command}
         </code>
       )}
@@ -221,7 +234,7 @@ export function Skeleton({ className }: { className?: string }) {
   return (
     <div
       aria-hidden
-      className={clsx("animate-pulse rounded-[var(--radius-token)] bg-paper-sunken", className)}
+      className={clsx("skeleton-shimmer rounded-[var(--radius-token)]", className)}
     />
   );
 }
@@ -277,7 +290,7 @@ export function ErrorState({
   className?: string;
 }) {
   return (
-    <div className={clsx("border-l-2 border-critical bg-critical-soft/40 px-5 py-4", className)} role="alert">
+    <div className={clsx("rounded-[var(--radius-token)] border-l-2 border-critical bg-critical-soft/50 px-5 py-4", className)} role="alert">
       <p className="text-sm font-semibold text-ink">{title}</p>
       {hint && <p className="mt-1 text-xs leading-relaxed text-ink-muted">{hint}</p>}
       {technical && (
@@ -287,7 +300,7 @@ export function ErrorState({
         <button
           type="button"
           onClick={onRetry}
-          className="mt-3 inline-flex items-center border border-rule-strong bg-panel px-3 py-1 text-xs font-medium text-ink hover:bg-paper-sunken"
+          className="mt-3 inline-flex items-center rounded-[var(--radius-token)] border border-rule-strong bg-panel/60 px-3 py-1 text-xs font-medium text-ink hover:bg-paper-sunken"
         >
           重试
         </button>
@@ -308,17 +321,18 @@ export function Button({
   size?: "sm" | "md";
 }) {
   const variants = {
-    primary: "bg-primary text-on-primary border-primary hover:bg-primary-hover",
-    secondary: "bg-panel text-ink border-rule-strong hover:bg-paper-sunken",
+    primary:
+      "shine bg-spectrum text-on-primary border-transparent shadow-[0_0_22px_-6px_var(--glow-ring)] hover:brightness-110",
+    secondary: "shine bg-panel/50 text-ink border-rule-strong hover:bg-paper-sunken",
     ghost: "bg-transparent text-ink-muted border-transparent hover:bg-paper-sunken hover:text-ink",
-    danger: "bg-panel text-critical border-critical hover:bg-critical-soft",
+    danger: "shine bg-panel/50 text-critical border-critical hover:bg-critical-soft",
   } as const;
   const sizes = { sm: "px-2.5 py-1 text-xs", md: "px-3.5 py-1.5 text-sm" } as const;
   return (
     <button
       {...props}
       className={clsx(
-        "inline-flex items-center justify-center gap-1.5 rounded-[var(--radius-token)] border font-medium transition-colors",
+        "relative inline-flex items-center justify-center gap-1.5 rounded-[var(--radius-token)] border font-medium transition-all",
         "disabled:cursor-not-allowed disabled:opacity-50",
         variants[variant],
         sizes[size],
@@ -447,7 +461,7 @@ export function Th({
       className={clsx(
         "whitespace-nowrap px-3 py-2 font-medium",
         numeric && "text-right",
-        sticky && "sticky left-0 z-20 border-r border-rule bg-panel",
+        sticky && "sticky left-0 z-20 border-r border-rule bg-panel/90 backdrop-blur",
         className,
       )}
     >
@@ -475,7 +489,7 @@ export function Td({
       className={clsx(
         "px-3 py-2 align-middle text-ink",
         numeric && "reading text-right",
-        sticky && "sticky left-0 z-10 border-r border-rule bg-panel group-hover:bg-paper-sunken",
+        sticky && "sticky left-0 z-10 border-r border-rule bg-panel/90 backdrop-blur group-hover:bg-paper-sunken",
         className,
       )}
     >

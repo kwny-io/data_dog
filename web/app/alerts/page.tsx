@@ -5,7 +5,7 @@ import { useMemo, useState } from "react";
 import { Panel, DataTable, Th, Td, Toolbar, Pagination, SkeletonRows, EmptyState, ErrorState, Button, Badge, RowChevron } from "@/components/ui/primitives";
 import { AlertStateMachine } from "@/components/AlertStateMachine";
 import { AlertStateBadge, SeverityBadge } from "@/components/badges";
-import { CopyId, FieldName, TechValue } from "@/components/tech";
+import { CopyId, TechValue } from "@/components/tech";
 import { useAlerts, useOutbox } from "@/lib/api/queries";
 import { humanize, technicalLine } from "@/lib/errors";
 import { ALERT_STATE_ORDER, formatTime, isActiveAlert, ALERT_STATE_LABEL } from "@/lib/domain";
@@ -32,11 +32,11 @@ export default function AlertsPage() {
   const open = rows.find((a) => a.event_id === openId) ?? null;
 
   return (
-    <div className="space-y-4">
+    <div className="stagger space-y-4">
       <header>
         <h1 className="text-lg font-semibold text-ink">告警</h1>
         <p className="mt-1 text-sm text-ink-muted">
-          P3 闭环首次在前端呈现：真实状态机、状态流转历史、以及 Outbox 投递状态。
+          P3 闭环首次在前端呈现：真实状态机、状态流转历史、以及告警投递状态。
         </p>
       </header>
 
@@ -204,10 +204,14 @@ function AlertDrawer({ alert, onClose }: { alert: AlertEvent; onClose: () => voi
         type="button"
         aria-label="关闭"
         onClick={onClose}
-        className="absolute inset-0 bg-ink/30"
+        className="drawer-scrim absolute inset-0 bg-ink/30 backdrop-blur-[2px]"
       />
-      <div className="relative ml-auto h-full w-full max-w-xl overflow-y-auto border-l border-rule-strong bg-panel shadow-none">
-        <header className="sticky top-0 flex items-center justify-between gap-3 border-b border-rule bg-panel px-5 py-3">
+      <div className="drawer-panel glass relative ml-auto h-full w-full max-w-xl overflow-y-auto border-l border-rule-strong">
+        <header className="glass sticky top-0 flex items-center justify-between gap-3 border-b border-rule px-5 py-3">
+          <span
+            aria-hidden
+            className="pointer-events-none absolute inset-x-0 bottom-[-1px] h-px bg-gradient-to-r from-transparent via-spec-violet/50 to-transparent"
+          />
           <div>
             <div className="flex items-center gap-2">
               <AlertStateBadge state={alert.state} />
@@ -261,15 +265,7 @@ function AlertDrawer({ alert, onClose }: { alert: AlertEvent; onClose: () => voi
             </Section>
           )}
 
-          <Section
-            title="状态流转历史"
-            subtitle={
-              <>
-                每条流转由后端审计留痕
-                <FieldName name="AlertEvent.history" className="ml-1.5" />
-              </>
-            }
-          >
+          <Section title="状态流转历史" subtitle="每条流转均由后端审计留痕">
             <HistoryTimeline alert={alert} />
           </Section>
 
@@ -282,15 +278,7 @@ function AlertDrawer({ alert, onClose }: { alert: AlertEvent; onClose: () => voi
             </Section>
           )}
 
-          <Section
-            title="Outbox 投递状态"
-            subtitle={
-              <>
-                与该告警关联的投递记录
-                <FieldName name="GET /v1/outbox" className="ml-1.5" />
-              </>
-            }
-          >
+          <Section title="投递状态" subtitle="与该告警关联的投递记录">
             {outbox.isPending ? (
               <SkeletonRows rows={2} />
             ) : related.length === 0 ? (

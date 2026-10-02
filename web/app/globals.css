@@ -64,86 +64,152 @@
 /* ------------------------------------------------------------------ *
  * data_dog design tokens
  *
- * Visual direction: an ENGINEERING DRAWING, not a marketing dashboard.
- * The subject is industrial telemetry fault investigation — the audience is
- * an equipment-reliability engineer. The one memorable device is the
- * "evidence rail": a from→to value rendered as a real dimension line
- * (extension lines, arrowheads, a tolerance band). Everything else stays
- * quiet so that device reads.
+ * Visual direction: a DEEP-SPACE CONTROL CONSOLE / holographic readout — a
+ * young, high-energy, "science-ops" identity. The subject is still industrial
+ * telemetry fault investigation, but the surface language is glow, glass and
+ * spectrum rather than drafting paper.
  *
- * Deliberately NOT: warm cream + serif + terracotta, near-black + one neon,
- * the SaaS rounded-card kit (one radius + one soft shadow on everything),
- * gradient washes. Panel borders are drawing-sheet rules, not shadows.
+ * The one memorable device stays the "evidence rail": a from→to value drawn
+ * as a dimension line. Its substrate changes (glass panel, neon rule) but its
+ * job — making "a conclusion must carry its evidence" visible — does not.
+ *
+ * Accent is a three-stop spectrum (electric cyan → violet → magenta) used as
+ * a SIGNAL, not as wallpaper: it backlights the single primary action and a
+ * few key accents. Everything structural (rules, body text, tables) stays in
+ * the cool deep-space neutrals so data remains the loudest thing on screen.
+ *
+ * Deliberately NOT (per brief §6): warm cream + serif + terracotta,
+ * near-black + a SINGLE neon green, the newspaper-column look.
  * ------------------------------------------------------------------ */
 
 :root {
-  /* Neutrals — cool blueprint slate, never pure black, never warm. */
-  --paper: #edf1f6; /* app background: drafting paper */
-  --paper-sunken: #e2e8f0; /* recessed wells */
-  --panel: #ffffff; /* sheet/panel face */
-  --rule: #d3dce6; /* hairline: default border */
-  --rule-strong: #a9b7c6; /* emphasis rule: panel frame */
-  --grid: #dce4ed; /* graph-paper grid */
-  --ink: #0f1b2a; /* primary text */
-  --ink-muted: #47586a; /* secondary text, labels */
-  --ink-faint: #5a6b7e; /* tertiary, axis ticks */
+  /* Light = "daylight holography": a cool bright substrate so the same glass +
+     spectrum language reads in a lab / daytime context without going dark. */
+  --paper: #eef2fb;
+  --paper-sunken: #e2e8f6;
+  --panel: #ffffff;
+  --panel-glass: rgba(255, 255, 255, 0.72); /* the frosted face over the orbs */
+  --rule: #d7dff0;
+  --rule-strong: #b3c0dd;
+  --grid: #cbd6ea;
+  --ink: #0b1526;
+  --ink-muted: #4a5772;
+  --ink-faint: #5a657f; /* was #647089 (4.5:1, no AA margin once the violet
+                           substrate lit up the glass). Now ~5.3:1, still
+                           lighter than --ink-muted. */
 
-  /* Primary — instrument blue (engineering trust, not SaaS marketing blue). */
-  --primary: #14548f;
-  --primary-hover: #0f4272;
-  --primary-soft: #e1ebf6; /* tinted background for selected/active */
+  /* Primary action colour = the spectrum's anchor (electric indigo). */
+  --primary: #4f46e5;
+  --primary-hover: #4338ca;
+  --primary-soft: #e6e4fb;
   --on-primary: #ffffff;
 
-  /* Semantics. The brief pins four named roles; the hexes borrow the
-   * existing Streamlit palette so operators don't re-learn the colours.
-   * Consistency across the app matters more than prettiness here, because
-   * the alert state machine is read through them.
-   *
-   * All four are dark enough to clear 4.5:1 as body text on paper (#edf1f6)
-   * AND on panel (#fff). The old amber (#d97706) was 2.9–3.2:1 — below AA for
-   * the "待接入" / severity_hint text it carries, so it was darkened to
-   * #a15700. See doc 38 §4.4. */
-  --critical: #d01e1e;
-  --critical-soft: #fde8e8;
-  --warning: #a15700;
-  --warning-soft: #fdf1e0;
-  --confirmed: #047857; /* the "good/closed" slot */
-  --confirmed-soft: #e2f5ee;
-  --suppressed: #5b6878; /* muted/void slot */
-  --suppressed-soft: #eef1f5;
+  /* Spectrum — the accent gradient stops. Used for glow, the primary button,
+     active nav, and small highlight rules. */
+  --spec-cyan: #06b6d4;
+  --spec-violet: #7c3aed;
+  --spec-magenta: #db2777;
 
-  --focus: #2563eb;
-  --radius: 3px; /* one small radius: drawings have square corners */
+  /* Semantics. The brief pins four named roles and says consistency beats
+     prettiness because the alert state machine is read through them. Hexes
+     keep the Streamlit-era mental model; all four clear 4.5:1 on both paper
+     and panel (see doc 38 §4.4). */
+  --critical: #dc2626;
+  --critical-soft: #fdecec;
+  --warning: #b45309;
+  --warning-soft: #fdf0e2;
+  --confirmed: #047857; /* the "good/closed" slot; #059669 read 3.6:1 on the
+                           glass face — below AA for the state text it carries */
+  --confirmed-soft: #e2f6ee;
+  --suppressed: #5b6878; /* muted/void slot */
+  --suppressed-soft: #eef1f6;
+
+  --focus: #4f46e5;
+  --radius: 10px; /* soft-rounded: the console reads as modern hardware */
+
+  /* Blurred-orb field (see body::before / .orb). In light mode the orbs are a
+     soft daylight tint — present, but kept light so text contrast is unharmed.
+     The substrate leans a touch toward violet (a lit, not neutral, white) so the
+     spectrum above it reads as one material. */
+  --orb-1: rgba(6, 182, 212, 0.30); /* cyan   */
+  --orb-2: rgba(139, 92, 246, 0.34); /* violet — brighter, so the field is
+                                        actually violet and not just "cool" */
+  --orb-3: rgba(219, 39, 119, 0.18); /* magenta */
+  --bg-base: radial-gradient(120% 120% at 15% 0%, #f8f7ff 0%, #eaeafb 45%, #e6e3f6 100%);
+
+  /* The fourth stratum (see .grain / .vignette). Grain alpha is deliberately
+     near-invisible: it exists to break up banding in the big radials, and any
+     value you can consciously "see" as noise is already too strong. */
+  --grain-opacity: 0.035;
+  --vignette: rgba(24, 26, 60, 0.10); /* cool shadow pulling the edges in */
+
+  /* Glow strengths — the halo behind glass panels and accent elements. */
+  --glow: 0 0 0 1px rgba(124, 58, 237, 0.06), 0 8px 30px -12px rgba(79, 70, 229, 0.35);
+  --glow-ring: rgba(124, 58, 237, 0.35);
+
+  /* Motion tokens. Every animation in the app reads from these, so the whole
+     console moves at one tempo instead of each effect inventing its own. */
+  --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1); /* decelerating: entrances, draw-ins */
+  --ease-in-out-soft: cubic-bezier(0.45, 0, 0.55, 1); /* ambient loops */
+  --dur-1: 140ms; /* state flips: hover, press */
+  --dur-2: 260ms; /* small reveals: expand, fade */
+  --dur-3: 520ms; /* structural reveals: a panel arriving */
+
+  /* The cursor spotlight's ink (see .spotlight / components/PointerGlow). */
+  --spot: rgba(124, 58, 237, 0.16);
 }
 
 .dark {
-  --paper: #0a141e; /* blueprint at night */
-  --paper-sunken: #060f18;
-  --panel: #0d1a28; /* lower than before (#101e2c): keeps panels distinct from
-                       paper while cutting the light a night-shift screen emits */
-  --rule: #22384c;
-  --rule-strong: #38566f;
-  --grid: #16283a;
-  --ink: #dce7f2;
-  --ink-muted: #8fa6bc;
-  --ink-faint: #7890a8; /* lifted from #61798f: the old value read 3.7:1 on the
-                           panel, below AA for the axis ticks / captions it carries */
+  --paper: #060b18; /* deep space */
+  --paper-sunken: #030711;
+  --panel: #0b1226;
+  --panel-glass: rgba(17, 26, 51, 0.55);
+  --rule: #1e2a4a;
+  --rule-strong: #33406a;
+  --grid: #162840;
+  --ink: #e6ecff;
+  --ink-muted: #9aa8cf;
+  --ink-faint: #8b95c3; /* Lifted from #6f7eab: the violet-lit substrate now
+                           shows through the glass brighter, so the faint tier
+                           was reading 3.8:1 on a lit panel — under AA. This
+                           clears ~5.1:1 while staying dimmer than --ink-muted. */
 
-  --primary: #6ba6dc;
-  --primary-hover: #8abae6;
-  --primary-soft: #12314e;
-  --on-primary: #04101b;
+  --primary: #818cf8;
+  --primary-hover: #a5b0ff;
+  --primary-soft: #1a2150;
+  --on-primary: #060b18;
 
-  --critical: #f87171;
-  --critical-soft: #2a1414;
+  --spec-cyan: #22d3ee;
+  --spec-violet: #a78bfa;
+  --spec-magenta: #f472b6;
+
+  --critical: #fb7185;
+  --critical-soft: #2a1220;
   --warning: #fbbf24;
-  --warning-soft: #2a2010;
+  --warning-soft: #2a2110;
   --confirmed: #34d399;
   --confirmed-soft: #0f2620;
   --suppressed: #94a3b8;
-  --suppressed-soft: #1a2430;
+  --suppressed-soft: #161d2e;
 
-  --focus: #7cb2ee;
+  --focus: #818cf8;
+
+  /* Night = where the orb field really comes alive: cyan / violet / magenta
+     pools drifting in opposite corners over a near-black substrate. The violet
+     pool is the brightest of the three and the substrate leans violet at the
+     top, so "violet" reads as the room's light rather than a lone accent. */
+  --orb-1: rgba(34, 211, 238, 0.55); /* cyan   */
+  --orb-2: rgba(139, 92, 246, 0.62); /* violet — lifted, the field's anchor */
+  --orb-3: rgba(219, 39, 119, 0.42); /* magenta */
+  --bg-base: radial-gradient(130% 120% at 18% -5%, #150f38 0%, #0b0a22 45%, #05060f 100%);
+
+  --grain-opacity: 0.05;
+  --vignette: rgba(2, 3, 12, 0.55); /* deeper on night so the frame has volume */
+
+  --glow: 0 0 0 1px rgba(167, 139, 250, 0.10), 0 10px 40px -14px rgba(34, 211, 238, 0.35);
+  --glow-ring: rgba(167, 139, 250, 0.45);
+
+  --spot: rgba(34, 211, 238, 0.18);
 }
 
 /* Expose the tokens to Tailwind utilities: bg-panel, text-ink, border-rule… */
@@ -151,6 +217,7 @@
   --color-paper: var(--paper);
   --color-paper-sunken: var(--paper-sunken);
   --color-panel: var(--panel);
+  --color-panel-glass: var(--panel-glass);
   --color-rule: var(--rule);
   --color-rule-strong: var(--rule-strong);
   --color-grid: var(--grid);
@@ -161,6 +228,9 @@
   --color-primary-hover: var(--primary-hover);
   --color-primary-soft: var(--primary-soft);
   --color-on-primary: var(--on-primary);
+  --color-spec-cyan: var(--spec-cyan);
+  --color-spec-violet: var(--spec-violet);
+  --color-spec-magenta: var(--spec-magenta);
   --color-critical: var(--critical);
   --color-critical-soft: var(--critical-soft);
   --color-warning: var(--warning);
@@ -199,25 +269,119 @@
     -webkit-font-smoothing: antialiased;
   }
 
-  /* Graph paper: the page itself is a drafting surface. Kept very faint. */
-  body::before {
-    content: "";
+  /* Background: a blurred-orb glow field (see components/ConsoleBackground).
+   *
+   *   .console-bg   — a full-bleed fixed layer, inert to the pointer, holding
+   *                   the diagonal base gradient (--bg-base).
+   *   .orb          — a soft pool of light drawn as a plain div with a RADIAL
+   *                   gradient (colour → transparent) and blur(64px), which
+   *                   melts the hard edge into a halo. Three of them, 18–20rem,
+   *                   in opposing corners, each drifting on a 6s float so the
+   *                   field breathes slowly. Low alpha keeps it from turning
+   *                   muddy and keeps text contrast intact.
+   *   .console-bg::after — a faint neon grid on top, radially masked so it is
+   *                   strongest near the top-left and fades out — structure,
+   *                   not wallpaper.
+   *
+   * Everything is theme-scoped through CSS variables, so light gets a soft
+   * daylight tint and dark gets an actual spectrum. Static structure, one slow
+   * loop; the only other motion in the UI stays the evidence rail's draw-in. */
+  .console-bg {
     position: fixed;
     inset: 0;
     z-index: -1;
+    overflow: hidden;
     pointer-events: none;
+    background: var(--bg-base);
+  }
+
+  .console-bg::after {
+    content: "";
+    position: absolute;
+    inset: 0;
     background-image:
       linear-gradient(var(--grid) 1px, transparent 1px),
       linear-gradient(90deg, var(--grid) 1px, transparent 1px);
-    background-size: 24px 24px;
-    opacity: 0.55;
+    background-size: 40px 40px;
+    opacity: 0.35;
+    -webkit-mask-image: radial-gradient(120% 100% at 12% 0%, #000 0%, rgba(0, 0, 0, 0.35) 55%, transparent 85%);
+    mask-image: radial-gradient(120% 100% at 12% 0%, #000 0%, rgba(0, 0, 0, 0.35) 55%, transparent 85%);
   }
 
-  /* At night the grid is pure decoration emitting light — the one thing a
-   * dark theme exists to reduce. Dim it, don't remove it: the drafting-page
-   * identity survives, the emitted light drops. */
-  html.dark body::before {
-    opacity: 0.3;
+  .orb {
+    position: absolute;
+    border-radius: 9999px;
+    filter: blur(64px);
+    will-change: transform;
+  }
+
+  .orb-1 {
+    top: -5rem;
+    left: -4rem;
+    width: 20rem;
+    height: 20rem;
+    background: radial-gradient(circle at center, var(--orb-1) 0%, transparent 70%);
+    animation: orb-float 6s ease-in-out infinite;
+  }
+
+  .orb-2 {
+    bottom: -6rem;
+    right: -5rem;
+    width: 22rem;
+    height: 22rem;
+    background: radial-gradient(circle at center, var(--orb-2) 0%, transparent 70%);
+    animation: orb-float 6s ease-in-out infinite;
+    animation-delay: -2s;
+  }
+
+  .orb-3 {
+    top: 34%;
+    right: 14%;
+    width: 18rem;
+    height: 18rem;
+    background: radial-gradient(circle at center, var(--orb-3) 0%, transparent 70%);
+    animation: orb-float 6s ease-in-out infinite;
+    animation-delay: -4s;
+  }
+
+  /* The fourth stratum: grain, then an edge vignette. Both are inert spans (see
+   * ConsoleBackground) — no pseudo-elements, because the grain's element opacity
+   * would otherwise crush anything nested inside it.
+   *
+   * Grain = a tiled SVG fractal-noise tile, inlined as a data URI so it costs no
+   * request and no binary asset. Its only job is to dither the big radials: a
+   * wide low-contrast gradient on a dark base bands in visible steps, and a few
+   * percent of noise breaks those steps up. `--grain-opacity` is per-theme and
+   * kept very low — noise you can consciously see is noise that is too strong.
+   * `mix-blend-mode: overlay` keeps it from greying the substrate (it perturbs
+   * luminance instead of painting grey on top). */
+  .grain {
+    position: absolute;
+    inset: 0;
+    opacity: var(--grain-opacity);
+    mix-blend-mode: overlay;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+    background-size: 140px 140px;
+  }
+
+  /* Vignette = the frame falling off into volume. A radial that is clear through
+   * the reading area and darkens only toward the far edges, so it adds depth
+   * without dimming content. Anchored slightly high (40%) to match where the eye
+   * actually reads, so the left rail and top bar keep full contrast. */
+  .vignette {
+    position: absolute;
+    inset: 0;
+    background: radial-gradient(120% 115% at 50% 40%, transparent 48%, var(--vignette) 100%);
+  }
+
+  @keyframes orb-float {
+    0%,
+    100% {
+      transform: translateY(0);
+    }
+    50% {
+      transform: translateY(-2rem);
+    }
   }
 
   :focus-visible {
@@ -243,10 +407,387 @@
   }
 }
 
+/* --------------------------------------------------------- smooth scroll *
+ * Lenis (see lib/smooth-scroll.tsx) toggles `.lenis` on <html> while active.
+ * These rules are Lenis's own (vendored from lenis/dist/lenis.css) rather than
+ * imported, so the global cascade stays in one file and one order. They only
+ * ever apply when the class is present — i.e. on a fine pointer without
+ * reduced-motion — so a device that opts out is untouched.
+ *
+ * The load-bearing one is `height: auto`: without it, `html, body { height }`
+ * from some resets pins the scroller and Lenis cannot move it. */
+html.lenis,
+html.lenis body {
+  height: auto;
+}
+
+.lenis:not(.lenis-autoToggle).lenis-stopped {
+  overflow: clip;
+}
+
+.lenis [data-lenis-prevent],
+.lenis [data-lenis-prevent-wheel],
+.lenis [data-lenis-prevent-touch],
+.lenis [data-lenis-prevent-vertical],
+.lenis [data-lenis-prevent-horizontal] {
+  overscroll-behavior: contain;
+}
+
+.lenis.lenis-smooth iframe {
+  pointer-events: none;
+}
+
 /* ------------------------------------------------------------ utilities */
 
 @utility tnum {
   font-variant-numeric: tabular-nums;
+}
+
+/* Glass face — the console panel. A translucent, blurred plate over the orb
+   field; theme-scoped through --panel-glass so light stays readable. */
+@utility glass {
+  background: var(--panel-glass);
+  -webkit-backdrop-filter: blur(14px) saturate(140%);
+  backdrop-filter: blur(14px) saturate(140%);
+}
+
+/* Halo behind a panel or a focused element. */
+@utility glow {
+  box-shadow: var(--glow);
+}
+
+/* The spectrum as text (used sparingly — the wordmark, one hero number). */
+@utility text-spectrum {
+  background-image: linear-gradient(100deg, var(--spec-cyan), var(--spec-violet) 55%, var(--spec-magenta));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+/* The spectrum as a surface (the primary button's fill). */
+@utility bg-spectrum {
+  background-image: linear-gradient(100deg, var(--spec-violet), var(--spec-magenta));
+}
+
+/* Loading placeholder: a faint plate with a spectrum sheen sweeping across. */
+@utility skeleton-shimmer {
+  background: var(--paper-sunken);
+  background-image: linear-gradient(
+    100deg,
+    transparent 20%,
+    color-mix(in srgb, var(--spec-violet) 22%, transparent) 48%,
+    transparent 76%
+  );
+  background-size: 220% 100%;
+  animation: skeleton-sweep 1.6s ease-in-out infinite;
+}
+
+@keyframes skeleton-sweep {
+  0% {
+    background-position: 160% 0;
+  }
+  100% {
+    background-position: -60% 0;
+  }
+}
+
+/* ------------------------------------------------------------- 流光 (light *
+ * A travelling band of light. Two usages:
+ *   .shine      — the band sweeps once on hover (any interactive surface).
+ *   .shine-loop — the band loops slowly, for the one primary CTA that should
+ *                 advertise itself without being touched.
+ * Both are pure decoration: the ::after carries no pointer events and sits
+ * above the surface, never over the text. The reduced-motion guard in the base
+ * layer collapses the animation, leaving a clean static surface. */
+.shine {
+  position: relative;
+  overflow: hidden;
+  isolation: isolate;
+}
+
+.shine::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -140%;
+  width: 55%;
+  transform: skewX(-20deg);
+  background: linear-gradient(
+    90deg,
+    transparent,
+    color-mix(in srgb, var(--spec-cyan) 45%, #ffffff) 50%,
+    transparent
+  );
+  opacity: 0.42;
+  pointer-events: none;
+}
+
+.shine:hover::after {
+  animation: shine-sweep 720ms ease;
+}
+
+.shine-loop::after {
+  animation: shine-sweep 3.4s ease-in-out infinite;
+}
+
+@keyframes shine-sweep {
+  from {
+    left: -140%;
+  }
+  to {
+    left: 170%;
+  }
+}
+
+/* A light that runs continuously along a hairline — used on the top-bar edge
+ * and as an "active" underline, so a live element reads as energised. */
+.flow-line {
+  position: relative;
+  overflow: hidden;
+}
+
+.flow-line::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    var(--spec-cyan),
+    var(--spec-magenta),
+    transparent
+  );
+  background-size: 40% 100%;
+  background-repeat: no-repeat;
+  animation: flow-run 2.6s linear infinite;
+}
+
+@keyframes flow-run {
+  from {
+    background-position: -40% 0;
+  }
+  to {
+    background-position: 140% 0;
+  }
+}
+
+/* A light that travels AROUND a border. Applied to the one hero element per
+ * view (the primary CTA, the framed logo, an active control) so the eye is
+ * drawn to the live thing. Uses a conic gradient masked to the 1px frame. */
+@property --flow-angle {
+  syntax: "<angle>";
+  initial-value: 0deg;
+  inherits: false;
+}
+
+.flow-border {
+  position: relative;
+}
+
+.flow-border::before {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit;
+  padding: 1px;
+  background: conic-gradient(
+    from var(--flow-angle),
+    transparent 0deg,
+    var(--spec-cyan) 40deg,
+    var(--spec-violet) 80deg,
+    transparent 140deg,
+    transparent 360deg
+  );
+  -webkit-mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  animation: flow-rotate 4.5s linear infinite;
+  pointer-events: none;
+}
+
+@keyframes flow-rotate {
+  to {
+    --flow-angle: 360deg;
+  }
+}
+
+/* A radial spotlight that tracks the pointer across a surface. The position is
+ * fed by --spot-x / --spot-y (set in JS by components/PointerGlow); the layer
+ * itself carries no state, so a surface with no pointer (touch, or a JS-less
+ * first paint) simply shows nothing and loses no information. */
+.spotlight::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(
+    var(--spot-size, 240px) circle at var(--spot-x, 50%) var(--spot-y, 0%),
+    var(--spot),
+    transparent 70%
+  );
+  opacity: 0;
+  transition: opacity var(--dur-2) var(--ease-out-expo);
+  pointer-events: none;
+  z-index: 0;
+}
+
+.spotlight[data-lit="true"]::before {
+  opacity: 1;
+}
+
+/* A panel that leans toward the pointer: its hairline border warms to the
+ * spectrum on hover. The border stays a real 1px border (so layout never
+ * shifts); hover only changes its colour and adds the halo. */
+.lift {
+  transition:
+    border-color var(--dur-2) var(--ease-out-expo),
+    box-shadow var(--dur-2) var(--ease-out-expo),
+    transform var(--dur-2) var(--ease-out-expo);
+}
+
+.lift:hover {
+  border-color: color-mix(in srgb, var(--spec-violet) 55%, var(--rule));
+  box-shadow: var(--glow), 0 18px 50px -24px var(--glow-ring);
+}
+
+/* ------------------------------------------------- section ornament (分区) *
+ *
+ * A data panel reads better when its header is a distinct stratum from its
+ * body. Rather than boxing every panel identically, each panel header gets:
+ *   - a short spectrum rake at its left edge (a "column marker"),
+ *   - a hairline that fades to the right, so the header separates from the
+ *     body without a full-width rule fighting the top accent.
+ * The rake is the same spectrum language as the nav rail and the logo frame,
+ * so a panel header, a nav item and the wordmark all read as one system. */
+@utility panel-rake {
+  position: relative;
+}
+
+.panel-rake::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 50%;
+  height: 1.1em;
+  width: 3px;
+  transform: translateY(-50%);
+  border-radius: 9999px;
+  background-image: linear-gradient(180deg, var(--spec-cyan), var(--spec-violet) 60%, var(--spec-magenta));
+}
+
+/* An instrument label: mono, tabular, small — the metric's name above its
+ * value. Not ALL-CAPS and not letter-spaced (both are template tells); the mono
+ * face alone marks it as a field name rather than prose. */
+@utility eyebrow {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0;
+  color: var(--ink-muted);
+}
+
+/* A segment divider used INSIDE a panel body to part sub-sections. A hairline
+ * with a spectrum seed at the left — structure you can read, not a rule you
+ * scroll past. */
+@utility seg-rule {
+  height: 1px;
+  background: linear-gradient(
+    90deg,
+    var(--spec-violet) 0,
+    color-mix(in srgb, var(--rule) 70%, transparent) 18%,
+    transparent 100%
+  );
+}
+
+/* ---------------------------------------------------------- entrance (入场) *
+ *
+ * A staggered arrival for a view's top-level sections: each rises a few pixels
+ * and fades in, in document order. This is ONE orchestrated moment per view,
+ * not a per-card hover bounce — the reveal answers "the data arrived", then the
+ * console goes still. `--i` is the section's index, set inline.
+ *
+ * Six sections is the cap: past that the tail feel laggy and it stops reading
+ * as one motion. Anything past the cap falls back to the last delay. */
+.reveal {
+  animation: reveal-rise var(--dur-3) var(--ease-out-expo) both;
+  animation-delay: calc(min(var(--i, 0), 6) * 70ms);
+}
+
+@keyframes reveal-rise {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* A staggered arrival for a page's top-level sections. Put `.stagger` on the
+ * page's root element and each direct child rises and fades in, in document
+ * order — one orchestrated moment per view, not a per-card bounce. Pure CSS
+ * (nth-child delays), so it is never a hydration-diff source, and reduced-motion
+ * collapses it. Finer-grained control is available by setting --i on a child. */
+.stagger > * {
+  animation: reveal-rise var(--dur-3) var(--ease-out-expo) both;
+}
+
+/* Stagger by document order. Clamped at 6 so a long page's tail does not lag. */
+.stagger > *:nth-child(1) { animation-delay: 0ms; }
+.stagger > *:nth-child(2) { animation-delay: 70ms; }
+.stagger > *:nth-child(3) { animation-delay: 140ms; }
+.stagger > *:nth-child(4) { animation-delay: 210ms; }
+.stagger > *:nth-child(5) { animation-delay: 280ms; }
+.stagger > *:nth-child(6) { animation-delay: 350ms; }
+.stagger > *:nth-child(n + 7) { animation-delay: 420ms; }
+
+/* A data row that has just changed state flashes its left rail once — the
+ * "something happened here" cue. One-shot, never loops. */
+.flash-in {
+  animation: flash-rail 900ms var(--ease-out-expo);
+}
+
+@keyframes flash-rail {
+  0% {
+    box-shadow: inset 3px 0 0 0 var(--spec-cyan), inset 0 0 24px -6px var(--glow-ring);
+    background-color: color-mix(in srgb, var(--spec-cyan) 12%, transparent);
+  }
+  100% {
+    box-shadow: inset 3px 0 0 0 transparent, inset 0 0 0 0 transparent;
+    background-color: transparent;
+  }
+}
+
+/* A side drawer arriving: scrim fades, panel slides in from the edge. Answers
+ * the click that opened it, so it is welcome motion rather than ambient. */
+.drawer-scrim {
+  animation: scrim-in var(--dur-2) var(--ease-out-expo) both;
+}
+
+.drawer-panel {
+  animation: drawer-in var(--dur-3) var(--ease-out-expo) both;
+}
+
+@keyframes scrim-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes drawer-in {
+  from {
+    transform: translateX(24px);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
 }
 
 /* A datum read-out: monospace, tabular, right-aligned — instrument style. */
@@ -275,6 +816,14 @@
 @utility row-tick {
   border-left: 2px solid transparent;
   border-left-color: color-mix(in srgb, var(--rule-strong) 55%, transparent);
+}
+
+/* A selectable row, when active or hovered, lights its left rail with the
+   spectrum rather than a flat colour — the same "energised edge" language the
+   nav and logo use, so every live element shares one signature. */
+@utility row-tick-active {
+  border-left-color: var(--spec-cyan);
+  box-shadow: inset 0 0 24px -10px var(--glow-ring);
 }
 
 /* The disclosure chevron: always drawn, slides a hair on hover. Reduced-motion

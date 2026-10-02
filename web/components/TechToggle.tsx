@@ -30,10 +30,10 @@ export function TechToggle() {
           : "技术字段：已隐藏。点击显示原始字段名、英文枚举与 snake_case 标识"
       }
       className={clsx(
-        "inline-flex h-8 items-center gap-1.5 border px-2.5 text-xs transition-colors",
+        "shine inline-flex h-8 items-center gap-1.5 rounded-full border px-2.5 text-xs transition-colors",
         showTech
-          ? "border-primary bg-primary-soft font-medium text-primary"
-          : "border-rule-strong bg-panel text-ink-muted hover:bg-paper-sunken hover:text-ink",
+          ? "border-spec-violet/70 bg-primary-soft font-medium text-primary shadow-[0_0_16px_-6px_var(--glow-ring)]"
+          : "border-rule-strong bg-panel/50 text-ink-muted hover:border-spec-violet/60 hover:text-ink",
       )}
     >
       {/* A bracket pair reads as "raw / bracketed datum" — the same visual

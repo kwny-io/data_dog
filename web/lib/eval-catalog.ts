@@ -88,25 +88,21 @@ export const EVAL_CASES: EvalCaseSummary[] = [
 export const EVAL_SOURCES = [
   {
     name: "Agent 行为评估",
-    path: "evals/cases.py · evals/run_evals.py",
     how: "python -m evals.run_evals",
     note: "上表用例的行为化打分：裁决、证据召回、无证据推断、对抗鲁棒性。",
   },
   {
     name: "合成数据评估",
-    path: "src/data_dog/synth/",
     how: "python -m data_dog.synth.synth_eval",
     note: "基于 Go2 物理参数的故障注入 + ground truth，对比真值算准确率。",
   },
   {
     name: "MuJoCo 物理仿真评估",
-    path: "src/data_dog/mujoco_sim/",
     how: "python -m data_dog.mujoco_sim.mujoco_eval",
     note: "同一批故障的三层注入，真实物理仿真产出并对照 ground truth。",
   },
   {
     name: "整链回放 E2E",
-    path: "src/data_dog/e2e/",
     how: "python -m data_dog.e2e.replay_demo",
     note: "P1→P2→Agent→P3 一条命令贯通，回放用例逐条比对。",
   },
