@@ -13,17 +13,17 @@
 | | 亮点 | 证据 |
 |---|---|---|
 | 🔗 | **全链闭环，一条命令跑通** | 厂商文档 →[P1]→ 算子 →[P2]→ 候选 →[Agent]→ 报告 →[P3]→ 策略门 → SaaS 反馈，`python -m data_dog.e2e.replay_demo` |
-| 🧪 | **631 个测试全绿，全离线确定性** | `pytest -q` → `626 passed, 5 skipped`（50 个测试文件，fake provider，无需 API Key、不联网） |
+| 🧪 | **631 项测试，全离线确定性** | `pytest -q` → `626 passed, 5 skipped`（48 个测试文件，fake provider，无需 API Key、不联网；5 skipped 为未设 `DD_TEST_PG_URL` 的 PostgreSQL 集成用例 ×4 + 缺 `fakeredis` 的 Redis 用例 ×1） |
 | 🔒 | **热路径确定性：上报不交给模型判断** | 上不上报由**确定性策略门**（四条件决策表 + 冲突消解）决定，同输入永远同结论；模型只出现在"调查报告"那一步 |
 | 🧱 | **不拿 `eval` 执行厂商字符串** | 自建**受限 DSL**：词法 → AST 解释器，无动态执行原语、函数闭集白名单、编译期类型检查 |
 | 🔍 | **诚实抽取，区分"能证实 / 待确认"** | 官方 SDK 头文件明写电机 **90°C 触发保护** → `verified`；无出处的 75°C → `unconfirmed`，**不冒充厂商事实** |
 | 🚪 | **fail-closed 贯穿全链** | 身份只在网关注入（正文自称一律丢弃）、兼容绑定拿不准就拒、错误语义收敛为有限错误码，**绝不降级为无鉴权** |
 | 🔁 | **幂等上报** | `(幂等键, revision)` 复合主键，网络重试 / 进程重启都不会产生重复告警 |
 | 🛡 | **安全设计落地** | SSRF 前置校验（仅 http/https、拒绝 localhost/环回/私有/保留，校验**全部解析 IP**；IP 未 pin 到连接，接线时需在连接层再校验）、`hmac.compare_digest` 常量时间比较、容器非 root、密钥不进镜像 |
-| 📊 | **带 ground truth 的量化评估** | 合成 + MuJoCo 双数据源各 **6/6**；7 个评估 case 含 **2 个对抗性**（提示注入 / 身份伪装） |
+| 📊 | **带 ground truth 的规模化评估** | **忠实 MuJoCo 数据集 10 万条**，分层抽 n=2000 跑真实 Agent：**准确率 0.844**（Wilson 95% CI 0.827–0.859）、**normal 误报率 0.064**、逐类召回含 **F4 偏置仅 0.45** 一并如实报；另有 7 个评估 case（含 2 个对抗性：提示注入 / 身份伪装） |
 | 🚚 | **能交付：服务 + 容器 + HTTPS** | FastAPI（liveness / readiness 分离）+ Dockerfile + compose（含 Caddy 自动申请 HTTPS）+ Makefile |
 
-**规模**：源码 118 个 Python 文件 / 20664 行，测试 50 个文件 / 9299 行；前端 `web/` 为 Next.js 15 控制台（52 个 TS/TSX 文件）；5 份正式事件 JSON Schema；23 个 `make` 命令。
+**规模**：源码 123 个 Python 文件 / 21657 行，测试 48 个文件 / 9243 行；前端 `web/` 为 Next.js 15 控制台（63 个 TS/TSX 文件）；5 份正式事件 JSON Schema；21 个 `make` 命令。
 
 ---
 
@@ -140,6 +140,23 @@ pytest tests/ -q
 > （堵转 / 热退化 / 通信丢包 / 电流偏置 / 负载骤增），每条样本带 **ground truth**。Agent 调查后与真值
 > 对比算准确率：`python -m data_dog.mujoco_sim.mujoco_eval`（当前 n=6，accuracy 1.0）。
 >
+> **在其之上还有一层「忠实仿真数据集」（已生成 10 万条正式集）**：自写 trot 步态控制器让狗
+> **自由基座真走路**，叠加真实噪声模型与 5 类故障，批量生成带 ground truth 的 trial，
+> 喂给**同一个** Agent 做规模化评估。
+> - **规模**：`data/mj_60s_100k` —— **100,000 条**（60s/条，100 Hz，35,198s≈9.8h，8 worker），
+>   400 分片，**100% free_trot**（自由基座真走路，非吊挂/微摆），**0 翻倒**，53 MB（仅物化标量汇总）。
+> - **评估实测**（分层抽 **n=2000**，确定性 provider，跑真实 Agent 调查）：
+>   **准确率 0.844**（Wilson 95% CI 0.827–0.859）；逐类召回
+>   F1 堵转 **1.00** / F5 负载 **0.98** / F2 温升 **0.79** / F3 丢包 **0.75** / F4 偏置 **0.45**；
+>   **normal 误报率 0.064**。5 个抽样点（40k/80k/100k/n2000/2k）落在 **83–85%**，收敛。
+> - **命令**：生成 `python -m data_dog.mujoco_sim.gen_dataset`；评估 `python -m data_dog.synth.dataset_eval`。
+> - **诚实边界**（不夸大）：① 仿真 ≠ 真机，**真实误报率仍需真机数据回灌**才能定论；
+>   ② **F4 召回低（0.45）非 bug，是评估器的窗口口径缺陷**——检测器按「全窗电流均值 − 前半段参照均值 > 1.5A」
+>   判偏置，而 F4 注入窗 `[40%, 90%]` **与前半段参照窗(0–50%)重叠**、偏置漏进参照被稀释，叠加 trot 电流
+>   自然的前高后低漂移，实测该差值仅 **~1.1A**（卡在 1.5A 阈值之下）→ 漏判；**与信号强弱无关**（正常 trial 电流峰值同样达 ~94A）；
+>   ③ 评估器判据（热阈值、电流参照窗口径）原按合成数据标定/设定，忠实档需**重新标定**，**绝不改仿真迁就分数**。
+>   保真度档次、假设值清单见 [docs/mujoco_dataset.md](docs/mujoco_dataset.md)。
+>
 > **数据源二：纯 NumPy 合成遥测（`data_dog/synth/`，无 MuJoCo 依赖的降级方案）**。基于 Go2 公开
 > 物理参数用 NumPy 生成物理自洽的时间序列，同样带 5 类故障注入 + ground truth
 > （`python -m data_dog.synth.synth_eval`）。
@@ -169,13 +186,13 @@ ReAct 轨迹 = Agent 一步步的行动脚印（调了哪个工具、传了什�
 src/data_dog/
   providers/    多供应商接入（DeepSeek/OpenAI/智谱）
   evidence/     证据库 + 在线检测算子
-  tools/        受控调查工具（4 个只读）
+  tools/        受控调查工具（5 个只读：遥测/厂商知识/邻居事件/近期变更/因果链）
   agent/        AgentLoop（调查主循环）
   schemas/      CandidateEvent / InvestigationReport
   correlation/  多事件关联
   reporter/     提出上报意图（A3，本地 outbox + 幂等 + Receipt）
-  synth/        合成遥测生成器（Go2 物理参数 + 故障注入 + ground truth）+ 评估
-  mujoco_sim/   MuJoCo 仿真数据源（simulate 跑 Go2 + to_sample 转样本 + mujoco_eval 评估）
+  synth/        合成遥测生成器（Go2 物理参数 + 故障注入 + ground truth）+ 评估（synth_eval 小集 / dataset_eval 数据集规模评估）
+  mujoco_sim/   MuJoCo 仿真数据源（conditions 条件网格 + gait trot 步态 + simulate 跑 Go2 + noise 噪声层 + gen_dataset 分片并行生成 + to_sample 转样本 + mujoco_eval 评估）
   operator_factory/  离线算子工厂（文档 revision + 诚实知识抽取 + 受限 DSL + Fixture 回放）
   data_plane/   在线数据面（网关/兼容绑定/解析链/候选构建 + SSRF 安全引用）
   alerting/     上报闭环（确定性策略门 + Alert 生命周期 + 幂等 Outbox + 测试 SaaS）
@@ -250,7 +267,7 @@ pytest tests/test_operator_factory.py tests/test_operator_verification.py -q   #
 ```bash
 python -m data_dog.data_plane.p2_demo          # 人读输出
 python -m data_dog.data_plane.p2_demo --json   # 机器可读
-pytest tests/test_data_plane.py -q             # 18 项
+pytest tests/test_data_plane.py -q             # 20 项
 ```
 
 **原始日志 → 网关(注入身份/校验/限流) → 兼容绑定(失败关闭) → Parser→Normalizer→Enricher→Window→Detector → 候选异常**。
@@ -294,7 +311,7 @@ pytest tests/test_e2e.py -q                 # 5 项
 ## 持久化（SQLAlchemy：本地 SQLite ↔ 生产 PostgreSQL）
 
 ```bash
-pytest tests/test_storage.py -q     # 10 项
+pytest tests/test_storage.py -q     # 14 项
 ```
 
 核心对象（遥测事件 / 候选 / 调查报告 / Alert / Outbox / 反馈）**落库，重启不丢**。

@@ -37,7 +37,7 @@ def _default_server_path() -> Path:
 
 
 def _server_path() -> Path:
-    """允许用 DD_CTX_MCP_SERVER 覆盖 server 路径（如桌面学习副本）。"""
+    """允许用 DD_CTX_MCP_SERVER 覆盖 server 路径（如本地备用副本）。"""
     override = settings.ctx_mcp_server()
     if override:
         return Path(override)

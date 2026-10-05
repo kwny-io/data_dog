@@ -63,3 +63,6 @@ htmlcov/
 
 # P4-8 基准运行报告（每次跑的临时产物；结论沉淀进 benchmarks/baseline.md）
 benchmarks/last_run.txt
+
+# 本地生成的数据集（MuJoCo 仿真等）——体积大、可由 seed 重放，不入库
+/data/
