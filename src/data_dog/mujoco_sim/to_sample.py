@@ -26,8 +26,12 @@ if TYPE_CHECKING:                          # 仅供类型检查；运行期在�
 # 是让"健康=正常电流、故障=异常"能被 Agent 判出的诚实关节。这里把 front thigh 映射到
 # Agent 认识的 joint_motor.front_left_knee / front_right_knee。
 _MUJOCO_TO_COMPONENT: dict[str, str] = {
+    # front thigh 有真实负载但不过饱和（见上），映射到 Agent 认识的 knee 部件
     "FL_thigh": "joint_motor.front_left_knee",
     "FR_thigh": "joint_motor.front_right_knee",
+    # hip 偏摆：补上以便 hip 类故障可注入（覆盖 Agent 白名单的 4 个电机部件）
+    "FL_hip": "joint_motor.front_left_hip",
+    "FR_hip": "joint_motor.front_right_hip",
 }
 
 
@@ -36,14 +40,28 @@ def to_synth_sample(
     sample_id: str = "mj_go2",
     active_fault: str | None = None,
     fault_component: str = "joint_motor.front_left_hip",
+    severity: float = 1.0,
+    noise: bool = False,
+    rng=None,
 ) -> SynthSample:
     """从 SimResult 抽取出 Agent 认识的 4 个部件，构造一个 SynthSample。
 
     可选注入故障（配合 fault_component 制造异常遥测）：
       - F1_stall / F5_load_spike / F4_current_bias / F2_temp_rise / F3_packet_loss
     与 synth.generator 的故障语义保持一致，便于复用现有的 ground truth 期望表。
+
+    severity  故障幅度乘子（0..1）。刻意允许 <1 → 制造"低于检测阈值"的负例。
+    noise     是否在真值上叠加 `noise.NoiseConfig`（默认全开）后再注入故障。
+    rng       numpy Generator；noise=True 时用于噪声与丢包，保证可复现。
     """
     from data_dog.synth.generator import FAULT_DEFS, SynthSample
+
+    # 可选：先叠噪声（真值 → 观测），再在观测上注入故障（贴近现场：故障发生在带噪声的量上）
+    if noise:
+        from .noise import NoiseConfig, apply_noise
+        if rng is None:
+            rng = np.random.default_rng(0)
+        sim, _ = apply_noise(sim, NoiseConfig(enable=True), rng)
 
     components = list(_MUJOCO_TO_COMPONENT.values())  # 顺序固定
     # 找出这些部件在 sim.joints 里的列下标
@@ -53,6 +71,10 @@ def to_synth_sample(
     current = sim.current[:, col].copy()
     temperature = sim.temperature[:, col].copy()
     valid = np.ones_like(temperature, dtype=float)
+    # 噪声层的丢包掩码（若有）合并进来
+    vmask = getattr(sim, "valid", None)
+    if vmask is not None and getattr(vmask, "size", 0):
+        valid = vmask[:, col].astype(float)
 
     n_steps = torque.shape[0]
     dt = sim.ts[1] - sim.ts[0] if sim.ts.shape[0] > 1 else 0.01
@@ -77,35 +99,35 @@ def to_synth_sample(
         model = Go2MotorModel(DEFAULT_PARAMS)
 
         if active_fault == "F1_stall":
-            torque[sl, j] = DEFAULT_PARAMS["stall_torque"]
-            current[sl, j] = min(DEFAULT_PARAMS["stall_torque"] / DEFAULT_PARAMS["kt"] + 2.0,
-                                 torque[sl, j].max())
+            torque[sl, j] = DEFAULT_PARAMS["stall_torque"] * severity
+            current[sl, j] = min(DEFAULT_PARAMS["stall_torque"] * severity / DEFAULT_PARAMS["kt"] + 2.0,
+                                 DEFAULT_PARAMS["stall_torque"] / DEFAULT_PARAMS["kt"] + 2.0)
             for t in range(start_t, end_t):
                 temperature[t, j] = model.step_temp(temperature[t - 1, j], current[t, j], dt)
         elif active_fault == "F5_load_spike":
-            torque[sl, j] += DEFAULT_PARAMS["stall_torque"] * 0.6
+            torque[sl, j] += DEFAULT_PARAMS["stall_torque"] * 0.6 * severity
             current[sl, j] = np.abs(torque[sl, j]) / DEFAULT_PARAMS["kt"] + 0.3
             for t in range(start_t, end_t):
                 temperature[t, j] = model.step_temp(temperature[t - 1, j], current[t, j], dt)
         elif active_fault == "F4_current_bias":
             # 电流传感器零漂：故障窗内电流相对参照明显抬升（其余时段保持基线，
             # 让"参照=前半段"不被污染，Agent 能看出"窗口内电流抬升"）
-            current[sl, j] += 5.0
+            current[sl, j] += 5.0 * severity
             for t in range(start_t, end_t):
                 temperature[t, j] = model.step_temp(temperature[t - 1, j], current[t, j], dt)
         elif active_fault == "F2_temp_rise":
             # 热退化/散热失效 + 持续大负载：故障窗内抬升电流并加大产热
-            torque[sl, j] += DEFAULT_PARAMS["stall_torque"] * 0.25
+            torque[sl, j] += DEFAULT_PARAMS["stall_torque"] * 0.25 * severity
             for t in range(start_t, end_t):
                 c = np.abs(torque[t, j]) / DEFAULT_PARAMS["kt"] + 0.3
                 current[t, j] = c
                 # 散热恶化（Rth 变大）+ 大电流产热 → 温度在一个较长窗口里显著爬升
                 temperature[t, j] = temperature[t - 1, j] + \
                     (c * c * DEFAULT_PARAMS["R"] - (temperature[t - 1, j] - DEFAULT_PARAMS["T_amb"])
-                     / (DEFAULT_PARAMS["Rth"] * 1.6)) * dt / DEFAULT_PARAMS["Cth"]
+                     / (DEFAULT_PARAMS["Rth"] * (1.0 + 0.6 * severity))) * dt / DEFAULT_PARAMS["Cth"]
         elif active_fault == "F3_packet_loss":
-            rng = np.random.default_rng(0)
-            drop: np.ndarray = np.asarray(rng.random(n_steps) < 0.15)
+            rr = rng if rng is not None else np.random.default_rng(0)
+            drop: np.ndarray = np.asarray(rr.random(n_steps) < 0.15 * severity)
             drop[:start_t] = False
             drop[end_t:] = False
             valid[drop, j] = 0.0

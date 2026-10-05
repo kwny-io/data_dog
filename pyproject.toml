@@ -78,6 +78,10 @@ sandbox = [
     "wasmtime>=20.0",
     "pyseccomp>=0.1.2",
 ]
+# MuJoCo 忠实仿真数据源（生成/评估百万级试验数据集；核心包不依赖它）
+sim = [
+    "mujoco>=3.1",
+]
 
 [project.scripts]
 data-dog = "data_dog.cli:app"

@@ -107,32 +107,10 @@ def run_mujoco_eval(provider: ChatProvider | Callable[[], ChatProvider] | None =
                     duration_s: float = 2.0, dt: float = 0.01,
                     seed: int = 0) -> list[dict]:
     samples, labels = build_mujoco_samples(duration_s, dt, seed)
-
-    results = []
-    for sample, label in zip(samples, labels, strict=False):
-        cand = _make_candidate(sample, label)
-        source = SyntheticEvidenceSource([sample])
-        tools = InvestigationTools(source)
-        prov = (
-            MujocoDeterministicProvider()
-            if provider is None
-            else (provider() if callable(provider) else provider)
-        )
-        agent = AgentLoop(prov, tools, model=model)
-        report = agent.investigate(cand)
-        d = report.disposition
-        hit = expected_vs_actual(d, label)
-        results.append({
-            "sample": label["id"],
-            "fault": label["fault"],
-            "component": cand.component_ref,
-            "ground_truth": label["expected"],
-            "agent_disposition": d,
-            "confidence": round(float(report.confidence), 2),
-            "summary": report.summary[:90],
-            "hit": hit,
-        })
-    return results
+    # 复用 synth_eval.eval_one 的内循环（口径单一来源）
+    from data_dog.synth.synth_eval import eval_one
+    return [eval_one(sample, label, provider or MujocoDeterministicProvider, model)
+            for sample, label in zip(samples, labels, strict=False)]
 
 
 def main():

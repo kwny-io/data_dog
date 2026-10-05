@@ -171,8 +171,12 @@ class DeterministicSynthProvider:
         ref_t = float(ref.get("temperature_c", peak) or peak)
         # 丢包率：直接用生成器算好的 packet_loss_rate
         loss = float(tel.get("packet_loss_rate", 0.0) or 0.0)
-        # 温度相对环境(25°C)的抬升 —— 合成物理模型真正区分的信号
-        rise = peak - 25.0
+        # 温度相对**环境温度**的抬升 —— 合成物理模型真正区分的信号。
+        # 环境温度取 self.ambient（数据集里随工况变化，15~45°C）；未设则默认 25°C
+        # （synth 老口径恒为 25，行为不变）。硬编码 25 会在高环温下把"环境本就热"
+        # 误判成"故障热"——这是忠实多样环温数据暴露出的真实缺陷。
+        amb = getattr(self, "ambient", 25.0)
+        rise = peak - amb
         # 温度趋势：当前窗口 vs 参照窗口
         trend = peak - ref_t
 
@@ -206,6 +210,36 @@ class DeterministicSynthProvider:
                 "hypotheses": [], "missing_evidence": []}
 
 
+def eval_one(sample, label, provider, model=None, cand=None) -> dict:
+    """对单条样本做一次 Agent 调查，返回结果 + 是否命中 ground truth。
+
+    这是 `run_synth_eval` / `run_mujoco_eval` / 数据集评估共用的**内循环**——
+    抽出来避免口径漂移（改一处、三处一致）。语义与原来的内联循环完全一致。
+    """
+    cand = cand or _make_candidate(sample, label)
+    # 每个候选用"只含自己这份样本"的数据源，避免多样本同部件覆盖
+    source = SyntheticEvidenceSource([sample])
+    tools = InvestigationTools(source)
+    prov = (
+        DeterministicSynthProvider()
+        if provider is None
+        else (provider() if callable(provider) else provider)
+    )
+    agent = AgentLoop(prov, tools, model=model)
+    report = agent.investigate(cand)
+    d = report.disposition
+    return {
+        "sample": label["id"],
+        "fault": label["fault"],
+        "component": cand.component_ref,
+        "ground_truth": label["expected"],
+        "agent_disposition": d,
+        "confidence": round(float(report.confidence), 2),
+        "summary": report.summary[:90],
+        "hit": expected_vs_actual(d, label),
+    }
+
+
 def run_synth_eval(provider: ChatProvider | Callable[[], ChatProvider] | None = None,
                    model=None, n_joints: int = 2,
                    n_seconds: float = 120.0, seed: int = 0) -> list[dict]:
@@ -216,35 +250,8 @@ def run_synth_eval(provider: ChatProvider | Callable[[], ChatProvider] | None = 
     若传入 provider（如真实 LLM），则用它调查。
     """
     samples, labels = build_samples(n_joints, n_seconds, seed)
-
-    results = []
-    for sample, label in zip(samples, labels, strict=False):
-        cand = _make_candidate(sample, label)
-        # 每个候选用"只含自己这份样本"的数据源，避免多样本同部件覆盖
-        source = SyntheticEvidenceSource([sample])
-        tools = InvestigationTools(source)
-        # provider 是"工厂"(callable/None→用确定性 provider，每个候选全新，
-        # 保证第一步总是查证据)；若是真实 LLM 实例则复用。
-        prov = (
-            DeterministicSynthProvider()
-            if provider is None
-            else (provider() if callable(provider) else provider)
-        )
-        agent = AgentLoop(prov, tools, model=model)
-        report = agent.investigate(cand)
-        d = report.disposition
-        hit = expected_vs_actual(d, label)
-        results.append({
-            "sample": label["id"],
-            "fault": label["fault"],
-            "component": cand.component_ref,
-            "ground_truth": label["expected"],
-            "agent_disposition": d,
-            "confidence": round(float(report.confidence), 2),
-            "summary": report.summary[:90],
-            "hit": hit,
-        })
-    return results
+    return [eval_one(sample, label, provider, model)
+            for sample, label in zip(samples, labels, strict=False)]
 
 
 def summarize_synth(results: list[dict]) -> dict:
@@ -256,6 +263,10 @@ def summarize_synth(results: list[dict]) -> dict:
 
 def main():
     import argparse
+    try:                       # Windows 控制台默认 GBK，装不下 ✓ / ⚠ 等字符
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
     parser = argparse.ArgumentParser(description="data_dog 合成数据 ground truth 评估")
     parser.add_argument("--mode", choices=["offshelf", "real"], default="offshelf",
                         help="offshelf=离线假 provider(默认)；real=真实LLM(需 key)")
