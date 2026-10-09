@@ -318,17 +318,18 @@ def test_payload_ref_obfuscated_internal_hosts_denied(detector_config):
     assert dp.stats.rejected_by_reason.get("payload_ref_denied") == len(refs)
 
 
-def test_payload_ref_malformed_port_raises_current_behavior(detector_config):
-    """记录当前真实行为（**缺陷，未修**）：畸形端口让管线抛异常而非返回 denied。
+def test_payload_ref_malformed_port_is_denied(detector_config):
+    """畸形端口的 payload_ref → 管线**干净拒绝**（不抛异常、不出 500）。
 
-    `fetch.validate_url` 对 `http://host:abc/` 抛 ValueError（`p.port` 取值在 `urlparse`
-    的 try 之外），而 `_payload` 直接调用且不捕获 → 一条攻击者可控的 payload_ref 能让
-    `process_one` 抛异常（服务边界上表现为 500），而不是干净的"拒绝"。方向应是失败关闭：
-    校验函数必须把畸形端口变成 `FetchDecision(allowed=False)`。详见
-    `tests/test_ssrf_adversarial.py` 里的
-    `test_malformed_port_raises_instead_of_denying_current_behavior`。
+    `_payload` 只按 `allowed` 决策，故校验函数必须把 `http://host:abc/` 这类输入转成
+    `FetchDecision(allowed=False)`；否则一条攻击者可控的 payload_ref 会让 `process_one`
+    抛 ValueError（服务边界上表现为 500）。详见
+    `tests/test_ssrf_adversarial.py::test_malformed_port_is_denied_not_raised`。
     """
     dp = DataPlane(build_demo_resolver(detector_config))
     raw = _raw("e-badport", payload_ref="http://evil.example:abc/x", payload_inline="")
-    with pytest.raises(ValueError):
-        dp.process_one(raw, AUTH)
+    norm, e = dp.process_one(raw, AUTH)          # 不抛异常
+    assert norm is None, "被拒的载荷不得产出规范化事件"
+    assert e is not None and e.get("reason") == "payload_ref_denied"
+    assert dp.stats.rejected_by_reason.get("payload_ref_denied") == 1
+    print("PASS test_payload_ref_malformed_port_is_denied")

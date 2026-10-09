@@ -85,8 +85,9 @@ def test_ipv6_mapped_ipv4_rejected():
     d = validate_url("https://evil.example/x", resolver=_Resolver(["::ffff:127.0.0.1"]))
     assert not d.allowed and "非公网" in d.reason
 
-    # 记录当前行为（fail-closed 方向的过度拦截，不是漏洞）：::ffff:0:0/96 在 Python 里
-    # 命中 is_reserved，于是**公网** IPv4 的映射形式（如 ::ffff:8.8.8.8）也被拒。
+    # 记录当前行为（fail-closed 方向的**过度拦截**，不是漏洞）：`::ffff:0:0/96` 整段在
+    # CPython 里 `is_reserved` 为 True，于是**公网** IPv4 的映射形式（::ffff:8.8.8.8）也被拒。
+    # 方向是安全的（拒绝 > 放行），且现实中没人用映射字面量当公网目标，故不为此加例外分支。
     assert not validate_url("http://[::ffff:8.8.8.8]/").allowed
     print("PASS test_ipv6_mapped_ipv4_rejected")
 
@@ -229,21 +230,21 @@ def test_redirect_and_path_confusion_are_not_inspected():
 
 # ------------------------------------------------------- 超长 URL
 
-def test_overlong_url_has_no_length_cap():
-    """记录当前真实行为（**加固缺口**）：实现里没有任何 URL 长度上限。
+def test_overlong_url_is_rejected():
+    """超长 URL 必须**被拒**（模块 docstring 一直宣称"大小上限"，此前没有实现）。
 
-    模块 docstring 宣称"超时、大小上限、失败关闭"，但 `validate_url` 里既无长度检查也无
-    大小/超时逻辑——超长 URL 唯一的"拦法"是解析失败（而 IP 字面量 host 根本不解析）。
-    后果：10 万字符的 URL 一路放行，会把长度成本转嫁给下游（日志/正则/上报）。
+    不设上限时，10 万字符的 URL 会一路放行，把长度成本转嫁给下游（日志/正则/上报），
+    而 IP 字面量 host 根本不解析、也就没有任何"顺带拦下"的机会。
     """
-    assert validate_url("https://93.184.216.34/" + "a" * 100_000).allowed
-    assert validate_url("https://93.184.216.34/?q=" + "b" * 100_000).allowed
-
+    d = validate_url("https://93.184.216.34/" + "a" * 100_000)
+    assert not d.allowed and "过长" in d.reason
+    assert not validate_url("https://93.184.216.34/?q=" + "b" * 100_000).allowed
+    # 超长 host 也走同一条长度门禁（不必等 DNS）
     long_host = "https://" + "a" * 20_000 + ".example/"
-    assert validate_url(long_host, resolver=_Resolver(["93.184.216.34"])).allowed
-    d = validate_url(long_host, resolver=_Resolver(socket.gaierror("name too long")))
-    assert not d.allowed and "解析失败" in d.reason
-    print("PASS test_overlong_url_has_no_length_cap")
+    assert not validate_url(long_host, resolver=_Resolver(["93.184.216.34"])).allowed
+    # 上限之内、host 正常 → 仍放行（不是"一刀切拒绝长 URL"）
+    assert validate_url("https://93.184.216.34/" + "a" * 100).allowed
+    print("PASS test_overlong_url_is_rejected")
 
 
 # ------------------------------------------------------- DNS 重绑定
@@ -287,68 +288,60 @@ def test_dns_rebinding_toctou_has_no_pinning():
     print("PASS test_dns_rebinding_toctou_has_no_pinning")
 
 
-def test_empty_dns_answer_is_treated_as_public_current_behavior():
-    """记录当前真实行为（**安全缺陷，未修**）：解析器返回空答案 → 直接放行。
+def test_empty_dns_answer_is_rejected():
+    """解析器返回空答案 → **失败关闭**（修复前是放行）。
 
-    `bad = [ip for ip in ips if not _is_public_ip(ip)]` 对空列表恒为 `[]`，于是"一个地址
-    都没解析到"被当成"所有答案都是公网"。`_resolve` 只在**抛异常**时返回 None（→ 域名解析
-    失败，失败关闭）；返回空列表则一路放行到 `FetchDecision(allowed=True)`。
-    真实世界出现 NODATA/空答案（或 DoH 桩、被劫持/投毒的 DNS）时，校验放行而实际连接目标
-    未知——与模块"失败关闭"的宣称相悖，也是 DNS 重绑定最省事的一种起手式。
-    修法方向：`if not ips: return FetchDecision(False, reason="解析不到任何地址")`。
+    `bad = [ip for ip in ips if not _is_public_ip(ip)]` 对空列表恒为 `[]`，于是"一个地址都
+    没解析到"曾被当成"所有答案都是公网"→ 放行。空答案（NODATA / DoH 桩 / 被投毒 DNS）下
+    校验放行而实际连接目标未知，是 DNS 重绑定最省事的一种起手式。
     """
     d = validate_url("https://evil.example/x", resolver=_Resolver([]))
-    assert d.allowed is True
-    assert d.resolved_ips == ()
-    # 唯一对外入口同样放行 → 影响会直接落到取数路径
-    ok, _ = safe_get_allowed("https://evil.example/x", resolver=_Resolver([]))
-    assert ok is True
-    print("PASS test_empty_dns_answer_is_treated_as_public_current_behavior")
+    assert not d.allowed and "解析" in d.reason
+    # 唯一对外入口同样拒绝 → 缺口不会落到取数路径
+    ok, e = safe_get_allowed("https://evil.example/x", resolver=_Resolver([]))
+    assert not ok and e["error"] == "denied"
+    print("PASS test_empty_dns_answer_is_rejected")
 
 
 # ------------------------------------------------------- 畸形端口
 
-def test_malformed_port_raises_instead_of_denying_current_behavior(monkeypatch):
-    """记录当前真实行为（**缺陷，未修**）：畸形端口抛出 ValueError，而不是返回拒绝。
+def test_malformed_port_is_denied_not_raised(monkeypatch):
+    """畸形端口 → **返回拒绝**，不再把 ValueError 抛给调用方。
 
-    `validate_url` 只把 `urlparse(url)` 包在 try 里，随后 `p.port not in _ALLOWED_PORTS`
-    才触发端口解析——`:abc` / `:-1` / `:99999` 会让 `urllib.parse` 抛 ValueError，异常直接
-    逃逸。调用方拿到的是异常而不是 `FetchDecision(allowed=False)`：
-    `notifiers._target_allowed` 同样未捕获（本用例一并钉住），于是**攻击者可控的畸形
-    payload_ref / 配置错的通知 URL 会在投递路径上炸出 500**，而不是被"拒绝"。
-    正确方向：失败关闭（返回带原因的拒绝），异常绝不该逃出校验函数。
+    `:abc` / `:-1` / `:99999` 会让 `urllib.parse` 在取 `.port` 时抛 ValueError；校验函数
+    必须把它转成 `FetchDecision(allowed=False)`。否则攻击者可控的 payload_ref / 配错的
+    通知 URL 会在投递路径上炸出 500（而不是被"拒绝"）。
     """
     for bad in ["http://example.com:abc/", "http://example.com:-1/",
                 "http://example.com:99999/"]:
-        with pytest.raises(ValueError):
-            validate_url(bad)
+        d = validate_url(bad)
+        assert not d.allowed and "解析失败" in d.reason
 
     from data_dog.alerting import notifiers
     # 去掉"显式放行内网"的后门影响，让用例不受本机 .env 影响（只测端口解析本身）；
     # 用 monkeypatch 而非直接赋值，避免把全局设置泄漏给其它测试。
     monkeypatch.setattr(notifiers.settings, "notify_allow_private_targets", lambda: False)
-    with pytest.raises(ValueError):
-        notifiers._target_allowed("http://example.com:abc/")
-    print("PASS test_malformed_port_raises_instead_of_denying_current_behavior")
+    allowed, reason = notifiers._target_allowed("http://example.com:abc/")
+    assert allowed is False and "解析失败" in reason
+    print("PASS test_malformed_port_is_denied_not_raised")
 
 
 # ------------------------------------------------------- 特殊地址段
 
-def test_cgnat_range_is_allowed_current_behavior():
-    """记录当前真实行为（**安全缺口，未修**）：100.64.0.0/10（RFC 6598 CGNAT）被放行。
+def test_cgnat_and_special_ranges_are_rejected():
+    """CGNAT（100.64.0.0/10）等特殊段必须被拒——只靠黑名单会漏。
 
-    `_is_public_ip` 用 is_private/is_loopback/is_link_local/is_reserved/is_multicast/
-    is_unspecified 六个 property 做**黑名单**，而 CPython 的 `is_private` 并不覆盖
-    100.64.0.0/10（`is_global` 才为 False）。CGNAT 段在运营商/云 VPC 里被当作内网使用，
-    可路由到内部服务，因此应拦。改用 `addr.is_global`（白名单语义）可一次性覆盖此类遗漏。
+    `_is_public_ip` 现在取「六项黑名单 ∩ `is_global`」：黑名单挡住多播与 NAT64 这类
+    `is_global` 判不准的段（实测 `ff02::1` 与 `64:ff9b::808:808` 的 `is_global` 都是 True），
+    `is_global` 补上 CGNAT 这类"非私有、但不可全球路由"的段。
     """
     cgnat = ipaddress.ip_address("100.64.0.1")
     assert cgnat.is_private is False            # 黑名单没覆盖它
     assert cgnat.is_global is False             # 但语义上并非可全球路由
-    assert validate_url("http://100.64.0.1/").allowed is True    # 缺口：放行
-    assert validate_url("http://100.127.255.254/").allowed is True
+    assert validate_url("http://100.64.0.1/").allowed is False
+    assert validate_url("http://100.127.255.254/").allowed is False
 
-    # 对照：其余特殊段实测都被拦（黑名单覆盖到的部分是对的）
+    # 其余特殊段实测都被拦
     rejected = ["198.18.0.1", "192.0.2.1", "240.0.0.1", "255.255.255.255",
                 "224.0.0.1", "0.1.2.3", "169.254.0.1", "172.16.0.1",
                 "192.0.0.1", "198.51.100.1", "203.0.113.1", "127.0.0.2"]
@@ -359,36 +352,29 @@ def test_cgnat_range_is_allowed_current_behavior():
         assert not validate_url(f"http://[{host}]/").allowed, f"{host} 应被拒"
     # IPv6 带 scope（链路本地）也不放过
     assert not validate_url("http://[fe80::1%25eth0]/").allowed
-    print("PASS test_cgnat_range_is_allowed_current_behavior")
+    print("PASS test_cgnat_and_special_ranges_are_rejected")
 
 
 # ------------------------------------------------------- 控制字符 / 解析差分
 
-def test_control_chars_in_authority_are_stripped_but_raw_url_returned():
-    """记录当前真实行为（**缺陷，未修**）：authority 里的 \\t/\\n/\\r 被 urlsplit 静默剥掉。
+def test_control_chars_in_url_are_rejected():
+    """URL 里出现 \\t/\\n/\\r/NUL → **直接拒绝**（不替调用方"猜着规范化"）。
 
-    `validate_url("http://exa\\tmple.com/")` 校验（并交给解析器）的 host 是 `example.com`，
-    但 `FetchDecision.url` 返回的是**原始字符串**（仍带 \\t），调用方就是拿这个原文去发请求。
-    于是"被校验的名字"与"被请求的名字"不是同一份规范化结果——只要下游解析器对控制字符的
-    处理与 urlsplit 不一致（不剥、或按 WHATWG 视 \\t 为分隔符），就会连到与校验不同的 host。
-    `\\x00` 更是**不被剥离**，会原样进入解析器。正确做法：直接拒绝 authority 中的控制字符，
-    并返回规范化后的 URL（而不是原文）。
+    `urlsplit` 会把 \\t\\n\\r 从 authority 里静默剥掉：`validate_url("http://exa\\tmple.com/")`
+    校验到的是 `example.com`，而 `FetchDecision.url` 返回的是**原始字符串**——"被校验的名字"
+    与"被请求的名字"于是不是同一份结果（解析差分）。NUL 更是不被剥离、原样进入解析器。
+    正确做法是拒绝这种输入，而不是赌下游解析器与 urlsplit 行为一致。
     """
+    for bad in ["http://exa\tmple.com/", "http://exa\nmple.com/",
+                "http://exa\rmple.com/", "http://exa\x00mple.com/"]:
+        d = validate_url(bad)
+        assert not d.allowed and "控制字符" in d.reason, repr(bad)
+
+    # 安全的那一项保留：urlsplit 会小写化 host（大小写混淆不构成绕过）
     rec = _Resolver(["93.184.216.34"])
-    d = validate_url("http://exa\tmple.com/", resolver=rec)
-    assert d.allowed and rec.hosts == ["example.com"]
-    assert "\t" in d.url                     # 返回原文 ← 与"被校验的 host"不一致的差分点
-
-    rec2 = _Resolver(["93.184.216.34"])
-    d2 = validate_url("http://exa\x00mple.com/", resolver=rec2)
-    assert rec2.hosts == ["exa\x00mple.com"]  # NUL 原样进解析器（未被拒）
-    assert d2.allowed
-
-    # 安全的那一项：urlsplit 会小写化 host（大小写混淆不构成绕过）
-    rec3 = _Resolver(["93.184.216.34"])
-    validate_url("HTTP://ExAmPlE.COM/", resolver=rec3)
-    assert rec3.hosts == ["example.com"]
-    print("PASS test_control_chars_in_authority_are_stripped_but_raw_url_returned")
+    validate_url("HTTP://ExAmPlE.COM/", resolver=rec)
+    assert rec.hosts == ["example.com"]
+    print("PASS test_control_chars_in_url_are_rejected")
 
 
 # ------------------------------------------------------- 对外唯一入口
@@ -402,7 +388,7 @@ def test_url_parse_failure_is_fail_closed(monkeypatch):
 
     monkeypatch.setattr(fetch_mod, "urlparse", boom)
     d = fetch_mod.validate_url("http://[::1]/")
-    assert not d.allowed and d.reason == "URL 解析失败"
+    assert not d.allowed and "URL 解析失败" in d.reason
     print("PASS test_url_parse_failure_is_fail_closed")
 
 
@@ -448,7 +434,7 @@ def test_safe_get_allowed_wraps_decision():
     ok3, e3 = safe_get_allowed("file:///etc/passwd")
     assert not ok3 and e3["error"] == "denied"
 
-    # 空答案缺陷会穿过这个唯一入口（与 test_empty_dns_answer_* 同源）
-    ok4, _ = safe_get_allowed("https://evil.example/x", resolver=_Resolver([]))
-    assert ok4 is True
+    # 空答案已在源头拒绝，这个唯一入口不再被穿透（与 test_empty_dns_answer_is_rejected 同源）
+    ok4, e4 = safe_get_allowed("https://evil.example/x", resolver=_Resolver([]))
+    assert ok4 is False and e4["error"] == "denied"
     print("PASS test_safe_get_allowed_wraps_decision")
