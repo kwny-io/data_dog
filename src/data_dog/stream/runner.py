@@ -21,10 +21,12 @@ HTTP 入口每个请求新建一个 DataPlane（请求隔离）；流式消费�
 from __future__ import annotations
 
 import logging
+import random
 import threading
 import time
 from collections import defaultdict
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
 from .base import StreamMessage, StreamSource
@@ -32,6 +34,53 @@ from .base import StreamMessage, StreamSource
 _log = logging.getLogger("data_dog.stream")
 
 _PersistFn = Callable[[str, list[Any], list[Any]], None]
+
+# ---- 源轮询失败的重试预算（**次数 + 墙钟双上限 + 抖动退避**）----
+#
+# 与 `state/redis.py` 的 `mutate()` 同一口径：次数与时间**先到为准**，两次尝试之间
+# 用抖动的指数退避错开；任一上限耗尽即**显式终止**，绝不无限静默重试。
+#
+# 为什么源断开也要有终点：MQTT 掉线/kafka 滚动重启确实该重试，但"永远重试"会让
+# 一个**配置写错的源地址**看起来和"暂时抖动"一模一样——消费永远不前进、日志每轮
+# 刷一条、也没有任何"我已放弃"的信号。运维要的是：短期抖动自动恢复，长期故障
+# **停下来报警**。故默认允许 30 次 / 120s（≈2 分钟内自愈，够覆盖重启与重连），
+# 超了就停并把原因写进 `stats`（`/healthz` 直接可见），由人介入。
+_POLL_MAX_CONSECUTIVE_FAILURES = 30
+_POLL_FAILURE_BUDGET_S = 120.0
+_POLL_BACKOFF_BASE_S = 0.05
+_POLL_BACKOFF_MAX_S = 2.0
+
+
+@dataclass(frozen=True)
+class PollRetryPolicy:
+    """源轮询失败的重试预算：次数与墙钟双上限（先到为准）+ 抖动退避。
+
+    退避**不随 `poll_timeout` 变化**：`poll_timeout` 是"正常轮询一次的阻塞时长"，
+    与"故障后该等多久再试"是两个语义；混用会让"把 poll_timeout 调大以降低空转"
+    意外变成"故障时也要等很久"。
+    """
+
+    max_consecutive: int = _POLL_MAX_CONSECUTIVE_FAILURES
+    budget_s: float = _POLL_FAILURE_BUDGET_S
+    base_sleep_s: float = _POLL_BACKOFF_BASE_S
+    max_sleep_s: float = _POLL_BACKOFF_MAX_S
+
+    def backoff_s(self, consecutive: int, *,
+                  rand: Callable[[], float] = random.random) -> float:
+        """第 `consecutive` 次（从 1 起）失败后的退避：指数增长 + 单次上限 + 抖动。
+
+        抖动取 `U(0.5, 1.5)`：多个副本/多个源同时掉线时错开重连时刻，避免恢复瞬间
+        "整整齐齐"地一起打上去（惊群）。
+        """
+        n = max(1, int(consecutive))
+        nominal = min(max(0.0, self.max_sleep_s),
+                      self.base_sleep_s * (2 ** min(n - 1, 6)))
+        return nominal * (0.5 + rand())
+
+    def exhausted(self, *, consecutive: int, elapsed_s: float) -> bool:
+        """次数或墙钟任一耗尽 → True（先到为准）。"""
+        return consecutive >= max(1, int(self.max_consecutive)) \
+            or elapsed_s >= self.budget_s
 
 
 def _metric_consume_latency(msgs: list[StreamMessage]) -> None:
@@ -144,7 +193,8 @@ class StreamRunner:
 
     def __init__(self, plane: Any, source: StreamSource, *,
                  persist: _PersistFn | None = None, flush_max: int = 200,
-                 default_tenant: str = "", router: Any = None) -> None:
+                 default_tenant: str = "", router: Any = None,
+                 poll_retry: PollRetryPolicy | None = None) -> None:
         self.plane = plane
         self.source = source
         self._persist_fn = persist
@@ -153,10 +203,19 @@ class StreamRunner:
         # 分片路由（P4-5）：非空且启用时，**只在"每个副本都收全量"的源**上过滤——
         # 本副本只处理归属自己的键，其余交给属主副本。默认 None（不过滤）。
         self._router = router
+        # 源轮询失败的重试预算（次数 + 墙钟 + 抖动）；见 PollRetryPolicy。
+        self._poll_retry = poll_retry or PollRetryPolicy()
         self._pending: dict[str, list[StreamMessage]] = defaultdict(list)
-        self.stats = {"messages": 0, "normalized": 0, "rejected": 0,
-                      "candidates": 0, "flushes": 0, "errors": 0,
-                      "poll_errors": 0, "shard_skipped": 0}
+        # stop_reason：run() 的退出原因（"stopped" / "max_iters" / "source_unavailable"）。
+        # 放进 stats 是刻意的——service/routes/health.py 直接回吐 runner.stats，
+        # 于是"因源不可用而停"在不改任何路由的情况下就可见了。
+        # 注解成 Any（而非让 mypy 推断成 dict[str, int]）：stats 里既有计数器也有
+        # 字符串状态（stop_reason），混型是刻意的。
+        self.stats: dict[str, Any] = {
+            "messages": 0, "normalized": 0, "rejected": 0,
+            "candidates": 0, "flushes": 0, "errors": 0,
+            "poll_errors": 0, "shard_skipped": 0,
+            "poll_failures_exhausted": 0, "stop_reason": ""}
         # 长驻 plane 累计统计的"上次已记"快照（按增量转成 Prometheus 计数）
         self._metric_seen: dict[str, Any] = {}
 
@@ -247,18 +306,52 @@ class StreamRunner:
     # ---- 主循环 ----
     def run(self, *, stop: threading.Event, poll_timeout: float = 1.0,
             max_iters: int | None = None) -> None:
-        """轮询源直到 `stop` 置位。`max_iters` 仅测试用（有界迭代便于断言）。"""
+        """轮询源直到 `stop` 置位。`max_iters` 仅测试用（有界迭代便于断言）。
+
+        退出条件（三种，都会写进 `stats["stop_reason"]`）：
+        - `stop` 置位 → `"stopped"`（正常关停）；
+        - `max_iters` 用尽 → `"max_iters"`（仅测试）；
+        - **轮询重试预算耗尽** → `"source_unavailable"`（源长期不可用）。
+
+        为什么预算耗尽时**返回**而不是抛异常：`run()` 的调用方有两个都在"长驻线程"
+        里（`start_background` 起的守护线程、`service/stream_worker.py` 的 CLI）。
+        抛异常只会让守护线程带着 traceback 静默死掉，且会跳过收尾 `flush()`
+        （残留候选不落库）。改成"停下来 + 把原因写进 stats"后：调用方不需要改一行，
+        而 `/healthz`（直接回吐 `runner.stats`）能立刻看到 `stop_reason` 与
+        `poll_failures_exhausted`——这就是本仓要的"可观测的放弃"，不是无限静默重试。
+        """
         iters = 0
+        consecutive = 0
+        first_failure_at: float | None = None
         while not stop.is_set():
             try:
                 msgs = self.source.poll(poll_timeout)
             except Exception as e:                          # noqa: BLE001
-                # 源断开（MQTT 掉线/kafka 超时）不致命：记数后继续下一轮重试
+                consecutive += 1
+                now = time.monotonic()
+                if first_failure_at is None:
+                    first_failure_at = now
+                elapsed = now - first_failure_at
                 self.stats["poll_errors"] += 1
                 _log.warning("流式源轮询失败", extra={
-                    "error": f"{type(e).__name__}: {e}"})
-                time.sleep(min(1.0, poll_timeout))
+                    "error": f"{type(e).__name__}: {e}",
+                    "consecutive": consecutive, "elapsed_s": round(elapsed, 3)})
+                if self._poll_retry.exhausted(consecutive=consecutive,
+                                              elapsed_s=elapsed):
+                    # 次数/墙钟任一耗尽 → 显式放弃（不无限重试），原因落进 stats。
+                    self.stats["poll_failures_exhausted"] += 1
+                    self.stats["stop_reason"] = "source_unavailable"
+                    _log.error("流式源不可用：轮询重试预算耗尽，已停止消费", extra={
+                        "error": f"{type(e).__name__}: {e}",
+                        "consecutive": consecutive,
+                        "elapsed_s": round(elapsed, 3)})
+                    break
+                # 抖动退避：错开多副本的重连时刻；下一次成功即清零（见 else 分支）
+                time.sleep(self._poll_retry.backoff_s(consecutive))
                 msgs = []
+            else:
+                consecutive = 0                             # 成功 → 预算重新开始
+                first_failure_at = None
             if msgs:
                 self._drain(msgs)
             elif self._pending:
@@ -269,6 +362,8 @@ class StreamRunner:
             iters += 1
             if max_iters is not None and iters >= max_iters:
                 break
+        if not self.stats["stop_reason"]:
+            self.stats["stop_reason"] = "stopped" if stop.is_set() else "max_iters"
         self.flush()                                        # 收尾：清空残留
 
     def start_background(self, *, poll_timeout: float = 1.0

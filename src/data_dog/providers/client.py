@@ -2,6 +2,14 @@
 
 所有供应商都通过 OpenAI 兼容协议访问，因此这里只有一个实现。
 新增供应商只需在 registry 里加一行，不用动这里。
+
+超时与重试（都显式，不留给 SDK 默认）
+------------------------------------
+- 超时：单次 `chat()` 传 `timeout`（`DD_LLM_TIMEOUT_S`，默认 60s）；上游挂起必须能退出。
+- 重试：客户端 `max_retries=0`——**一次 `chat()` 就是一次 HTTP 往返**。SDK 默认会
+  自己重试 2 次且**没有墙钟上限**，最坏 ≈3×timeout，而调用方的总预算
+  （`service/app.py` 的 `_DeadlineProvider`，默认 90s）只能在**调用前**检查，
+  拦不住正在进行的那几次重试。重试预算应由"知道剩余预算"的上层显式管理。
 """
 from __future__ import annotations
 
@@ -97,9 +105,20 @@ class Provider:
         # 单次请求超时：上游挂起时必须能退出，否则永久占用 worker。
         # 显式传参优先；否则读 DD_LLM_TIMEOUT_S；默认 60s。
         self.timeout = _default_timeout() if timeout is None else timeout
-        # 统一用 OpenAI SDK，仅替换 base_url
+        # 统一用 OpenAI SDK，仅替换 base_url。
+        #
+        # `max_retries=0`：**不让 SDK 自己重试**，把重试预算收回我们自己的 deadline 里。
+        # 为什么必须显式写出来（而不是用 SDK 默认的 2 次）：SDK 的重试是隐式的——
+        # 有指数退避+抖动，但**没有墙钟上限**，而它重试的是"整次 HTTP 往返"，
+        # 于是最坏耗时 ≈ (1+2)×timeout（默认 60s → 约 180s）。这与本仓的调用预算
+        # 直接冲突：`_DeadlineProvider`（service/app.py）只在**每次调用之前**检查
+        # 90s 总预算，无法中断 SDK 正在进行的那几次重试——结果是"预算说 90s、
+        # 实际能跑 3 分钟"。设 0 之后，一次 `chat()` = 一次 HTTP 往返，
+        # 超时与重试都由我们的预算与上层失败关闭（`LLMCallError`）决定，行为可预测、
+        # 可测、可配。真要重试，也应该由上层在"知道剩余预算"的前提下显式做。
         from openai import OpenAI
-        self._client = OpenAI(api_key=api_key, base_url=vendor.base_url)
+        self._client = OpenAI(api_key=api_key, base_url=vendor.base_url,
+                              max_retries=0)
 
     @classmethod
     def from_config(cls, vendor_id: str, api_key: str,

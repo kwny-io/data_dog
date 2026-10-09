@@ -650,6 +650,17 @@ def notify_http_timeout_s() -> float:
     return max(0.1, _get_float("DD_NOTIFY_HTTP_TIMEOUT_S", default=5.0))
 
 
+def smtp_timeout_s() -> float:
+    """SMTP 通知超时（秒）。默认 5s（与 HTTP 通知同量级，但**可各自调**）。
+
+    为什么要单独一项：此前 `EmailNotifier` 直接复用 `DD_NOTIFY_HTTP_TIMEOUT_S`，
+    于是"把邮件超时调长"会连带放长 webhook 超时（反之亦然）。两类下游的特性完全不同
+    （SMTP 要 TLS 握手 + 认证 + 中继排队，webhook 是一次 HTTP POST），必须能分开设。
+    默认值与旧行为一致（5s），故属于"解耦"而非"改行为"。
+    """
+    return max(0.1, _get_float("DD_SMTP_TIMEOUT_S", default=5.0))
+
+
 def notify_allow_private_targets() -> bool:
     """是否允许通知目标指向内网/回环地址。
 

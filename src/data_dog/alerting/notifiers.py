@@ -211,7 +211,7 @@ class EmailNotifier:
         msg.set_content(note.body)
         try:
             with smtplib.SMTP(host, settings.smtp_port(),
-                              timeout=settings.notify_http_timeout_s()) as s:
+                              timeout=settings.smtp_timeout_s()) as s:
                 s.starttls()
                 user = settings.smtp_user()
                 if user:
