@@ -231,18 +231,43 @@ def test_bridge_query_uses_change_source():
     assert res["source"] == "MockChangeSource"
 
 
-def test_bridge_falls_back_on_source_error():
-    """来源抛异常不应让调查崩：降级到内置表并如实标注。"""
+def test_bridge_fails_closed_on_source_error(monkeypatch):
+    """来源抛异常 → **失败关闭**（默认）：回 unavailable 错误，且**不含 changes 字段**。
+
+    为什么不回 `{"changes": []}`：空列表在 Agent 眼里等价于"近期没有变更"，
+    那是假结论——"查不到" ≠ "没有"。这条测试锁的正是这个区分。
+    """
     from data_dog.service.evidence import RepoEvidenceBridge
 
     class _Boom:
         def query(self, **kw):
             raise RuntimeError("cmdb down")
 
+    monkeypatch.delenv("DD_CHANGE_FALLBACK_DEMO", raising=False)
+    b = RepoEvidenceBridge([], device_sn="d", change_source=_Boom())
+    res = b.query_recent_changes("d", "joint_motor.front_left_hip", "2000-01-01")
+    assert res["ok"] is False
+    assert res["error"] == "unavailable"
+    assert res["reason"] == "change_source_unavailable"
+    assert "changes" not in res                  # 绝不给出看似有效的变更列表
+    print("PASS test_bridge_fails_closed_on_source_error")
+
+
+def test_bridge_demo_fallback_requires_explicit_switch(monkeypatch):
+    """只有显式 `DD_CHANGE_FALLBACK_DEMO=1` 才回退样例表，且标记 `degraded=True`。"""
+    from data_dog.service.evidence import RepoEvidenceBridge
+
+    class _Boom:
+        def query(self, **kw):
+            raise RuntimeError("cmdb down")
+
+    monkeypatch.setenv("DD_CHANGE_FALLBACK_DEMO", "1")
     b = RepoEvidenceBridge([], device_sn="d", change_source=_Boom())
     res = b.query_recent_changes("d", "joint_motor.front_left_hip", "2000-01-01")
     assert res["source"] == "builtin_fallback"
+    assert res["degraded"] is True               # 不得被误读成生产数据
     assert len(res["changes"]) >= 1
+    print("PASS test_bridge_demo_fallback_requires_explicit_switch")
 
 
 def test_default_source_is_mock(monkeypatch):

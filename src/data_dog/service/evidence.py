@@ -20,11 +20,15 @@ temperature_c、另一处写 temperature，检测逻辑对不上）。
   （电池→驱动板→电机）——当前只做"同设备同窗其它部件是否异常"这一层。
 - 近期变更（`query_recent_changes`）**已接入 `ChangeSource` 适配器**（G7）：
   按 `DD_CHANGE_SOURCE` 选 mock（内置表）/jsonl/webhook/db（推送式落库），
-  **四种来源都真按 since 过滤**（此前 since 被静默忽略）。来源不可用时降级到
-  内置表并如实标注 `source=builtin_fallback`——不冒充"已接生产数据源"。
+  **四种来源都真按 since 过滤**（此前 since 被静默忽略）。
+  来源**不可用时失败关闭**：返回统一 `unavailable` 错误（工具层原样透传，Agent 拿不到
+  `changes` 字段，因而无法据此下"近期无变更"的结论）——绝不把内置样例表冒充成权威
+  变更。只有显式打开 `DD_CHANGE_FALLBACK_DEMO=1`（本地演示用）才回退样例表，且回退
+  结果带 `degraded=True` 标注。
 """
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from typing import Any
 
@@ -33,6 +37,8 @@ from ..data_plane.scenarios import _STANDARD_NAME
 from ..errors import ToolErrorCode, err
 from ..evidence.detectors import GeneratedRuleDetector, load_detector
 from ..evidence.store import ALLOWED_COMPONENTS, VENDOR_KNOWLEDGE
+
+_log = logging.getLogger(__name__)
 
 
 def _epoch_s(iso: str) -> float | None:
@@ -256,18 +262,37 @@ class RepoEvidenceBridge:
 
         此前这里读内置假表且**忽略 since**（静默错误：Agent 以为按时间过滤了、
         实际拿到很久前的变更）。现改为经 `ChangeSource`，所有实现都真正过滤。
+
+        来源不可用 → **失败关闭**（默认口径）：返回 `unavailable` 统一错误，形状与
+        越权的 `denied` 一致。选错误而不是 `{"changes": []}` 是刻意的——空列表在
+        Agent 眼里等价于"近期没有变更"，那是**假结论**（"查不到"≠"没有"），而本仓
+        的承诺是"拿不准就不下结论"。工具层（`tools/investigation.py`）对 `ok=False`
+        原样透传，故 Agent 拿到的是明确的错误码、连 `changes` 字段都没有。
+
+        要演示/离线复现"降级"这条路径，必须显式打开 `DD_CHANGE_FALLBACK_DEMO=1`：
+        此时才回退内置样例表，且结果带 `degraded=True`，不至于被误读成生产数据。
         """
         if component not in ALLOWED_COMPONENTS:
             return err(ToolErrorCode.DENIED, component)
         src = self._changes()
         try:
             records = src.query(device_sn=device_sn, component=component, since=since)
-        except Exception:                      # noqa: BLE001
-            # 来源不可用不应让调查崩：降级到内置表（并如实标注来源）
+        except Exception as e:                 # noqa: BLE001 - 任何来源故障都必须显式化
+            from .. import settings
+            _log.warning("变更来源不可用，失败关闭", extra={
+                "source": _source_name(src), "component": component,
+                "error": f"{type(e).__name__}: {e}",
+                "demo_fallback": settings.change_fallback_demo()})
+            if not settings.change_fallback_demo():
+                # 只回错误码 + 来源名 + 异常类名：不回异常正文（不向 Agent 泄内部细节）
+                return err(ToolErrorCode.UNAVAILABLE,
+                           f"变更来源不可用: {_source_name(src)}"
+                           f"（{type(e).__name__}）",
+                           reason="change_source_unavailable")
             from ..evidence.change_source import MockChangeSource
-            records = MockChangeSource().query(
+            demo = MockChangeSource().query(
                 device_sn=device_sn, component=component, since=since)
-            return {"changes": [r.to_dict() for r in records],
-                    "source": "builtin_fallback"}
+            return {"changes": [r.to_dict() for r in demo],
+                    "source": "builtin_fallback", "degraded": True}
         return {"changes": [r.to_dict() for r in records],
                 "source": _source_name(src)}

@@ -2,6 +2,8 @@
 
 - 默认 SQLite（本地零安装）；设 `DD_DATABASE_URL` 切 PostgreSQL，代码不改。
 - SQLite 需要 `check_same_thread=False`（多线程/测试）；PostgreSQL 用连接池。
+- PostgreSQL 的**建连 / 拿连接 / 单条语句**三段等待都有显式上限（见 `engine_kwargs`）：
+  数据库不可用或过载时必须快速失败并报错，而不是静默把请求线程钉住几十秒。
 - 提供上下文管理器 `session_scope()`：自动 commit / rollback / close。
 """
 from __future__ import annotations
@@ -80,15 +82,75 @@ def get_engine(url: str | None = None) -> Engine:
         return _engine
 
 
-def _make_engine(target: str) -> Engine:
+def engine_kwargs(target: str) -> dict[str, Any]:
+    """按 URL 方言构造 `create_engine` 的 kwargs(**唯一实现**，`_make_engine` 与
+    `state/pg.py` 共用，避免两处各写一套而漂移)。
+
+    为什么 PostgreSQL 必须显式给三个时间上限
+    ----------------------------------------
+    "建连/拿连接/跑语句"三段等待，库默认值分别是**无限**（libpq `connect_timeout=0`）、
+    30s（SQLAlchemy `pool_timeout`）、**无限**（PG `statement_timeout=0`）。三者任一
+    卡住都会把**请求线程**钉在原地：HTTP 层表现为超时/挂起，后台 worker 表现为
+    队列堆积，而且日志里往往只看到"没有响应"，定位不到"在等数据库"。
+
+    这与本仓"拿不准就快速失败（fail-closed）"是同一口径：数据库不可用/过载时，
+    我们要的是**明确的 503/报错**（可告警、可重试、可让上游降级），而不是一个
+    悄悄挂住 30 秒~几分钟的连接尝试。阈值取 5s 与仓库内其它"快速失败"预算同量级
+    （redis 状态冲突重试 5s、通知 HTTP 5s），使一次数据库等待不会长过业务自身的预算。
+
+    SQLite **刻意不引入**这些参数：本地单文件库没有网络建连、默认`QueuePool` 也不
+    会被远端占满，给它加 `pool_timeout`/`connect_timeout` 只会改变既有本地行为
+    （测试与本机开发都依赖该行为不变）。
+    """
+    from .. import settings
+
     kwargs: dict[str, Any] = {"future": True}
     if target.startswith("sqlite"):
-        # SQLite：允许跨线程 + 不要求严格类型
+        # SQLite：允许跨线程 + 不要求严格类型（行为与既有版本逐字节一致）
         kwargs["connect_args"] = {"check_same_thread": False}
-    else:
-        # PostgreSQL 等：连接池预检，防陈旧连接
-        kwargs["pool_pre_ping"] = True
-    return create_engine(target, **kwargs)
+        return kwargs
+
+    # PostgreSQL 等网络数据库：连接预检 + 三段等待全部有上限。
+    kwargs["pool_pre_ping"] = True          # 防陈旧连接（池里被对端掐掉的连接）
+    connect_args: dict[str, Any] = {
+        "connect_timeout": settings.db_connect_timeout_s(),
+    }
+    statement_ms = settings.db_statement_timeout_ms()
+    if statement_ms > 0:
+        # 走 libpq 的 `options`（等价于会话级 `SET statement_timeout`）：
+        # server 端计时，卡死的语句由 PG 主动取消（psycopg 抛 QueryCanceled），
+        # 比客户端"看着像挂住"更能失败关闭。0 = 不限，此时**不加**该参数。
+        #
+        # 与 URL 里已有的 `?options=...` **合并**而不是覆盖：运维可能用它传
+        # `-c search_path=...` 之类；`create_engine` 的 connect_args 优先级高于 URL
+        # 查询串，直接写单值会把它静默丢掉（又一个"没报错但行为变了"）。
+        connect_args["options"] = _merge_pg_options(
+            _url_options(target), f"-c statement_timeout={statement_ms}")
+    kwargs["connect_args"] = connect_args
+    kwargs["pool_timeout"] = settings.db_pool_timeout_s()
+    return kwargs
+
+
+def _url_options(target: str) -> str:
+    """取连接串查询参数里的 `options=`（libpq 启动参数）；没有/解析不了 → 空串。
+
+    解析失败不在这里报错：URL 本身有问题应由 `create_engine` 给出权威报错，
+    本函数只负责"尽量不丢运维已写的 options"。
+    """
+    from sqlalchemy.engine import make_url
+    try:
+        return str(make_url(target).query.get("options", "") or "")
+    except Exception:                        # noqa: BLE001 - 见 docstring
+        return ""
+
+
+def _merge_pg_options(existing: str, extra: str) -> str:
+    """把 `extra` 追加到已有 libpq options 串后（空格分隔，去首尾空白）。"""
+    return f"{existing.strip()} {extra}".strip()
+
+
+def _make_engine(target: str) -> Engine:
+    return create_engine(target, **engine_kwargs(target))
 
 
 def get_sessionmaker() -> sessionmaker:

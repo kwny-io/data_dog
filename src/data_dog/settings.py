@@ -104,6 +104,41 @@ def auto_migrate() -> bool:
     return _get_bool("DD_AUTO_MIGRATE", default=True)
 
 
+# 为什么这三个超时默认 5s（而不是库默认的"无限/30s"）：见 storage/db.py 的
+# `engine_kwargs` docstring。要点是——建连/拿连接的等待必须有上界，且上界要与
+# 本仓其它"快速失败"预算同量级（redis 状态冲突重试 5s、通知 HTTP 5s），
+# 这样"数据库慢了"会以显式错误暴露，而不是把请求线程静默钉住。
+
+def db_connect_timeout_s() -> float:
+    """建连超时（秒，仅 PostgreSQL 生效）：TCP 建连 + 启动握手的总预算。
+
+    libpq 默认 `connect_timeout=0` = **无限等**（最终靠 OS 的 TCP 超时，可达分钟级），
+    故必须显式给值。有上限之后，"连不上"会以 `OperationalError`（connection timeout
+    expired）快速浮出来，而不是让请求线程在 SYN 重传里无声等待。
+    """
+    return max(0.1, _get_float("DD_DB_CONNECT_TIMEOUT_S", default=5.0))
+
+
+def db_pool_timeout_s() -> float:
+    """从连接池取连接的最长等待（秒，仅 PostgreSQL 生效）。
+
+    SQLAlchemy 默认 30s：池被占满时请求会**静默排队半分钟**再报错。改成 5s 是
+    "服务器过载就快速失败"的选择——快速 503 比慢 200 更早暴露容量问题。
+    """
+    return max(0.1, _get_float("DD_DB_POOL_TIMEOUT_S", default=5.0))
+
+
+def db_statement_timeout_ms() -> int:
+    """单条语句最长时间（毫秒，仅 PostgreSQL 生效）；**0 = 不限**。
+
+    服务端 `statement_timeout`：卡死的查询/被锁住的写不会永久占着连接。默认 15s
+    远高于应用查询的量级（docs/slo.md 的热路径预算是毫秒级），只用来兜住"病态慢"。
+    注意：alembic 迁移走自己的引擎（storage/migrations.py），不受此值约束，
+    长迁移不会被误杀。
+    """
+    return max(0, _get_int("DD_DB_STATEMENT_TIMEOUT_MS", default=15_000))
+
+
 # ---------------------------------------------------------------- 共享状态
 
 def state_backend() -> str:
@@ -411,6 +446,17 @@ def change_jsonl_path() -> str:
 def change_webhook_url() -> str:
     """webhook 来源的 CMDB API 地址（请求前过 SSRF 校验）。"""
     return _get("DD_CHANGE_WEBHOOK_URL")
+
+
+def change_fallback_demo() -> bool:
+    """变更源**不可用**时是否回退内置样例变更表（默认关；只给本地演示用）。
+
+    为什么默认关：内置表是样例数据。把"查不到"悄悄变成"一份样例变更列表"，会让
+    Agent 的"近期无（相关）变更"结论建立在假数据上——这与本仓"拿不准就失败关闭"
+    的口径冲突。默认行为改为向 Agent 返回 `unavailable` 错误（不含 changes 字段），
+    要演示"降级"这条路径必须显式打开本开关，且回退结果会带 `degraded=True` 标注。
+    """
+    return _get_bool("DD_CHANGE_FALLBACK_DEMO", default=False)
 
 
 # ---------------------------------------------------------------- 因果时序（G6）

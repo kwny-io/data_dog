@@ -13,6 +13,13 @@ INSERT），应用 fn，再 UPDATE。行锁保证并发调用串行化——与�
 冲突重试：fn 在 `FOR UPDATE` 锁内调用一次即可——锁已把并发挡在外面，无需
 像 CAS 那样重跑。但 INSERT（首次创建）时的并发仍可能撞唯一键，故用
 `ON CONFLICT DO NOTHING` 后重取。
+
+超时（失败关闭）
+----------------
+引擎参数复用 `storage.db.engine_kwargs`：`connect_timeout` / `pool_timeout` /
+`statement_timeout` 都有上限（默认 5s / 5s / 15s）。限流检查在本后端是热路径，
+数据库慢或锁等待失控时**必须快速报错**，而不是把调用线程静默钉住——见
+`docs/reliability.md` 的审计表。
 """
 from __future__ import annotations
 
@@ -28,8 +35,13 @@ from .base import StateStore
 class PostgresStateStore(StateStore):
     def __init__(self, url: str) -> None:
         from sqlalchemy import create_engine
-        # NullPool 之外仍用小池即可；每次 mutate 自管事务。
-        self._engine = create_engine(url, pool_pre_ping=True, future=True)
+
+        from ..storage.db import engine_kwargs
+        # 引擎参数与业务库**共用同一实现**（storage.db.engine_kwargs）：建连/拿连接/
+        # 语句三段等待都有上限。这里的状态读写夹在 `SELECT ... FOR UPDATE` 行锁里，
+        # 一旦数据库慢或锁等待失控，无上限的等待会直接钉住调用方（限流检查在热路径上），
+        # 故必须和业务库一样"拿不准就快速失败"。
+        self._engine = create_engine(url, **engine_kwargs(url))
 
     def mutate(self, key: str, fn: Callable[[Any], tuple[Any, Any]]) -> Any:
         now = time.time()
