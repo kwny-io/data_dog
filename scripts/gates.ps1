@@ -12,8 +12,9 @@
   It runs ruff check -> mypy -> pytest in order and exits immediately with the failing step's
   exit code, so a failure is never masked.
 
-  CI mapping: `ruff check src tests` + `mypy src` (lint job), `pytest -q` (test job).
-  CI additionally enforces coverage (--cov-fail-under); add it locally when you want it.
+  CI mapping: `ruff check src tests scripts` + `mypy src` (lint job), `pytest -q` (test job).
+  CI additionally enforces coverage (--cov-fail-under) and a per-module floor
+  (scripts/cov_gate.py); run `make cov` or add those flags locally when you want them.
 
   NOTE: this file is deliberately ASCII-only. Windows PowerShell 5.1 reads BOM-less UTF-8 as
   ANSI, which would mangle non-ASCII text and can break parsing - a gate script that fails to
@@ -36,7 +37,7 @@ function Invoke-Gate {
     }
 }
 
-Invoke-Gate "ruff check src tests" @("-m", "ruff", "check", "src", "tests")
+Invoke-Gate "ruff check src tests scripts" @("-m", "ruff", "check", "src", "tests", "scripts")
 Invoke-Gate "mypy src" @("-m", "mypy", "src")
 Invoke-Gate "pytest -q" @("-m", "pytest", "-q")
 

@@ -4,15 +4,18 @@
 # 设计取舍（诚实标注）：
 # - **离线优先**：默认套件不依赖任何 API Key / 网络（确定性 provider），
 #   因此 CI 可复现、不会因外部服务抖动而红。
-# - **两条测试腿**：
+# - **三条集成腿**（都靠 service container，跑各自 marker）：
 #     1) `test` 腿在 SQLite 上跑全量套件（快、零依赖）；
-#     2) `postgres` 腿起真实 PostgreSQL:16，跑标了 `@pytest.mark.postgres`
-#        的集成测试（迁移 + 租户隔离在真库上的行为）。这才是"PG 兼容"的实证，
-#        而不是只断言连接串字符串。
+#     2) `postgres` 腿起真实 PostgreSQL:16，跑 `@pytest.mark.postgres` 的集成测试
+#        （迁移 + 租户隔离在真库上的行为）——这才是"PG 兼容"的实证，而不是只断言连接串；
+#     3) `redis` 腿起真实 Redis:7，跑 `@pytest.mark.redis` 的 StateStore 契约测试——
+#        默认套件用 fakeredis（内存），只能证明"我们的重试/本地锁自洽"，
+#        证明不了"真 WATCH/MULTI/EXEC 语义如我们所假设"。
 # - **前端独立腿**：`web/` 是独立的 Next.js 工程（自带 package-lock），
 #   用 Node 20 + `npm ci` 跑 tsc + eslint + vitest。前端不参与 Python 覆盖率门禁。
-# - **覆盖率门禁**：基线实测约 82.6%，门禁设为 82%（留出余量，避免因个别新代码
-#   抖动就误红）。门槛随覆盖率提升而上调——别让它变成"永远刚好过"的摆设。
+# - **覆盖率门禁**：总分 ≥85%（实测约 89%）+ **单模块 ≥60%**（`scripts/cov_gate.py`）。
+#   为什么两条都要：总分会被大模块平均掉——一个核心模块掉到 20%，只要别处补上同样的
+#   行数，总分照样过。门槛随覆盖率提升而上调，别让它变成"永远刚好过"的摆设。
 # - **Python 3.12**：与 Dockerfile 一致；numpy>=2.5 的存根本身也要求 >=3.12。
 name: CI
 
@@ -64,12 +67,16 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[dev,postgres]"
-      - name: 跑测试（覆盖率门禁 82%）
+      - name: 跑测试（覆盖率门禁 85%）
         run: |
           pytest -q \
             --cov=data_dog \
             --cov-report=term-missing \
-            --cov-fail-under=82
+            --cov-report=json:coverage.json \
+            --cov-fail-under=85
+      # 总分会被大模块平均掉：单独再卡一遍"每个模块的下限"，防止某个核心模块塌陷。
+      - name: 单模块覆盖率下限（60%）
+        run: python scripts/cov_gate.py --json coverage.json --min 60
 
   postgres:
     name: PostgreSQL 集成测试

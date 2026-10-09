@@ -193,7 +193,13 @@ def query_knowledge(question: str, n_results: int = 3) -> list[dict[str, Any]]:
     try:
         if client is None:
             client = ChromaKnowledgeClient(_chroma_exe(), chroma_dir)
-        return client.query(question, n_results)
+        result = client.query(question, n_results)
+        # 成功才写回常驻：此前只在失败重试的 `finally` 里赋值，于是**冷启动成功路径
+        # 从不缓存**——每次查询都重新 spawn chroma-mcp（实测 4~6s + 重复开库），
+        # 而且那个进程从此无人引用，`close_knowledge_server()`/atexit 都够不着它，
+        # 泄漏成占着 SQLite 锁的僵尸 server（正是本函数注释担心的间歇性故障）。
+        _PERSISTENT = client
+        return result
     except Exception:
         # 失败路径必须关掉旧进程（否则泄漏僵尸 server，锁库引发间歇性故障）
         if client is not None:

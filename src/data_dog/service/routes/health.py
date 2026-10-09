@@ -68,7 +68,11 @@ def readyz() -> JSONResponse:
             # file 源：展示租约归属（一眼看出哪个副本在读）
             holder = getattr(source, "lease_holder", None)
             if holder is not None:
-                checks["stream"]["lease_holder"] = holder
+                # `lease_holder` 在 file 源上是**普通方法**（不是 property）：直接把方法对象
+                # 塞进响应体会让 JSON 序列化抛 TypeError → `/readyz` 恒 500，于是
+                # `DD_STREAM_ENABLED=1` 的 file 源部署**永远无法就绪**（编排层一直摘流量）。
+                # 这里显式取值；若将来改成 property，`callable` 判断也照样成立。
+                checks["stream"]["lease_holder"] = holder() if callable(holder) else holder
         ready = ready and bool(checks["stream"]["ok"])
 
     # 异步调查 worker 池（仅在启用时检查）：配了异步但池子没跑 = 提交会 503，

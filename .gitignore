@@ -57,6 +57,8 @@ venv/
 .coverage
 .coverage.*
 htmlcov/
+# 单模块门禁用到的 JSON 报告（scripts/cov_gate.py 读它；属生成物不入库）
+coverage.json
 
 # 本地 agent/编辑器工具配置（非项目代码）
 .claude/

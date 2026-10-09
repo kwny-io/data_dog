@@ -19,15 +19,17 @@ README 的规模数字描述的是**仓库**，不是某个工作树里此刻恰
 ----
     python scripts/readme_counts.py            # 回填 README（默认）
     python scripts/readme_counts.py --check    # 只校验，漂移则 exit 1（测试/CI 用）
+    # 运行时数字（跑一次才知道）：先 `pytest -q` 看结果，再同步
+    python scripts/readme_counts.py --tests-passed 800 --tests-skipped 9
 
 口径（与 README 的表述一一对应，改口径必须同时改这里和测试）
 - 源码：`src/**/*.py` 的文件数与总行数
 - 测试：`tests/test_*.py` 的文件数与总行数（不含 conftest.py / __init__.py）
-- 前端：`web/**/*.ts` + `*.tsx`，**排除** node_modules 与 .next
-- make：Makefile 里的 target 数**减去 help**（README 写"22 个 make 命令（另有 help）"）
-
-不在此脚本范围：`pytest -q` 的 passed/skipped 数——那要靠真跑一次才知道，属于
-"运行时数字"，改动测试后需人工回填（README 里紧邻测试文件数那句）。
+- 前端：`web/**/*.ts` + `*.tsx`，**排除** node_modules 与 .next*
+- make：Makefile 里的 target 数**减去 help**
+- 运行时测试数（`**N 项测试**` / `` `P passed, S skipped` ``）：**只能由人跑一次才知道**，
+  故用 `--tests-passed/--tests-skipped` 显式同步——测试无法验证它（静态文件里没有运行期信息），
+  这一点如实写在这里，而不是假装它被自动守住了。
 """
 from __future__ import annotations
 
@@ -107,7 +109,8 @@ def _repl(text: str, pattern: str, repl: str, what: str) -> tuple[str, list[str]
     return re.sub(pattern, repl, text, count=1), [f"{what}: {hits[0]} -> {repl}"]
 
 
-def build() -> tuple[str, list[str]]:
+def build(tests_passed: int | None = None,
+          tests_skipped: int | None = None) -> tuple[str, list[str]]:
     src_n, src_l = count_src()
     tst_n, tst_l = count_tests()
     web_n = count_web()
@@ -128,15 +131,26 @@ def build() -> tuple[str, list[str]]:
     # 测试文件数在亮点表里也出现一次（"（48 个测试文件，…"），必须同源
     text, ch = _repl(text, r"（\d+ 个测试文件，", f"（{tst_n} 个测试文件，", "亮点表测试文件数")
     changes += ch
+    if tests_passed is not None and tests_skipped is not None:
+        text, ch = _repl(text, r"\*\*\d+ 项测试，全离线确定性\*\*",
+                         f"**{tests_passed + tests_skipped} 项测试，全离线确定性**", "测试总数")
+        changes += ch
+        text, ch = _repl(text, r"`\d+ passed, \d+ skipped`",
+                         f"`{tests_passed} passed, {tests_skipped} skipped`", "运行时测试结果")
+        changes += ch
     return text, changes
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="重算并回填 README 的规模数字")
     ap.add_argument("--check", action="store_true", help="只校验，不写文件（漂移则 exit 1）")
+    ap.add_argument("--tests-passed", type=int, default=None,
+                    help="pytest -q 的 passed 数（与 --tests-skipped 一起给出才生效）")
+    ap.add_argument("--tests-skipped", type=int, default=None,
+                    help="pytest -q 的 skipped 数")
     args = ap.parse_args()
 
-    new_text, changes = build()
+    new_text, changes = build(args.tests_passed, args.tests_skipped)
     old_text = README.read_text(encoding="utf-8")
     if old_text == new_text:
         print("README 规模数字与实际一致（无需改动）")
