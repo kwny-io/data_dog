@@ -1,0 +1,26 @@
+#!/bin/sh
+# data_dog pre-push：跑与 CI 等价的完整门禁——静态检查 + 类型检查 + 全量测试。
+#
+# 为什么放在 push 而不是 commit：全量测试约 3 分钟，每次提交都等一遍没人受得了；
+# 而"推上去才发现红"才是最贵的（CI 排队 + 上下文切换）。切在 push 这一步性价比最高。
+#
+# 启用：make hooks   （等价于 git config core.hooksPath scripts/git-hooks）
+# 临时跳过：git push --no-verify  （不建议）
+set -e
+
+root=$(git rev-parse --show-toplevel)
+cd "$root"
+
+if [ -x .venv/bin/python ]; then
+    PY=.venv/bin/python
+elif [ -x .venv/Scripts/python.exe ]; then
+    PY=.venv/Scripts/python.exe
+else
+    PY=python
+fi
+
+echo "[pre-push] 与 CI 同口径的门禁：ruff / mypy / pytest（可能要几分钟）"
+"$PY" -m ruff check src tests
+"$PY" -m mypy src
+"$PY" -m pytest -q
+echo "[pre-push] 全部通过"

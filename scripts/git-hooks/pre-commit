@@ -1,0 +1,30 @@
+#!/bin/sh
+# data_dog pre-commit：只跑"快且能拦住大多数问题"的静态检查（亚秒级）。
+# 全量门禁（ruff + mypy + 645 项测试）放在 pre-push，避免每次提交都等几分钟。
+#
+# 启用：make hooks   （等价于 git config core.hooksPath scripts/git-hooks）
+# 临时跳过：git commit --no-verify  （不建议：CI 会拦，只是把失败推后）
+set -e
+
+root=$(git rev-parse --show-toplevel)
+cd "$root"
+
+# 解释器探测口径与 Makefile 一致：Linux/macOS 的 .venv/bin 与 Windows 的 .venv/Scripts
+if [ -x .venv/bin/python ]; then
+    PY=.venv/bin/python
+elif [ -x .venv/Scripts/python.exe ]; then
+    PY=.venv/Scripts/python.exe
+else
+    PY=python
+fi
+
+# 只检查本次暂存的 Python 文件（--diff-filter=ACM：新增/修改/复制的）
+files=$(git diff --cached --name-only --diff-filter=ACM -- '*.py' || true)
+if [ -z "$files" ]; then
+    exit 0
+fi
+
+count=$(printf '%s\n' "$files" | wc -l | tr -d ' ')
+echo "[pre-commit] ruff check（$count 个暂存文件）"
+printf '%s\n' "$files" | xargs "$PY" -m ruff check --force-exclude
+echo "[pre-commit] 通过"

@@ -56,13 +56,13 @@ def run_one(fault: str, dur: float, dt: float, seed: int, t_amb: float = 25.0):
 def cell_stats(sample, comp: str):
     j = sample.joints.index(comp)
     T = sample.temperature[:, j]
-    I = np.abs(sample.current[:, j])
+    cur = np.abs(sample.current[:, j])     # 电流（原名 I 触发 ruff E741 的歧义名）
     n = T.shape[0]
     a, b = int(n * 0.4), int(n * 0.9)      # 故障窗
     return {
         "T_norm": np.nanmean(T[:a]), "T_fault": np.nanmean(T[a:b]),
-        "T_peak": np.nanmax(T), "I_norm": np.nanmean(I[:a]),
-        "I_fault": np.nanmean(I[a:b]), "I_peak": np.nanmax(I),
+        "T_peak": np.nanmax(T), "I_norm": np.nanmean(cur[:a]),
+        "I_fault": np.nanmean(cur[a:b]), "I_peak": np.nanmax(cur),
         "loss": 1.0 - np.nanmean(sample.valid_mask[:, j]),
         "T_series": T,
     }

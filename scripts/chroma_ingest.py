@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """A7：把 vendor_docs/unitree 语料分块灌入 Chroma（经 chroma-mcp）。
 
 用法：/d/.venv/Scripts/python.exe scripts/chroma_ingest.py

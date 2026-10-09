@@ -18,7 +18,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from data_dog.mujoco_sim.gait import GaitParams, is_fallen  # noqa: E402
+from data_dog.mujoco_sim.gait import GaitParams  # noqa: E402
 from data_dog.mujoco_sim.noise import NoiseConfig, apply_noise  # noqa: E402
 from data_dog.mujoco_sim.simulate import simulate  # noqa: E402
 

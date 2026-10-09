@@ -41,9 +41,15 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev,postgres]"
       - name: ruff
-        run: ruff check src tests
+        run: ruff check src tests scripts
       - name: mypy
         run: mypy src
+      - name: 依赖清单与元数据一致性（漂移即红）
+        run: |
+          python scripts/gen_requirements.py --check
+          python scripts/readme_counts.py --check
+      - name: 元数据一致性测试（pyproject ↔ README ↔ LICENSE ↔ 入口 ↔ Schema）
+        run: pytest -q tests/test_project_meta.py
 
   test:
     name: 全量测试（SQLite）

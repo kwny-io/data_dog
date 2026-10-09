@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Chroma MCP（RAG）冒烟测试：走 JSON-RPC 与 chroma-mcp 往返。
 
 流程：initialize → 建集合 → 灌入厂商知识条目 → 语义查询验证召回。

@@ -1,16 +1,23 @@
 # data_dog 常用命令（Windows 无 make 时见 README 的等价命令）
 # 注意：Makefile 的命令行必须以 TAB 缩进。
 
-PY ?= .venv/Scripts/python.exe
+PY ?= $(shell if [ -x .venv/bin/python ]; then echo .venv/bin/python; \
+              elif [ -x .venv/Scripts/python.exe ]; then echo .venv/Scripts/python.exe; \
+              else echo python; fi)
 PORT ?= 8000
 
-.PHONY: help install test lint typecheck cov serve probe ingest e2e ui bench up down logs ps health clean helm-lint verify-chart k8s-e2e
+.PHONY: help gates hooks numbers requirements format install test lint typecheck cov serve probe ingest e2e ui bench up up-prod down down-prod logs ps health clean helm-lint verify-chart k8s-e2e
 
 help:            ## 显示所有命令
 	@echo "make install  安装依赖(含服务)"
 	@echo "make test     跑全量测试"
 	@echo "make lint     ruff 静态检查"
 	@echo "make typecheck mypy 类型检查"
+	@echo "make gates    提交前必过(ruff + mypy + 全量测试)"
+	@echo "make hooks    装 git 钩子(pre-commit: ruff / pre-push: make gates)"
+	@echo "make numbers  重算并回填 README 的规模数字"
+	@echo "make requirements  由 pyproject.toml 重新生成 requirements.txt"
+	@echo "make format   可选: ruff format(会重排大量文件, 慎用)"
 	@echo "make cov      带覆盖率跑测试"
 	@echo "make serve    本机起服务(不用 Docker)"
 	@echo "make probe    探存活/就绪/指标"
@@ -32,10 +39,28 @@ test:            ## 全量测试
 	$(PY) -m pytest -q
 
 lint:            ## ruff 静态检查
-	$(PY) -m ruff check src tests
+	$(PY) -m ruff check src tests scripts
 
 typecheck:       ## mypy 类型检查
 	$(PY) -m mypy src
+
+gates:           ## 提交前必过：ruff + mypy + 全量测试（等价 CI 的 lint/test 腿）
+	$(PY) -m ruff check src tests scripts
+	$(PY) -m mypy src
+	$(PY) -m pytest -q
+
+hooks:           ## 装 git 钩子（pre-commit: ruff 变更文件；pre-push: make gates）
+	git config core.hooksPath scripts/git-hooks
+	@echo "已启用 scripts/git-hooks：pre-commit 跑 ruff，pre-push 跑 make gates"
+
+numbers:         ## 重算并回填 README 的规模数字（由 tests/test_project_meta.py 把关）
+	$(PY) scripts/readme_counts.py
+
+requirements:    ## 由 pyproject.toml 重新生成 requirements.txt（单一事实源）
+	$(PY) scripts/gen_requirements.py
+
+format:          ## 可选：ruff format（仓库当前未统一格式，会重排约 170 个文件）
+	$(PY) -m ruff format src tests
 
 cov:             ## 带覆盖率跑测试
 	$(PY) -m pytest -q --cov=src/data_dog --cov-report=term-missing

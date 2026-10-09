@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """演示：把生成的声明式检测算子真正跑起来。
 
 读 operators/generated/*.yaml → 对一个部件的遥测（这里用 mock 的一条）
@@ -10,6 +9,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+
 import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
