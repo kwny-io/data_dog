@@ -161,14 +161,22 @@ def _label(rec: dict) -> dict:
 
 
 def wilson_ci(hit: int, n: int, z: float = 1.96) -> tuple[float, float]:
-    """Wilson score 95% 置信区间（小样本/极端比例下比正态近似更稳）。"""
+    """Wilson score 95% 置信区间（小样本/极端比例下比正态近似更稳）。
+
+    极端比例（0 命中 / 全命中）直接返回精确端点：数学上命中 0 次时下界恰为 0、
+    全命中时上界恰为 1，但 `max(0.0, center - half)` 会留下 ~1e-17 的浮点残差
+    （实测 `wilson_ci(0, 11)` 的下界是 2.8e-17），破坏"下界 ≤ 点估计"这条不变量
+    ——属性测试抓到的就是它。这里按定义取精确端点，而不是靠容差掩盖。
+    """
     if n == 0:
         return (0.0, 0.0)
     p = hit / n
     denom = 1 + z * z / n
     center = (p + z * z / (2 * n)) / denom
     half = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / denom
-    return (max(0.0, center - half), min(1.0, center + half))
+    lo = 0.0 if hit == 0 else max(0.0, center - half)
+    hi = 1.0 if hit == n else min(1.0, center + half)
+    return (lo, hi)
 
 
 def run_dataset_eval(manifest_dir: str, n: int = 2000, seed: int = 7,

@@ -62,8 +62,8 @@ requirements:    ## 由 pyproject.toml 重新生成 requirements.txt（单一事
 format:          ## 可选：ruff format（仓库当前未统一格式，会重排约 170 个文件）
 	$(PY) -m ruff format src tests
 
-cov:             ## 带覆盖率跑测试
-	$(PY) -m pytest -q --cov=src/data_dog --cov-report=term-missing
+cov:             ## 带覆盖率跑测试（阈值与 CI 一致）
+	$(PY) -m pytest -q --cov=src/data_dog --cov-report=term-missing --cov-fail-under=82
 
 serve:           ## 本机起服务
 	$(PY) -m data_dog.service

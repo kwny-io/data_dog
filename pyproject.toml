@@ -113,6 +113,7 @@ filterwarnings = [
 # postgres 标记：默认跳过，需 DD_TEST_PG_URL 指向真实 PG 才跑（CI 的 pg job）。
 markers = [
     "postgres: 需要真实 PostgreSQL 的集成测试（设 DD_TEST_PG_URL 才运行）",
+    "redis: 需要真实 Redis 的集成测试（设 DD_TEST_REDIS_URL 才运行）",
 ]
 
 [tool.ruff]

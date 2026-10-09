@@ -10,8 +10,17 @@ fn**。这正是 `mutate` 契约要求的"冲突则重试 fn"。
 为什么乐观锁而非 Lua 脚本：fn 是任意 Python（补令牌、按时间窗合并分组），
 无法在 Lua 里执行。乐观重试在按设备/部件的 key 上冲突率低（不同 key 不互相
 干扰）；但**同一个 key 被多个写者高并发抢**时（如限流桶），无退避的同步重试会
-互相反复打断（活锁）——实测 16 并发即 100% 失败，故重试用"退避 + 抖动 +
-次数/时间双上限"而非固定次数（见 `_RETRY_*`）。
+互相反复打断（活锁）——实测 16 并发即 100% 失败。
+
+两级并发控制（这是最终形态）
+--------------------------
+1. **同进程按 key 串行**（`_local_lock`）：本进程内多个线程抢同一 key 时，它们
+   互相作废 WATCH 属于"自己打自己"。用本地锁排队后，进程内竞争者不再产生任何
+   WATCH 冲突（实测 24 线程从"100% 抛错"变成"24/24 全部成功"）。锁表按 FIFO 淘汰，
+   淘汰只会让锁退化成"没锁"（正确性仍由 WATCH 兜住），不会出错。
+2. **跨进程/跨副本仍靠 WATCH 乐观锁 + 重试**：退避 + 抖动 + 次数/时间双上限
+   （见 `_RETRY_*`）。这一层才是为真实多副本准备的，冲突率低但必须失败关闭：
+   预算耗尽就抛错，绝不静默丢更新。
 
 为什么限流特别适合 Redis：每条遥测都要一次 check-and-decrement，PG 的每条
 一次 DB 往返会成为热路径；Redis 原生 TTL + 内存原子操作是 sub-ms。窗口/候选
@@ -21,7 +30,9 @@ from __future__ import annotations
 
 import json
 import random
+import threading
 import time
+from collections import OrderedDict
 from collections.abc import Callable
 from functools import lru_cache
 from typing import Any
@@ -35,10 +46,31 @@ from .base import StateStore
 # 为什么还要留次数上限：慢环境（覆盖率插桩、CI 机器、被其它线程挤 GIL）下单次
 # 尝试的耗时可放大一个量级，纯墙钟预算会让"只是慢"变成"报错"。次数上限保证
 # 这类环境下仍有足够尝试次数，时间上限则把最坏阻塞钉住。
+# 注：这一层只面对**跨进程**冲突（进程内已由 `_local_lock` 排队），故预算不必很大。
 _RETRY_MAX_ATTEMPTS = 512      # 尝试次数上限
 _RETRY_DEADLINE_S = 5.0        # 墙钟上限（正常冲突在 µs 级解决，两者都只在病态争用下才触及）
 _RETRY_BASE_SLEEP_S = 0.0005   # 退避基数（小退避 = 更频繁让出 GIL，慢环境下进展更快）
 _RETRY_MAX_SLEEP_S = 0.003     # 单次退避上限，保住 Redis 热路径的量级
+
+# 进程内按 key 的锁表：FIFO 淘汰，避免 key 无限增长（淘汰是安全的：锁没了就退化成
+# "无本地锁"，WATCH 仍保证正确性，只是多几次重试）。
+_LOCAL_LOCKS_GUARD = threading.Lock()
+_LOCAL_LOCKS: OrderedDict[str, threading.Lock] = OrderedDict()
+_LOCAL_LOCKS_MAX = 4096
+
+
+def _local_lock(key: str) -> threading.Lock:
+    """取该 key 的进程内锁（同进程竞争者在此排队，不再互相作废 WATCH）。"""
+    with _LOCAL_LOCKS_GUARD:
+        lock = _LOCAL_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _LOCAL_LOCKS[key] = lock
+            if len(_LOCAL_LOCKS) > _LOCAL_LOCKS_MAX:
+                _LOCAL_LOCKS.popitem(last=False)
+        else:
+            _LOCAL_LOCKS.move_to_end(key)
+        return lock
 
 
 @lru_cache(maxsize=1)
@@ -89,6 +121,14 @@ class RedisStateStore(StateStore):
         return None if val == {} else val
 
     def mutate(self, key: str, fn: Callable[[Any], tuple[Any, Any]]) -> Any:
+        # 两级并发控制的第一级：同进程按 key 排队（见模块 docstring）。
+        # 同进程多线程抢同一 key 时，它们互相作废 WATCH 属于"自己打自己"——实测
+        # 24 线程在慢环境下会把重试预算耗光；排队后进程内不再产生 WATCH 冲突。
+        with _local_lock(key):
+            return self._mutate_optimistic(key, fn)
+
+    def _mutate_optimistic(self, key: str, fn: Callable[[Any], tuple[Any, Any]]) -> Any:
+        """第二级：跨进程/跨副本用 WATCH 乐观锁 + 退避重试（预算耗尽则失败关闭）。"""
         client = self._client
         deadline = time.monotonic() + _RETRY_DEADLINE_S
         attempt = 0
