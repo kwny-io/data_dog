@@ -1,0 +1,80 @@
+"""`telemetry` 域端点：从 create_app 内联定义按域拆出。
+
+函数体一字未改，只把 `@router.x` 换成 `@router.x`；装配在 service/app.py。
+"""
+from __future__ import annotations
+
+from typing import Any
+
+from fastapi import APIRouter, Depends, HTTPException, Response
+
+from ...core import metrics
+from ...storage import repository as repo
+from ...storage.db import session_scope
+from ..deps import require_tenant_and_device
+from ..runtime import _log, _state, _stats_dict
+
+router = APIRouter()
+
+
+@router.post("/v1/telemetry", tags=["ingest"])
+def ingest_telemetry(
+    payload: dict[str, Any],
+    response: Response,
+    auth: dict[str, Any] = Depends(require_tenant_and_device),
+) -> dict[str, Any]:
+    """接收一批原始日志，跑数据面，产出候选并落库。
+
+    正文格式：
+        {"events": [ {原始日志}, ... ]}
+    身份来自请求头（X-Tenant-Id / X-Device-Sn），正文里若有同名字段一律被忽略。
+    """
+    events = payload.get("events")
+    if not isinstance(events, list) or not events:
+        raise HTTPException(status_code=422, detail="正文需含非空 'events' 数组")
+    if len(events) > 1000:
+        raise HTTPException(status_code=422, detail="单批 events 上限 1000 条")
+
+    plane = _state.new_plane()
+    if plane is None:
+        _state.rejected_requests += 1
+        raise HTTPException(status_code=503,
+                            detail=f"算子绑定不可用：{_state.build_error}")
+
+    _state.request_count += 1
+    _log.info("接入请求", extra={
+        "tenant_id": auth["tenant_id"], "device_sn": auth["device_sn"],
+        "events": len(events),
+    })
+    result = plane.process_batch(events, auth)
+    metrics.observe_data_plane(result.stats)
+    metrics.candidates_created_total.inc(len(result.candidates))
+    _log.info("接入完成", extra={
+        "ingested": result.stats.ingested, "resolved": result.stats.resolved,
+        "rejected": result.stats.rejected, "candidates": len(result.candidates),
+    })
+
+    # 落库（幂等 upsert）：规范化遥测 + 候选
+    persisted = {"telemetry": 0, "candidates": 0}
+    try:
+        with session_scope() as s:
+            persisted["telemetry"] = repo.save_telemetry(
+                s, result.normalized, tenant_id=auth["tenant_id"])
+            persisted["candidates"] = repo.save_candidates(
+                s, result.candidates, tenant_id=auth["tenant_id"])
+    except Exception as e:                        # noqa: BLE001
+        # 落库失败不吞掉已算出的结果，但要在响应里标明（不静默降级）
+        response.status_code = 207
+        return {
+            "ok": False, "error": "persist_failed",
+            "detail": f"{type(e).__name__}: {e}",
+            "stats": _stats_dict(result),
+            "candidates": [c.to_dict() for c in result.candidates],
+        }
+
+    return {
+        "ok": True,
+        "stats": _stats_dict(result),
+        "persisted": persisted,
+        "candidates": [c.to_dict() for c in result.candidates],
+    }

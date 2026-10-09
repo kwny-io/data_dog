@@ -127,6 +127,9 @@ ignore = ["E501"]        # 行长由 formatter/line-length 管理
 [tool.ruff.lint.per-file-ignores]
 # Typer 的官方写法就是在默认值里调用 typer.Option/Argument（B008 会误报）
 "src/data_dog/cli.py" = ["B008"]
+# FastAPI 同理：官方写法就是在参数默认值里调用 Depends/Header/Query（B008 会误报）
+"src/data_dog/service/routes/*.py" = ["B008"]
+"src/data_dog/service/deps.py" = ["B008"]
 
 [tool.mypy]
 # 用 3.12 做类型检查：numpy>=2.5 的 .pyi 用了 PEP 695（`type` 语句），

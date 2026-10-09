@@ -134,7 +134,9 @@ def test_failed_job_has_error_code(client, monkeypatch):
     import sys
 
     from fastapi import HTTPException
-    mod = sys.modules["data_dog.service.app"]
+    # 构造点在 `service/runtime.py`（拆分后 `service/app.py` 只做装配），
+    # 故 patch 目标要跟着走——patch 到 app 的命名空间不会影响 runtime 的调用。
+    mod = sys.modules["data_dog.service.runtime"]
     monkeypatch.setattr(mod, "_build_investigation_provider",
                         lambda should_cancel=None: (_ for _ in ()).throw(
                             HTTPException(status_code=503, detail="no credential")))
