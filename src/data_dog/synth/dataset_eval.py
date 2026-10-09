@@ -230,7 +230,9 @@ def _real_provider():
 
 def main():
     try:                       # Windows 控制台默认 GBK，装不下 ⚠ 等字符
-        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        out = sys.stdout
+        if hasattr(out, "reconfigure"):          # 被重定向的 stdout 替身无此方法
+            out.reconfigure(encoding="utf-8", errors="replace")
     except Exception:
         pass
     p = argparse.ArgumentParser(description="MuJoCo 数据集 Agent 评估")

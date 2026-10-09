@@ -264,7 +264,9 @@ def summarize_synth(results: list[dict]) -> dict:
 def main():
     import argparse
     try:                       # Windows 控制台默认 GBK，装不下 ✓ / ⚠ 等字符
-        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        out = sys.stdout
+        if hasattr(out, "reconfigure"):          # 被重定向的 stdout 替身无此方法
+            out.reconfigure(encoding="utf-8", errors="replace")
     except Exception:
         pass
     parser = argparse.ArgumentParser(description="data_dog 合成数据 ground truth 评估")

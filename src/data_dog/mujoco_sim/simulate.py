@@ -12,8 +12,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
+
+if TYPE_CHECKING:                          # 仅供类型检查；运行期在函数内惰性导入 mujoco
+    from mujoco import MjModel
 
 # model 文件相对本仓库根
 _REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -80,7 +84,7 @@ def _pd_target(t, joint_name: str, dt: float) -> float:
 #   原因：工况组合 = payload×slope×wear_friction×wear_coulomb = 4×5×3×3 = 180 种，
 #   若按组合缓存会囤上百个 MjModel（每个 ~45MB）→ 每 worker GB 级内存 + 换页，实测
 #   8~12 worker 直接 OOM。改为"单基础模型 + 每次小数组重置"，每进程只占 ~1 个模型。
-_MODEL_CACHE: dict[str, object] = {}
+_MODEL_CACHE: dict[str, MjModel] = {}
 _MODEL_BASELINE: dict[str, dict] = {}
 
 
@@ -158,7 +162,8 @@ def simulate(
     """
     import mujoco  # 本地导入，允许 mujoco 未安装时其它模块正常 import
 
-    from .gait import GaitParams, gains as _gains, joint_targets, is_fallen
+    from .gait import GaitParams, is_fallen, joint_targets
+    from .gait import gains as _gains
 
     if gait is None:
         # 兜底：退回旧的站立微摆口径（保真度最低档）

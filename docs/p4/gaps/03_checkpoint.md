@@ -12,7 +12,7 @@
 | StateStore 接口 | `state/base.py:30-71` | `mutate(key,fn)`、`get(key)`；可选 `delete/close`；`rate_limit_allow`（令牌桶，基于 mutate） |
 | memory 后端 | `state/memory.py` | 全局锁 dict |
 | PG 后端 | `state/pg.py` | `state_kv` 表 + `SELECT ... FOR UPDATE` 行锁 |
-| redis 后端 | `state/redis.py` | WATCH/MULTI/EXEC 乐观重试（`_MAX_RETRIES=8`） |
+| redis 后端 | `state/redis.py` | WATCH/MULTI/EXEC 乐观重试：退避 + 抖动，**次数/时间双上限**（`_RETRY_MAX_ATTEMPTS`=512、`_RETRY_DEADLINE_S`=5s；原固定 8 次在同 key ≥16 并发下活锁，实测 100% 失败） |
 | 双层槽位 | `state/factory.py` | state / rate 可拆（`DD_STATE_BACKEND` / `DD_RATE_BACKEND`） |
 | 表结构 | `models.py:181-185` + 迁移 `20260929_0600` | `state_kv(key PK, value JSON, updated_at FLOAT)` |
 

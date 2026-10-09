@@ -22,7 +22,6 @@ from pathlib import Path
 import numpy as np
 
 from .conditions import SamplingSpec, TrialConfig, config_from_dict, make_configs
-from .gait import GaitParams
 from .simulate import simulate
 from .to_sample import to_synth_sample
 

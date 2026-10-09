@@ -21,17 +21,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
-from data_dog.agent.loop import AgentLoop
 from data_dog.mujoco_sim.to_sample import make_mujoco_batch
 from data_dog.providers.client import ChatProvider
-from data_dog.synth.evidence_source import SyntheticEvidenceSource
 from data_dog.synth.synth_eval import (
     DeterministicSynthProvider,
-    _make_candidate,
-    expected_vs_actual,
     summarize_synth,
 )
-from data_dog.tools.investigation import InvestigationTools
 
 # ground truth 期望（与 synth_eval 一致）：正常→rejected，各故障→需复核/确认
 _FAULT_EXPECTED = {

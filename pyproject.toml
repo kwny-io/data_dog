@@ -34,6 +34,9 @@ dev = [
     "ruff>=0.6.0",
     "mypy>=1.10.0",
     "types-PyYAML",
+    # 内存版 Redis：让 redis 后端的用例**离线**可跑（不装则那 1 项 skip）。
+    # 项目主打"全离线确定性"，测试依赖也一并给全，别让默认套件留残缺。
+    "fakeredis>=2.0",
 ]
 ui = [
     "streamlit>=1.30.0",
@@ -81,6 +84,11 @@ sandbox = [
 # MuJoCo 忠实仿真数据源（生成/评估百万级试验数据集；核心包不依赖它）
 sim = [
     "mujoco>=3.1",
+]
+# 算子签名加强项（P4-2）：Ed25519 验签（默认 HMAC-SHA256 用标准库，无需安装）。
+# 未装时 Ed25519 请求明确报错、绝不静默降级（见 operator_factory/signing.py）。
+signing = [
+    "cryptography>=42.0",
 ]
 
 [project.scripts]

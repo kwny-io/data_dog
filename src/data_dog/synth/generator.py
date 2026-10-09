@@ -39,6 +39,18 @@ FAULT_DEFS: dict[str, dict[str, str]] = {
 TEMP_HI_WARN = 75.0
 TEMP_HI_CRIT = 90.0
 
+# 故障注入时间窗（占整段比例）：[0.4, 0.9]。**这是故障窗的唯一权威定义**——
+# `to_sample.py` 也从这里导入，避免同一个常数在多处各写一遍（曾因此埋雷：
+# 参照窗取前半段 0–50%，与本窗 [40%,90%] 重叠，F4 偏置漏进参照被稀释、召回被压低）。
+FAULT_START_FRAC = 0.4
+FAULT_END_FRAC = 0.9
+
+# 参照（基线）窗占整段比例的上界：必须 **严格早于** 故障起点，否则故障信号会漏进
+# 参照、把"抬升"稀释掉。评估器按"故障前"取干净基线，是本数据集的**正确口径**
+# （数据本就是按 FAULT_START_FRAC 造的，检测器知道故障窗何时开始是公平的；
+# 这不改仿真/数据，只修正观测口径）。
+REF_WINDOW_END_FRAC = 0.35
+
 
 @dataclass
 class SynthGenConfig:
@@ -52,8 +64,8 @@ class SynthGenConfig:
     base_load_torque: float = 3.0           # 基底负载扭矩（N·m）
     active_fault: str | None = None      # 注入哪类故障（None=正常）
     fault_component: str = ""               # 故障作用在哪个关节名
-    fault_start_frac: float = 0.4           # 故障开始时间占比
-    fault_end_frac: float = 0.9             # 故障结束时间占比
+    fault_start_frac: float = FAULT_START_FRAC   # 故障开始时间占比
+    fault_end_frac: float = FAULT_END_FRAC       # 故障结束时间占比
 
     def __post_init__(self):
         if not self.joints:
@@ -99,11 +111,16 @@ class SynthSample:
         seg_t = arr
         seg_i = cur
         seg_tor = tor
-        ref_t = arr[: len(arr) // 2] if len(arr) > 1 else arr  # 参照=前半段
+        # 参照(基线)窗：取**故障起点之前**的一段（REF_WINDOW_END_FRAC=0.35 < FAULT_START_FRAC=0.4），
+        # 否则故障信号会漏进参照、把"抬升"稀释掉。旧口径取前半段(0–50%)，与 40% 起的
+        # 注入窗重叠，是 F4 召回被压低的根因（详见 docs/mujoco_dataset.md §6）。
+        n = len(arr)
+        ref_hi = int(n * REF_WINDOW_END_FRAC) if n > 1 else n
+        ref_t = arr[:ref_hi] if n > 1 else arr
         end_sec = int(round(minute * 60 + len(arr) * self.dt))
         end_m, end_s = divmod(end_sec, 60)
-        # 参照电流：用前半段有效点的均值（排除故障期）
-        ref_cur = cur[: len(cur) // 2]
+        # 参照电流：用故障前基线段的有效点均值（排除故障期与丢包点）
+        ref_cur = cur[:ref_hi]
         ref_cur = ref_cur[~np.isnan(ref_cur)] if np.isnan(ref_cur).any() else ref_cur
         loss = 1.0 - float(np.nanmean(v)) if len(v) else 0.0
         return {

@@ -14,8 +14,8 @@
 --------
 - 拓扑表是**人工维护**的（对齐 A7 知识导入的做法）：真实车队部件拓扑可能更
   复杂/可变，这里给的是结构与接口，真实拓扑需按机型录入。
-- 仅覆盖当前白名单内的 5 个部件；未知 ref 不硬塞（返回空 / None），由调用方
-  决定如何标注（如 `unconfirmed`）。
+- 仅覆盖当前白名单内的 6 个部件（电池 / 主控 / 4 个电机）；未知 ref 不硬塞
+  （返回空 / None），由调用方决定如何标注（如 `unconfirmed`）。
 """
 from __future__ import annotations
 
@@ -34,7 +34,7 @@ class ComponentNode:
 
 # 唯一真相源。供电链：battery.main → controller.main → joint_motor.*
 # （电池供电 → 主控驱动板 → 各关节电机；同属 power_bus）。
-# 注意：当前白名单 5 个部件**确实同一供电域**（power_bus），故 domain 对它们
+# 注意：当前白名单 6 个部件**确实同一供电域**（power_bus），故 domain 对它们
 # 不产生区分；domain 的价值在引入其它总线（sensor_bus 等）后显现。
 TOPOLOGY: dict[str, ComponentNode] = {
     "battery.main": ComponentNode(
@@ -50,6 +50,9 @@ TOPOLOGY: dict[str, ComponentNode] = {
         domain="power_bus", kind="motor"),
     "joint_motor.front_left_knee": ComponentNode(
         ref="joint_motor.front_left_knee", parent="controller.main",
+        domain="power_bus", kind="motor"),
+    "joint_motor.front_right_knee": ComponentNode(
+        ref="joint_motor.front_right_knee", parent="controller.main",
         domain="power_bus", kind="motor"),
 }
 

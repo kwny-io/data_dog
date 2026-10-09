@@ -73,7 +73,7 @@ def to_synth_sample(
     valid = np.ones_like(temperature, dtype=float)
     # 噪声层的丢包掩码（若有）合并进来
     vmask = getattr(sim, "valid", None)
-    if vmask is not None and getattr(vmask, "size", 0):
+    if vmask is not None and getattr(vmask, "size", 0) > 0:
         valid = vmask[:, col].astype(float)
 
     n_steps = torque.shape[0]
@@ -92,10 +92,15 @@ def to_synth_sample(
         j = None
 
     if active_fault and j is not None:
-        start_t = int(n_steps * 0.4)
-        end_t = int(n_steps * 0.9)
+        from data_dog.synth.generator import (
+            DEFAULT_PARAMS,
+            FAULT_END_FRAC,
+            FAULT_START_FRAC,
+            Go2MotorModel,
+        )
+        start_t = int(n_steps * FAULT_START_FRAC)
+        end_t = int(n_steps * FAULT_END_FRAC)
         sl = slice(start_t, end_t)
-        from data_dog.synth.generator import DEFAULT_PARAMS, Go2MotorModel
         model = Go2MotorModel(DEFAULT_PARAMS)
 
         if active_fault == "F1_stall":
@@ -110,8 +115,9 @@ def to_synth_sample(
             for t in range(start_t, end_t):
                 temperature[t, j] = model.step_temp(temperature[t - 1, j], current[t, j], dt)
         elif active_fault == "F4_current_bias":
-            # 电流传感器零漂：故障窗内电流相对参照明显抬升（其余时段保持基线，
-            # 让"参照=前半段"不被污染，Agent 能看出"窗口内电流抬升"）
+            # 电流传感器零漂：故障窗内电流整体抬升（其余时段保持基线）。
+            # 注意参照窗由 generator.telemetry 取"故障前"段（REF_WINDOW_END_FRAC<FAULT_START_FRAC），
+            # 唯此才能与故障窗干净分离——旧口径参照=前半段(0–50%)与 40% 起的本窗重叠、稀释了偏置。
             current[sl, j] += 5.0 * severity
             for t in range(start_t, end_t):
                 temperature[t, j] = model.step_temp(temperature[t - 1, j], current[t, j], dt)
@@ -138,8 +144,8 @@ def to_synth_sample(
     # ---- ground truth（与 synth 一致）----
     gt = None
     if active_fault and fault_component:
-        s_sec = int(n_steps * dt * 0.4)
-        e_sec = int(n_steps * dt * 0.9)
+        s_sec = int(n_steps * dt * FAULT_START_FRAC)
+        e_sec = int(n_steps * dt * FAULT_END_FRAC)
         m1, s1 = divmod(s_sec, 60)
         m2, s2 = divmod(e_sec, 60)
         gt = {

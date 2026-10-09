@@ -24,7 +24,6 @@ from dataclasses import asdict, dataclass, field
 import numpy as np
 
 from .gait import GaitParams
-from .noise import NoiseConfig
 
 # 5 类故障 + normal
 FAULTS = ["F1_stall", "F2_temp_rise", "F3_packet_loss", "F4_current_bias", "F5_load_spike"]

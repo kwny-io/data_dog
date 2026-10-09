@@ -125,7 +125,7 @@ def infer_causal_links(
 
 - **拓扑表落在 `data_plane/topology.py`**：`ComponentNode(ref, parent, domain, kind)`
   + `TOPOLOGY` + `ancestors/children/propagate_path/domain_of/is_known/parent_of`。
-  当前 5 个部件**确实同一供电域**（`power_bus`），故 `domain` 对它们不产生区分——
+  当前 6 个部件**确实同一供电域**（`power_bus`），故 `domain` 对它们不产生区分——
   domain 的价值在引入 `sensor_bus` 等其它总线后才显现（接口已就位，表待录）。
   供电链：`battery.main → controller.main → joint_motor.*`。
 - **兼容别名保证零回归**：`correlation.COMPONENT_POWER_DOMAIN` 改为由 `TOPOLOGY`

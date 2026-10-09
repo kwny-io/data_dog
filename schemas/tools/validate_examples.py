@@ -32,6 +32,12 @@ def _load(p: Path):
 
 
 def main() -> int:
+    try:                       # Windows 控制台默认 GBK，装不下 ✅ / ❌ 等字符
+        out = sys.stdout
+        if hasattr(out, "reconfigure"):          # 被重定向的 stdout 替身无此方法
+            out.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
     failures: list[str] = []
     checked = 0
     for name, schema_file in SCHEMAS.items():
