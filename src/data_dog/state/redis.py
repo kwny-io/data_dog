@@ -23,6 +23,7 @@ import json
 import random
 import time
 from collections.abc import Callable
+from functools import lru_cache
 from typing import Any
 
 from .base import StateStore
@@ -38,6 +39,38 @@ _RETRY_MAX_ATTEMPTS = 512      # 尝试次数上限
 _RETRY_DEADLINE_S = 5.0        # 墙钟上限（正常冲突在 µs 级解决，两者都只在病态争用下才触及）
 _RETRY_BASE_SLEEP_S = 0.0005   # 退避基数（小退避 = 更频繁让出 GIL，慢环境下进展更快）
 _RETRY_MAX_SLEEP_S = 0.003     # 单次退避上限，保住 Redis 热路径的量级
+
+
+@lru_cache(maxsize=1)
+def _watch_error_class() -> type[BaseException] | None:
+    """惰性取到 `redis.exceptions.WatchError`；拿不到（未装 redis）返回 None。
+
+    为什么要惰性：redis 是**可选依赖**（`pip install data-dog[redis]`），没装时本模块
+    的 import 仍须成功（其它后端不受影响），所以顶层不能 `import redis`。这里只在第一次
+    真的判定异常时才解析，并缓存结果——一个进程内"装没装 redis"不会中途改变。
+
+    为什么还要留类名兜底、兜底何时失效
+    ----------------------------------
+    类型判定只有拿到**真类**才精确：比类名会把任何恰好叫 `WatchError` 的异常（别的库、
+    业务自定义类）都当成"事务被打断"→ 退避重试，从而吞掉真实错误。故正常路径一律
+    `isinstance(e, WatchError)`；只有**未装 redis**（本函数返回 None）时才退回类名比对。
+    此时的已知失效条件：异常来自非 redis 客户端、且类名恰好是 `WatchError`，仍会被误判为
+    冲突（这是旧代码一直存在的行为，不是新增风险）。装了 redis 就走不到兜底分支。
+    """
+    try:
+        from redis.exceptions import WatchError
+    except ImportError:            # 可选依赖缺失
+        return None
+    return WatchError
+
+
+def _is_watch_error(exc: BaseException) -> bool:
+    """该异常是否表示"我们 WATCH 的 key 被别人改了"（→ 可退避重试）。"""
+    cls = _watch_error_class()
+    if cls is not None:
+        return isinstance(exc, cls)
+    # 未装 redis：没有真类可比，只能按类名兜底（失效条件见 _watch_error_class）
+    return type(exc).__name__ == "WatchError"
 
 
 class RedisStateStore(StateStore):
@@ -73,7 +106,8 @@ class RedisStateStore(StateStore):
                     return result
                 except Exception as e:      # WatchError 或 JSON 异常
                     # 事务被打断（并发写了同一 key）→ 退避后重试；其它异常上抛。
-                    if type(e).__name__ != "WatchError":
+                    # 判定走 `_is_watch_error`（真类 isinstance，未装 redis 才退回类名比对）。
+                    if not _is_watch_error(e):
                         raise
                 finally:
                     pipe.reset()

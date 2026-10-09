@@ -252,7 +252,8 @@ class WebhookChangeSource:
             return self._fetcher(self.url, self.timeout)
         import urllib.request
         data = json.dumps(payload).encode("utf-8")
-        req = urllib.request.Request(       # noqa: S310（URL 已过 validate_url）
+        # URL 已过 validate_url（仅 http/https、且拒绝环回/私有/保留地址），S310 不适用
+        req = urllib.request.Request(       # noqa: S310
             self.url, data=data,
             headers={"Content-Type": "application/json"}, method="POST")
         with urllib.request.urlopen(req, timeout=self.timeout) as resp:  # noqa: S310

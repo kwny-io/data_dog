@@ -299,3 +299,36 @@ def test_payload_inline_malformed_is_fail_closed(detector_config):
     assert norm is None
     assert e is not None and e.get("reason") == "payload_malformed"
     assert dp.stats.rejected_by_reason.get("payload_malformed") == 1
+
+
+def test_payload_ref_obfuscated_internal_hosts_denied(detector_config):
+    """混淆写法的内网 payload_ref 仍必须失败关闭（对抗面 ≥10 条见 test_ssrf_adversarial）。
+
+    单测校验函数只看"返回值"，这里补一条**穿过管线**的用例：IPv6 映射的 IPv4
+    （`[::ffff:10.0.0.5]`）与非路由地址（`0.0.0.0`、`[::1]`）都必须在校验层被拒，
+    而不是把取数决策甩给下游客户端。
+    """
+    dp = DataPlane(build_demo_resolver(detector_config))
+    refs = ["http://[::ffff:10.0.0.5]/x", "http://[::ffff:127.0.0.1]/x",
+            "http://0.0.0.0/x", "http://[::1]/x"]
+    for i, ref in enumerate(refs):
+        norm, e = dp.process_one(_raw(f"e-map{i}", payload_ref=ref, payload_inline=""), AUTH)
+        assert norm is None, f"{ref} 不得产出规范化事件"
+        assert e is not None and e.get("reason") == "payload_ref_denied", ref
+    assert dp.stats.rejected_by_reason.get("payload_ref_denied") == len(refs)
+
+
+def test_payload_ref_malformed_port_raises_current_behavior(detector_config):
+    """记录当前真实行为（**缺陷，未修**）：畸形端口让管线抛异常而非返回 denied。
+
+    `fetch.validate_url` 对 `http://host:abc/` 抛 ValueError（`p.port` 取值在 `urlparse`
+    的 try 之外），而 `_payload` 直接调用且不捕获 → 一条攻击者可控的 payload_ref 能让
+    `process_one` 抛异常（服务边界上表现为 500），而不是干净的"拒绝"。方向应是失败关闭：
+    校验函数必须把畸形端口变成 `FetchDecision(allowed=False)`。详见
+    `tests/test_ssrf_adversarial.py` 里的
+    `test_malformed_port_raises_instead_of_denying_current_behavior`。
+    """
+    dp = DataPlane(build_demo_resolver(detector_config))
+    raw = _raw("e-badport", payload_ref="http://evil.example:abc/x", payload_inline="")
+    with pytest.raises(ValueError):
+        dp.process_one(raw, AUTH)

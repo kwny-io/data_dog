@@ -70,14 +70,29 @@ def test_step_budget_disabled_by_default():
 
 # ---------------------------------------------------------------- Tier 0：墙钟超时
 
-def test_wall_clock_violation_on_large_window():
-    """超大 window 输入在极短墙钟预算下 → SandboxViolation（防单个大聚合拖死）。"""
+def test_wall_clock_violation_on_large_window(monkeypatch):
+    """超大 window 输入在极小墙钟预算下 → SandboxViolation（防单个大聚合拖死）。
+
+    为什么把时钟打桩而不是用 `wall_s=1e-9` 靠真实时钟"自然越界"：Windows 上
+    `time.monotonic()` 的粒度会让"构造预算"与"第一次检查"落在同一个 tick 里
+    （差值 0.0）→ 该用例在**负载高**时反而变成 DID NOT RAISE（实测全量跑挂、
+    单独跑必过）。改成确定性时钟后，与机器快慢和负载无关。
+    """
+    from data_dog.operator_factory import dsl
+
+    calls = {"n": 0}
+
+    def fake_clock() -> float:
+        calls["n"] += 1
+        return 0.0 if calls["n"] <= 2 else 10.0      # 首次检查在预算内，之后必然越界
+    monkeypatch.setattr(dsl.time, "monotonic", fake_clock)
+
     r = compile_rule({"rule_id": "W", "when": "window.mean(x) > 0"},
                      declared_fields=["x"])
     big = WindowContext(series={"x": [1.0] * 2_000_000})
     with pytest.raises(SandboxViolation):
-        # wall_s 极小 + max_steps 放开：逼墙钟路径生效
-        evaluate(r, {}, big, max_steps=0, wall_s=1e-9)
+        # 极小墙钟预算 + max_steps 放开：逼墙钟路径生效
+        evaluate(r, {}, big, max_steps=0, wall_s=1e-6)
 
 
 # ---------------------------------------------------------------- SandboxViolation 不被吞

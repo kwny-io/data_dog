@@ -13,7 +13,7 @@
 | | 亮点 | 证据 |
 |---|---|---|
 | 🔗 | **全链闭环，一条命令跑通** | 厂商文档 →[P1]→ 算子 →[P2]→ 候选 →[Agent]→ 报告 →[P3]→ 策略门 → SaaS 反馈，`python -m data_dog.e2e.replay_demo` |
-| 🧪 | **645 项测试，全离线确定性** | `pytest -q` → `641 passed, 4 skipped`（54 个测试文件，fake provider，无需 API Key、不联网；4 skipped 为未设 `DD_TEST_PG_URL` 的 PostgreSQL 集成用例 ×4 —— Redis 后端用例已由 `.[dev]` 里的 `fakeredis` 离线跑起来，不再 skip） |
+| 🧪 | **645 项测试，全离线确定性** | `pytest -q` → `641 passed, 4 skipped`（57 个测试文件，fake provider，无需 API Key、不联网；4 skipped 为未设 `DD_TEST_PG_URL` 的 PostgreSQL 集成用例 ×4 —— Redis 后端用例已由 `.[dev]` 里的 `fakeredis` 离线跑起来，不再 skip） |
 | 🔒 | **热路径确定性：上报不交给模型判断** | 上不上报由**确定性策略门**（四条件决策表 + 冲突消解）决定，同输入永远同结论；模型只出现在"调查报告"那一步 |
 | 🧱 | **不拿 `eval` 执行厂商字符串** | 自建**受限 DSL**：词法 → AST 解释器，无动态执行原语、函数闭集白名单、编译期类型检查 |
 | 🔍 | **诚实抽取，区分"能证实 / 待确认"** | 官方 SDK 头文件明写电机 **90°C 触发保护** → `verified`；无出处的 75°C → `unconfirmed`，**不冒充厂商事实** |
@@ -23,7 +23,7 @@
 | 📊 | **带 ground truth 的规模化评估** | **忠实 MuJoCo 数据集 10 万条**，分层抽 n=2000 跑真实 Agent：**准确率 0.818**（Wilson 95% CI 0.801–0.834）、**normal 误报率 0.064**、逐类召回一并如实报（**F4 偏置 0.43 为当前最低**）；另有 7 个评估 case（含 2 个对抗性：提示注入 / 身份伪装） |
 | 🚚 | **能交付：服务 + 容器 + HTTPS** | FastAPI（liveness / readiness 分离）+ Dockerfile + compose（含 Caddy 自动申请 HTTPS）+ Makefile |
 
-**规模**：源码 137 个 Python 文件 / 21986 行，测试 54 个文件 / 11151 行；前端 `web/` 为 Next.js 15 控制台（56 个 TS/TSX 文件）；5 份正式事件 JSON Schema；27 个 `make` 命令（另有 `help`）。
+**规模**：源码 137 个 Python 文件 / 21986 行，测试 57 个文件 / 12772 行；前端 `web/` 为 Next.js 15 控制台（56 个 TS/TSX 文件）；5 份正式事件 JSON Schema；27 个 `make` 命令（另有 `help`）。
 
 ---
 
