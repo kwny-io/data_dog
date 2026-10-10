@@ -13,7 +13,7 @@ import { humanize } from "@/lib/errors";
 import { server } from "./msw/server";
 
 describe("API client — header injection", () => {
-  it("sends X-Tenant-Id and X-Request-Id on every request", async () => {
+  it("sends X-Request-Id but **no credentials** (the server-side proxy owns those)", async () => {
     let seen: Headers | null = null;
     server.use(
       http.get("*/v1/candidates", ({ request }) => {
@@ -33,9 +33,11 @@ describe("API client — header injection", () => {
     await api.listCandidates();
 
     expect(seen).not.toBeNull();
-    // Default tenant comes from config, never a URL param.
-    expect(seen!.get("X-Tenant-Id")).toBeTruthy();
     expect(seen!.get("X-Request-Id")).toMatch(/[0-9a-f-]{8,}/i);
+    // 安全属性：浏览器侧**绝不**携带密钥或租户。`NEXT_PUBLIC_*` 会被 Next 内联进
+    // 客户端包，任何人打开 devtools 就能读到；租户由服务端代理强制指定。
+    expect(seen!.get("X-API-Key")).toBeNull();
+    expect(seen!.get("X-Tenant-Id")).toBeNull();
   });
 
   it("does not put identity in the request body", async () => {

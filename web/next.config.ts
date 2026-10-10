@@ -11,19 +11,11 @@ const config: NextConfig = {
   // （如桌面预览）写独立目录，避免两个进程抢同一份 .next 导致偶发编译错乱。
   // 正常 `npm run dev` / `npm run build` 不设该变量 → 行为完全不变。
   distDir: process.env.NEXT_DIST_DIR ?? ".next",
-  // 可选：把后端 API 反代到本机 dev server 同源（NEXT_API_PROXY=后端地址时生效）。
-  // 这样前端发同源请求、由 Next 转发到后端 → 无需后端 CORS 白名单。
-  // 仅在设了该变量时挂载；正常开发/生产（Caddy 同源）不受影响。
-  async rewrites() {
-    const target = process.env.NEXT_API_PROXY;
-    if (!target) return [];
-    return [
-      { source: "/v1/:path*", destination: `${target}/v1/:path*` },
-      { source: "/healthz", destination: `${target}/healthz` },
-      { source: "/readyz", destination: `${target}/readyz` },
-      { source: "/metrics", destination: `${target}/metrics` },
-    ];
-  },
+  // 注意：**没有** `rewrites()` 反代了。以前用 `NEXT_API_PROXY` 把 /v1/* 反代到后端，
+  // 但 rewrite **不能注入请求头**，所以密钥只能塞进浏览器（NEXT_PUBLIC_API_KEY）——
+  // 那正是被修掉的泄露（Next 会把 NEXT_PUBLIC_* 内联进客户端包）。
+  // 现在统一走 `app/api/dd/[...path]/route.ts`：服务端代理，密钥与租户来自
+  // **服务端**环境变量（DD_WEB_*），浏览器不持有任何凭据。
 };
 
 export default config;

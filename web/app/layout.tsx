@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 
 import { Providers, themeInitScript } from "@/lib/providers";
+import { resolveProxyConfig } from "@/lib/api/proxy";
 import { techInitScript } from "@/lib/tech-fields";
 import { siteOrigin } from "@/lib/site";
 import { SmoothScroll } from "@/lib/smooth-scroll";
@@ -8,6 +9,11 @@ import { AppShell } from "@/components/AppShell";
 import { ConsoleBackground } from "@/components/ConsoleBackground";
 
 import "./globals.css";
+
+// 每个请求都重新渲染：根布局要读**服务端**环境变量（DD_WEB_TENANT）来决定展示的租户。
+// 若被构建期静态化，租户会被烤进 HTML —— 改了环境变量却看不到变化，是那种"不报错但
+// 行为不对"的故障。控制台本来就是内部实时工具，SSR 的代价可以接受。
+export const dynamic = "force-dynamic";
 
 /* Fonts are declared with @font-face in globals.css and served from
  * public/fonts — see the comment there for why we self-host. */
@@ -42,6 +48,9 @@ export const metadata: Metadata = {
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
+  // 租户在**服务端**解析（DD_WEB_TENANT），只把字符串传给客户端用于展示。
+  // 浏览器不持有凭据、也不能决定租户——见 app/api/dd 与 lib/api/proxy.ts。
+  const { tenant } = resolveProxyConfig();
   return (
     <html lang="zh-CN" suppressHydrationWarning>
       <head>
@@ -53,7 +62,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       <body className="min-h-dvh antialiased">
         <ConsoleBackground />
         <SmoothScroll />
-        <Providers>
+        <Providers tenant={tenant}>
           <AppShell>{children}</AppShell>
         </Providers>
       </body>

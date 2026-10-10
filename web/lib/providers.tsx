@@ -3,8 +3,6 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
 
-import { DEFAULT_TENANT } from "./api/client";
-
 // ------------------------------------------------------------- query client
 
 function makeQueryClient(): QueryClient {
@@ -23,17 +21,26 @@ function makeQueryClient(): QueryClient {
 
 let browserClient: QueryClient | undefined;
 
-export function Providers({ children }: { children: React.ReactNode }) {
+export function Providers({
+  children,
+  tenant,
+}: {
+  children: React.ReactNode;
+  /** 当前租户，由**服务端**（`resolveProxyConfig().tenant` → `DD_WEB_TENANT`）决定，
+   *  只用于展示。浏览器改不了它：代理会丢弃浏览器传来的 `X-Tenant-Id`。 */
+  tenant: string;
+}) {
   const client = useMemo(() => {
     if (typeof window === "undefined") return makeQueryClient();
     browserClient ??= makeQueryClient();
     return browserClient;
   }, []);
+  const tenantValue = useMemo(() => ({ tenant }), [tenant]);
 
   return (
     <QueryClientProvider client={client}>
       <ThemeProvider>
-        <TenantProvider>{children}</TenantProvider>
+        <TenantContext.Provider value={tenantValue}>{children}</TenantContext.Provider>
       </ThemeProvider>
     </QueryClientProvider>
   );
@@ -104,42 +111,23 @@ export function useTheme(): ThemeCtx {
 /** Inline script to set the theme class before first paint (no flash). */
 export const themeInitScript = `(function(){try{var t=localStorage.getItem("${THEME_KEY}")||"system";var d=t==="dark"||(t==="system"&&matchMedia("(prefers-color-scheme: dark)").matches);document.documentElement.classList.toggle("dark",d);}catch(e){}})();`;
 
-// ------------------------------------------------------------------ tenant
+// ------------------------------------------------------- 租户（只读展示）
+//
+// 这里曾有一个可写的 `TenantProvider`（localStorage 覆盖租户）+ 一个租户切换按钮。
+// **已改为只读**，原因不是"没人用"，而是它现在是错的：租户由**服务端代理**
+// 强制指定（`app/api/dd` 丢弃浏览器传来的 `X-Tenant-Id`，改用 `DD_WEB_TENANT`）。
+// 留一个浏览器侧可改的租户开关，会向读代码的人暗示"浏览器能选租户"——
+// 而在单密钥模式下，那正是租户冒充的入口，且改动其实**不会生效**（静默失效更糟）。
 
 interface TenantCtx {
+  /** 服务端决定的租户（展示用；不是可切换状态）。 */
   tenant: string;
-  setTenant: (t: string) => void;
 }
 
 const TenantContext = createContext<TenantCtx | null>(null);
 
-const TENANT_KEY = "dd-tenant";
-
-/** Tenant comes from config/session, never a URL query param (spec §2).
- *  A single fixed value today; multi-tenant switching is a backend open
- *  question (spec §9.3), so this stays a local override with a warning. */
-export function TenantProvider({ children }: { children: React.ReactNode }) {
-  const [tenant, setTenantState] = useState<string>(() => {
-    if (typeof window === "undefined") return DEFAULT_TENANT;
-    return window.localStorage.getItem(TENANT_KEY) || DEFAULT_TENANT;
-  });
-
-  const setTenant = useCallback((t: string) => {
-    const v = t.trim() || DEFAULT_TENANT;
-    setTenantState(v);
-    try {
-      window.localStorage.setItem(TENANT_KEY, v);
-    } catch {
-      /* ignore */
-    }
-  }, []);
-
-  const value = useMemo(() => ({ tenant, setTenant }), [tenant, setTenant]);
-  return <TenantContext.Provider value={value}>{children}</TenantContext.Provider>;
-}
-
 export function useTenant(): TenantCtx {
   const ctx = useContext(TenantContext);
-  if (!ctx) throw new Error("useTenant must be used within TenantProvider");
+  if (!ctx) throw new Error("useTenant must be used within Providers");
   return ctx;
 }

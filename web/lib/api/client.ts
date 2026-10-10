@@ -17,15 +17,18 @@ import type { ApiErrorCode, ApiErrorEnvelope, Page, PageParams } from "./types";
 
 // ------------------------------------------------------------------ config
 
-/** Empty string in production (same-origin behind Caddy). */
-export const API_BASE_URL = (process.env.NEXT_PUBLIC_API_BASE_URL ?? "").replace(
+/** Base path of the console's **server-side proxy** (`app/api/dd/[...path]`).
+ *
+ * Default `/api/dd` → same-origin, and the proxy attaches the API key/tenant on
+ * the server. Tests pin an absolute URL because Node's `fetch` requires one.
+ *
+ * ⚠ **Never** put a credential here. `NEXT_PUBLIC_*` is inlined into the browser
+ * bundle, which is exactly the leak this proxy exists to remove; the upstream
+ * service address and the key live in server-only `DD_WEB_*` variables. */
+export const API_BASE_URL = (process.env.NEXT_PUBLIC_API_BASE_URL ?? "/api/dd").replace(
   /\/$/,
   "",
 );
-
-export const DEFAULT_TENANT = process.env.NEXT_PUBLIC_DEFAULT_TENANT ?? "tenant-demo";
-
-const API_KEY = (process.env.NEXT_PUBLIC_API_KEY ?? "").trim();
 
 /** Default per-request timeout for ordinary reads/writes. */
 const DEFAULT_TIMEOUT_MS = 15_000;
@@ -106,8 +109,6 @@ export class TimeoutError extends Error {
 // ------------------------------------------------------------- header set
 
 export interface RequestContext {
-  tenant?: string;
-  apiKey?: string;
   /** Telemetry only. The backend identifies the device from this header; it is
    *  never sent on reads, and never placed in the body (§2, identity in
    *  headers only). */
@@ -120,12 +121,10 @@ function buildHeaders(
   hasBody = false,
 ): Headers {
   const h = new Headers(extra);
-  // X-Tenant-Id is required by the backend; a missing tenant is a 401 even on
-  // reads. It comes from config/session, never from a URL query param (§2).
-  h.set("X-Tenant-Id", ctx.tenant ?? DEFAULT_TENANT);
-  if (ctx.apiKey ?? API_KEY) {
-    h.set("X-API-Key", ctx.apiKey ?? API_KEY);
-  }
+  // ⚠ No `X-API-Key` and no `X-Tenant-Id` here on purpose. Both are attached by
+  // the server-side proxy (`app/api/dd`) from server-only `DD_WEB_*` variables;
+  // anything the browser carries is readable in devtools. The proxy also forces
+  // the tenant itself, so a browser-supplied tenant could not be trusted anyway.
   // Device identity is telemetry-scoped: the backend 401s a telemetry post
   // without it, and it must not leak onto reads.
   if (ctx.deviceSn) {

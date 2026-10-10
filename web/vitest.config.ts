@@ -15,12 +15,11 @@ export default defineConfig({
     setupFiles: ["./tests/setup.ts"],
     include: ["tests/**/*.test.{ts,tsx}"],
     css: false,
-    // Node's fetch needs an absolute URL. The app uses a relative base in
-    // production (same-origin behind Caddy); in tests we pin a host so msw
-    // can intercept.
+    // Node's fetch needs an absolute URL; the app itself uses the **relative**
+    // console proxy path (`/api/dd`) so the browser never holds credentials.
+    // Tests pin a host so msw can intercept.
     env: {
-      NEXT_PUBLIC_API_BASE_URL: "http://localhost:8000",
-      NEXT_PUBLIC_DEFAULT_TENANT: "tenant-test",
+      NEXT_PUBLIC_API_BASE_URL: "http://localhost:3000/api/dd",
     },
   },
 });
