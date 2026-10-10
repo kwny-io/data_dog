@@ -15,6 +15,7 @@
 """
 from __future__ import annotations
 
+import json
 import os
 
 
@@ -84,6 +85,42 @@ def log_json() -> bool:
 def api_key() -> str:
     """对外暴露时**必须**设置的静态密钥；空串 = 不校验（本地开发）。"""
     return _get("DD_API_KEY")
+
+
+def tenant_api_keys() -> dict[str, str]:
+    """租户绑定密钥表 `{tenant_id: key}`（`DD_TENANT_KEYS`，JSON 对象）。
+
+    为什么需要它（补一个真实漏洞）
+    ----------------------------
+    `DD_API_KEY` 是**全局单一**密钥，而租户身份来自调用方自报的 `X-Tenant-Id` 请求头。
+    于是**任何持密钥者改一个 header 就能以任意租户身份读写**——实测：同一把密钥
+    写 `X-Tenant-Id: victim-a` 与 `victim-b` 均 200。RLS 与复合主键防的是
+    "代码写错导致串租户"，防不了"持密钥者主动冒充"。
+
+    配了本表即进入**租户绑定模式**：所持密钥必须与请求头声称的租户绑定一致，
+    否则 403（未知租户与密钥不符返回同一状态码，避免租户枚举）。
+    未配（默认）= 保持原有单密钥行为，向后兼容（本地开发/评测不受影响）。
+
+    解析失败**绝不静默降级**（降级 = 退回单密钥模式 = 漏洞照旧）：抛 `ValueError`，
+    由服务边界转 503，失败关闭。
+    """
+    raw = _get("DD_TENANT_KEYS").strip()
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"DD_TENANT_KEYS 不是合法 JSON：{e}") from e
+    if not isinstance(data, dict) or not data:
+        raise ValueError("DD_TENANT_KEYS 必须是非空 JSON 对象 {租户id: 密钥}")
+    out: dict[str, str] = {}
+    for tenant, key in data.items():
+        if not isinstance(tenant, str) or not tenant.strip():
+            raise ValueError("DD_TENANT_KEYS 的租户 id 必须是非空字符串")
+        if not isinstance(key, str) or not key:
+            raise ValueError(f"DD_TENANT_KEYS[{tenant!r}] 的密钥必须是非空字符串")
+        out[tenant] = key
+    return out
 
 
 def cors_origins() -> list[str]:

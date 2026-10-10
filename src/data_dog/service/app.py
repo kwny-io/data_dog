@@ -189,20 +189,70 @@ async def _request_context(request, call_next):
                              response.status_code, duration_ms / 1000.0)
     return response
 async def _api_key_guard(request, call_next):
-    """设了 DD_API_KEY 才校验：所有非探针路径都必须带正确的 X-API-Key。
+    """鉴权守卫：**租户绑定模式**（设了 `DD_TENANT_KEYS`）优先，否则用全局单密钥。
 
-    默认不设 → 不校验（本地开发/评测不受影响）。对外暴露时**必须**设置。
+    两种模式
+    --------
+    1. **租户绑定模式**（推荐对外部署用）：请求带 `X-Tenant-Id` 时，`X-API-Key` 必须
+       等于 `DD_TENANT_KEYS` 里**该租户**绑定的密钥。于是"一把密钥冒充所有租户"不再成立：
+       持 A 的密钥去声称 B → 403（未知租户与密钥不符返回同一状态码，避免租户枚举）。
+       不带租户头的路径（`/metrics`、`/v1/state/*` 运维面）仍走全局密钥，与既有行为一致。
+    2. **全局单密钥模式**（默认，未配 `DD_TENANT_KEYS`）：所有非探针路径都要带正确的
+       `X-API-Key`；**不设** `DD_API_KEY` = 不校验（本地开发/评测）。
+
+    为什么保留模式 2：向后兼容——既有部署、评测、CI 都按单密钥跑，切换不能是"静默改变
+    语义"。为什么必须有模式 1：模式 2 下租户身份完全由调用方自报，鉴权只回答"你是不是
+    某个合法调用方"，回答不了"你是哪个租户"。配错 `DD_TENANT_KEYS`（JSON 坏）→ 503
+    失败关闭，**绝不退回模式 2**。
     """
-    expected = settings.api_key()
-    if expected and request.url.path not in _PUBLIC_PATHS:
-        if not _api_key_ok(_extract_api_key(request), expected):
+    if request.url.path in _PUBLIC_PATHS:
+        return await call_next(request)
+
+    try:
+        tenant_keys = settings.tenant_api_keys()
+    except ValueError as e:                    # 配置错 → 失败关闭，不降级为单密钥
+        _state.rejected_requests += 1
+        return JSONResponse(
+            status_code=503,
+            content=_error_body(ToolErrorCode.UNAVAILABLE, str(e),
+                                reason="tenant_keys_misconfigured"),
+        )
+
+    provided = _extract_api_key(request)
+    if tenant_keys:
+        tenant = request.headers.get("X-Tenant-Id", "")
+        if tenant:
+            bound = tenant_keys.get(tenant)
+            if not bound or not _api_key_ok(provided, bound):
+                _state.rejected_requests += 1
+                return JSONResponse(
+                    status_code=403,
+                    content=_error_body(ToolErrorCode.DENIED,
+                                        "密钥与所声称的租户不匹配",
+                                        reason="tenant_key_mismatch"),
+                )
+            return await call_next(request)
+        # 无租户头 → 非租户作用域，仍用全局密钥兜（未设全局密钥则拒绝）
+        expected = settings.api_key()
+        if not expected or not _api_key_ok(provided, expected):
             _state.rejected_requests += 1
             return JSONResponse(
                 status_code=401,
                 content=_error_body(ToolErrorCode.DENIED,
-                                    "缺少或错误的 X-API-Key",
+                                    "非租户作用域端点需要 X-API-Key",
                                     reason="unauthorized"),
             )
+        return await call_next(request)
+
+    expected = settings.api_key()
+    if expected and not _api_key_ok(provided, expected):
+        _state.rejected_requests += 1
+        return JSONResponse(
+            status_code=401,
+            content=_error_body(ToolErrorCode.DENIED,
+                                "缺少或错误的 X-API-Key",
+                                reason="unauthorized"),
+        )
     return await call_next(request)
 
 
