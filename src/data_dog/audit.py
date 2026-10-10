@@ -49,6 +49,7 @@ ACTION_AUTH_DENIED = "auth.denied"
 ACTION_OPS_ACCESS = "ops.access"
 ACTION_AUDIT_READ_ALL = "audit.read_all"
 ACTION_KEYRING_READ = "keyring.read"
+ACTION_RETENTION_PURGE = "retention.purge"
 
 OUTCOME_ALLOWED = "allowed"
 OUTCOME_DENIED = "denied"

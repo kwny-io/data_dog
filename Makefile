@@ -6,7 +6,7 @@ PY ?= $(shell if [ -x .venv/bin/python ]; then echo .venv/bin/python; \
               else echo python; fi)
 PORT ?= 8000
 
-.PHONY: help gates hooks numbers requirements format install test lint typecheck cov serve probe ingest e2e ui bench up up-prod down down-prod logs ps health clean helm-lint verify-chart k8s-e2e
+.PHONY: help gates hooks numbers requirements format install test lint typecheck cov serve probe ingest e2e ui bench up up-prod down down-prod logs ps health clean helm-lint verify-chart k8s-e2e retention
 
 help:            ## 显示所有命令
 	@echo "make install  安装依赖(含服务)"
@@ -22,6 +22,7 @@ help:            ## 显示所有命令
 	@echo "make serve    本机起服务(不用 Docker)"
 	@echo "make probe    探存活/就绪/指标"
 	@echo "make bench    P4-8 软实时基准(起服务→压测→出报告)"
+	@echo "make retention 数据保留清理(默认 dry-run; FORCE=1 真删)"
 	@echo "make ingest   发一条演示日志(过温)"
 	@echo "make up       Docker 起整套(应用+PostgreSQL)"
 	@echo "make down     停 Docker 整套"
@@ -87,6 +88,9 @@ e2e:             ## 端到端整链回放
 
 bench:           ## P4-8 软实时基准（一键：起服务→loadgen→报告）
 	bash tools/bench.sh
+
+retention:       ## 数据保留清理（④）：默认 dry-run 只统计，FORCE=1 才真删
+	$(PY) -m data_dog.retention $(if $(FORCE),,--dry-run)
 
 ui:              ## 起 Streamlit 演示台
 	$(PY) -m streamlit run ui/app.py

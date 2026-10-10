@@ -310,6 +310,35 @@ def _parse_ts(tenant: str, idx: int, field: str, raw: Any) -> float | None:
     return dt.timestamp()
 
 
+def retention_days() -> dict[str, int]:
+    """各表的保留天数（`DD_RETENTION_*`）。**0 = 关闭该表的清理**（默认不动）。
+
+    为什么默认值必须是"不删"而不是"删"
+    ----------------------------------
+    清理是**破坏性、不可逆**的动作。默认值决定"忘了配会不会出事"：把某个默认值设成
+    正数，就等于**默认销毁**那类数据。所以这里按"删了能不能复原"分档：
+
+    - **原始日志（7 天）/ 派生候选（90 天）**：可从设备重灌、且 `docs/slo.md` §6 明确
+      声明了保留期 → 默认**执行**。这是"声明了就得真的做"的那一半。
+    - **告警 + 报告 + 投递台账（0）/ 安全审计（0）**：删了**不可复原**，而且是业务/合规
+      台账本身（`slo.md` 只说审计"≥1 年"这个下界，没给上界）→ 默认**不删**，要删必须
+      由人显式开启。审计尤其如此：销毁审计记录**本身就是**合规风险。
+    - **已终态调查 job（7 天）**：`docs/delivery.md` 的差距表点名"job 表仍需保留策略"，
+      且 job 只是一次执行的记录（结论已落在 `reports`/`alerts`，删除不丢真相）→ 默认执行。
+
+    单位是天；`now - days*86400` 即截止时间。时间列一律是 ingestion 侧的 epoch 秒
+    （`created_at` / `ts` / `finished_at`）——用**事件时间**做保留会被乱序/补传的历史数据
+    绕过（一条 2019 年的时间戳会让它永远"年轻"）。
+    """
+    return {
+        "telemetry_events": max(0, _get_int("DD_RETENTION_RAW_DAYS", default=7)),
+        "candidates": max(0, _get_int("DD_RETENTION_CANDIDATE_DAYS", default=90)),
+        "investigation_job": max(0, _get_int("DD_RETENTION_JOB_DAYS", default=7)),
+        "alerts": max(0, _get_int("DD_RETENTION_ALERT_DAYS", default=0)),
+        "audit_log": max(0, _get_int("DD_RETENTION_AUDIT_DAYS", default=0)),
+    }
+
+
 def cors_origins() -> list[str]:
     """允许的跨源来源（逗号分隔）。空列表 = 不挂载 CORS 中间件（同源）。"""
     raw = _get("DD_CORS_ORIGINS")

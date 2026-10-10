@@ -1,0 +1,269 @@
+"""数据保留与清理作业（④）：把 `docs/slo.md` §6 声明的保留期**真的执行掉**。
+
+为什么需要它
+-----------
+§6 声明了"原始日志 7 天 / 规范化指标 90 天 / 审计记录 ≥ 1 年"，但在此之前**没有任何
+清理路径**——声明只活在文档里：表的体积只增不减，"保留 7 天"实际是"保留到磁盘满"。
+企业采购问的正是"你说了保留 N 天，**谁在删**、删的依据是什么、删了有没有留痕"。
+
+三条设计纪律
+-----------
+1. **破坏性动作默认关闭**。见 `settings.retention_days()`：原始日志/派生候选/已终态 job
+   默认执行（可重灌、且文档已声明）；**告警台账与安全审计默认 0 = 不删**，要删必须显式
+   开启——审计"只增不改"是它的全部价值，销毁审计本身是合规风险。
+2. **有界批次，不是一条大 DELETE**。逐批 `batch_size` 行、最多 `max_batches` 批，
+   每批一个短事务：一条 `DELETE WHERE ts < cutoff` 打在大表上会长时间持锁、把
+   热路径的写入堵住（本项目已经因为"同步落库排队"吃过 P99 的亏，见
+   `docs/write_path_batching.md`）。批次数用满即停并**如实标记 `capped`**——
+   这一轮没清完，下一轮继续，而不是"为了清完把库锁死"。
+3. **跨租户必须走 `session_scope(system=True)`**。清理是系统级动作，要跨所有租户删；
+   在 PG 上启用 RLS 后，不带系统扫描标志的会话**只看得见零行**——会静默变成"啥也没删"
+   （这正是迁移 `b7c8d9e0f1a2` 修的那类静默失效）。故这里显式走系统通道。
+
+删除留痕：真的删了东西时写一条 `retention.purge` 审计（**删了什么、按什么截止时间、
+各表多少行**）。"谁删的"与"删的依据"因此可查——审计面（①）在这里承担了
+"销毁也要留痕"的那一半。
+"""
+from __future__ import annotations
+
+import time
+from dataclasses import dataclass
+from typing import Any
+
+from . import audit, settings
+
+_SECONDS_PER_DAY = 86400.0
+
+# 终态状态闭集（与 `service/investigation_jobs.py` 写库时用的字符串一致）。
+# 只清**已终态**：`pending`/`running` 的 job 再老也不能删——那是还没干完的活。
+_TERMINAL_STATUSES = ("succeeded", "failed", "cancelled", "abandoned")
+_TERMINAL_WHERE = "status IN (" + ",".join(f"'{s}'" for s in _TERMINAL_STATUSES) + ")"
+
+
+@dataclass(frozen=True)
+class Rule:
+    """一条保留规则：哪张表、按哪个时间列、由哪个配置键管、算什么。"""
+
+    table: str
+    column: str
+    knob: str            # `settings.retention_days()` 的键（多张表可共用一个开关）
+    label: str
+    extra_where: str = ""  # 附加限定（如"只清已终态 job"）
+
+
+# 顺序即删除顺序：**子表在前、父表在后**（如 outbox/台账/反馈先于 alerts），
+# 否则外键会挡（或留下悬挂行）。
+RULES: tuple[Rule, ...] = (
+    Rule("telemetry_events", "created_at", "telemetry_events", "原始日志"),
+    Rule("candidates", "created_at", "candidates", "规范化候选（派生）"),
+    Rule("investigation_job", "finished_at", "investigation_job", "已终态调查 job",
+         _TERMINAL_WHERE),
+    Rule("reports", "created_at", "alerts", "调查报告（与告警同生命周期）"),
+    Rule("alert_outbox", "created_at", "alerts", "投递 outbox"),
+    Rule("alert_delivery", "created_at", "alerts", "投递台账"),
+    Rule("alert_feedback", "created_at", "alerts", "告警反馈"),
+    Rule("alerts", "created_at", "alerts", "告警（与证据包同生命周期）"),
+    Rule("audit_log", "ts", "audit_log", "安全审计（只增）"),
+)
+
+
+def cutoffs(*, now: float | None = None) -> dict[str, float]:
+    """各配置键的截止时间（epoch 秒）。`0 天`的键不出现——它表示"不删"。"""
+    ts = time.time() if now is None else now
+    days = settings.retention_days()
+    return {knob: ts - d * _SECONDS_PER_DAY
+            for knob, d in days.items() if d > 0}
+
+
+def plan(*, now: float | None = None) -> list[dict[str, Any]]:
+    """**只读**地算出各表"按当前配置会被删掉多少行"。
+
+    运维在真的开清理之前，靠它核对"这个截止时间删的量是不是我预期的"。
+    """
+    from sqlalchemy import func, select
+
+    from .storage.db import session_scope
+    from .storage.models import Base
+
+    ts = time.time() if now is None else now
+    days = settings.retention_days()
+    out: list[dict[str, Any]] = []
+    with session_scope(system=True) as s:
+        for rule in RULES:
+            d = days.get(rule.knob, 0)
+            if d <= 0:
+                out.append({"table": rule.table, "label": rule.label, "days": 0,
+                            "knob": rule.knob, "off": True, "would_delete": 0})
+                continue
+            cutoff = ts - d * _SECONDS_PER_DAY
+            tbl = Base.metadata.tables[rule.table]
+            cond = _condition(tbl, rule, cutoff)
+            n = s.execute(select(func.count()).select_from(tbl).where(cond)).scalar()
+            out.append({"table": rule.table, "label": rule.label, "days": d,
+                        "knob": rule.knob, "off": False, "cutoff": cutoff,
+                        "would_delete": int(n or 0)})
+    return out
+
+
+def run_once(*, now: float | None = None, batch_size: int = 500,
+             max_batches: int = 200, dry_run: bool = False) -> dict[str, Any]:
+    """跑一轮清理。返回报告（含每表删除行数、是否被批次数截断）。
+
+    `dry_run=True` 时只统计不删（等价于 `plan()` 的汇总口径），且**不写审计**。
+    """
+    from sqlalchemy import func, select
+
+    from .storage.db import session_scope
+    from .storage.models import Base
+
+    if batch_size < 1 or max_batches < 1:
+        raise ValueError("batch_size 与 max_batches 必须 ≥ 1")
+
+    ts = time.time() if now is None else now
+    days = settings.retention_days()
+    rows: list[dict[str, Any]] = []
+    total = 0
+
+    with session_scope(system=True) as s:
+        for rule in RULES:
+            d = days.get(rule.knob, 0)
+            if d <= 0:
+                rows.append({"table": rule.table, "label": rule.label, "days": 0,
+                             "knob": rule.knob, "off": True, "deleted": 0,
+                             "batches": 0, "capped": False})
+                continue
+            cutoff = ts - d * _SECONDS_PER_DAY
+            tbl = Base.metadata.tables[rule.table]
+            cond = _condition(tbl, rule, cutoff)
+
+            if dry_run:
+                n = int(s.execute(
+                    select(func.count()).select_from(tbl).where(cond)).scalar() or 0)
+                rows.append({"table": rule.table, "label": rule.label, "days": d,
+                             "knob": rule.knob, "off": False, "cutoff": cutoff,
+                             "deleted": 0, "would_delete": n, "batches": 0,
+                             "capped": False})
+                total += n
+                continue
+
+            deleted, batches = _purge(s, tbl, cond, batch_size, max_batches)
+            capped = batches >= max_batches
+            rows.append({"table": rule.table, "label": rule.label, "days": d,
+                         "knob": rule.knob, "off": False, "cutoff": cutoff,
+                         "deleted": deleted, "batches": batches, "capped": capped})
+            total += deleted
+
+    report = {"ok": True, "now": ts, "dry_run": dry_run, "batch_size": batch_size,
+              "max_batches": max_batches, "total": total, "tables": rows}
+
+    # 真的删了东西才留痕：空跑不留痕（否则周期性任务会把审计刷成噪声）。
+    if not dry_run and total > 0:
+        audit.record(action=audit.ACTION_RETENTION_PURGE,
+                     outcome=audit.OUTCOME_ALLOWED, target="retention",
+                     reason=f"按保留期清理，共删除 {total} 行",
+                     detail={"batch_size": batch_size, "max_batches": max_batches,
+                             "total_deleted": total,
+                             "tables": [{"table": r["table"], "days": r["days"],
+                                         "deleted": r["deleted"],
+                                         "capped": r["capped"]}
+                                        for r in rows if r["deleted"]]})
+    return report
+
+
+def _condition(tbl: Any, rule: Rule, cutoff: float) -> Any:
+    """构造 `列 < cutoff`（+ 可选附加限定）的条件表达式。
+
+    用 SQLAlchemy 表达式而不是拼 SQL 字符串：`extra_where` 是**代码里的常量**（不是
+    用户输入），但仍要**编译期就进 SQL**、由方言处理引号/类型，避免"今天安全、明天
+    有人把配置接到 extra_where 上"这类演化型注入。
+    """
+    from sqlalchemy import text
+
+    cond = tbl.c[rule.column] < cutoff
+    if rule.extra_where:
+        cond = cond & text(rule.extra_where)
+    return cond
+
+
+def _purge(session: Any, tbl: Any, cond: Any, batch_size: int,
+           max_batches: int) -> tuple[int, int]:
+    """有界批次删除：每批一个短事务，最多 `max_batches` 批。
+
+    为什么按主键先查后删、而不是 `DELETE ... LIMIT`：`DELETE` 的 `LIMIT` 不是标准 SQL
+    （PG 不支持；SQLite 只在编译期开了特定选项才有）。按主键列分批是**两边都成立**的
+    写法，且主键从 `Table.metadata` 取（**不硬编码**）——换了复合主键也不用改这里。
+    """
+    from sqlalchemy import delete, select, tuple_
+
+    pk = list(tbl.primary_key.columns)
+    if not pk:                                    # pragma: no cover - 本仓表都有主键
+        raise RuntimeError(f"{tbl.name} 没有主键，无法分批清理")
+
+    deleted = 0
+    batches = 0
+    while batches < max_batches:
+        keys = session.execute(select(*pk).where(cond).limit(batch_size)).all()
+        if not keys:
+            break
+        keys = [tuple(k) for k in keys]
+        if len(pk) == 1:
+            stmt = delete(tbl).where(pk[0].in_([k[0] for k in keys]))
+        else:
+            stmt = delete(tbl).where(tuple_(*pk).in_(keys))
+        deleted += int(session.execute(stmt).rowcount or 0)
+        batches += 1
+    return deleted, batches
+
+
+# ---------------------------------------------------------------- CLI
+
+def main(argv: list[str] | None = None) -> int:
+    """`python -m data_dog.retention [--dry-run] [--json]`。
+
+    做成 CLI（而不是常驻线程）：清理是**低频、可外部调度**的作业，交给 cron /
+    K8s CronJob 比在应用进程里再养一个循环更好——重启不会漏跑，多副本也不会各自跑一份
+    （真要放进服务，得先给它配单持有者租约，见 `state/lease.py` 的既有做法）。
+    """
+    import argparse
+    import json as _json
+
+    from .core.console import ensure_utf8_console
+
+    # Windows 简体中文控制台按 GBK 编码 stdout，本模块的输出含"→""（未删除）"等符号 →
+    # 不兜底会 `UnicodeEncodeError` 直接崩（CI 只跑 Linux，单测全绿也抓不到）。
+    # `python -m data_dog.retention` 是 `__main__` 路径，console_script 回调覆盖不到它，
+    # 必须在入口自己接——与仓库其余演示脚本同一口径（README「诚实边界」有记录）。
+    ensure_utf8_console()
+
+    p = argparse.ArgumentParser(description="数据保留清理作业（④）")
+    p.add_argument("--dry-run", action="store_true",
+                   help="只统计不删除（先核对量级）")
+    p.add_argument("--batch-size", type=int, default=500, help="每批删除行数")
+    p.add_argument("--max-batches", type=int, default=200, help="每表单轮最多批数")
+    p.add_argument("--json", action="store_true", help="输出 JSON（供调度器采集）")
+    args = p.parse_args(argv)
+
+    report = run_once(batch_size=args.batch_size, max_batches=args.max_batches,
+                      dry_run=args.dry_run)
+    if args.json:
+        print(_json.dumps(report, ensure_ascii=False))
+        return 0
+
+    mode = "DRY-RUN（未删除）" if args.dry_run else "已执行"
+    print(f"===== 数据保留清理：{mode} =====")
+    for r in report["tables"]:
+        if r["off"]:
+            print(f"  {r['table']:<20} 关闭（{r['knob']}=0，默认不动）")
+        elif args.dry_run:
+            print(f"  {r['table']:<20} 保留 {r['days']:>4} 天 → 将删除 "
+                  f"{r['would_delete']:>6} 行")
+        else:
+            flag = "（本轮到批数上限，未清完）" if r["capped"] else ""
+            print(f"  {r['table']:<20} 保留 {r['days']:>4} 天 → 已删除 "
+                  f"{r['deleted']:>6} 行 / {r['batches']} 批{flag}")
+    print(f"  合计：{report['total']} 行")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

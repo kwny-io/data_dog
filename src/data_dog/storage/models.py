@@ -50,7 +50,7 @@ class TelemetryEventRow(Base):
     operator_version: Mapped[str] = mapped_column(String(40), default="")
     binding_revision: Mapped[str] = mapped_column(String(120), default="")
     raw_log_ref: Mapped[str] = mapped_column(String(200), default="")
-    created_at: Mapped[float] = mapped_column(Float, default=_now)
+    created_at: Mapped[float] = mapped_column(Float, index=True, default=_now)
 
 
 class CandidateRow(Base):
@@ -72,7 +72,7 @@ class CandidateRow(Base):
     evidence: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
     evidence_refs: Mapped[list[str]] = mapped_column(JSON, default=list)
     detector_provenance: Mapped[str] = mapped_column(String(160), default="")
-    created_at: Mapped[float] = mapped_column(Float, default=_now)
+    created_at: Mapped[float] = mapped_column(Float, index=True, default=_now)
 
     __table_args__ = (
         Index("ix_cand_dev_comp", "device_sn", "component_ref"),
@@ -99,7 +99,7 @@ class ReportRow(Base):
     correlation_group_id: Mapped[str | None] = mapped_column(String(80), nullable=True)
     linked_candidate_refs: Mapped[list[str]] = mapped_column(JSON, default=list)
     model_provenance: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
-    created_at: Mapped[float] = mapped_column(Float, default=_now)
+    created_at: Mapped[float] = mapped_column(Float, index=True, default=_now)
 
 
 class AlertRow(Base):
@@ -123,7 +123,7 @@ class AlertRow(Base):
     investigation_id: Mapped[str] = mapped_column(String(120), default="")
     policy_version: Mapped[str] = mapped_column(String(40), default="")
     history: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
-    created_at: Mapped[float] = mapped_column(Float, default=_now)
+    created_at: Mapped[float] = mapped_column(Float, index=True, default=_now)
     updated_at: Mapped[float] = mapped_column(Float, default=_now, onupdate=_now)
 
 
@@ -140,7 +140,7 @@ class AlertOutboxRow(Base):
     attempts: Mapped[int] = mapped_column(Integer, default=0)
     receipt: Mapped[str] = mapped_column(String(120), default="")
     last_error: Mapped[str] = mapped_column(String(200), default="")
-    created_at: Mapped[float] = mapped_column(Float, default=_now)
+    created_at: Mapped[float] = mapped_column(Float, index=True, default=_now)
 
 
 class AlertFeedbackRow(Base):
@@ -152,7 +152,7 @@ class AlertFeedbackRow(Base):
     event_id: Mapped[str] = mapped_column(String(80), index=True)
     kind: Mapped[str] = mapped_column(String(30))
     note: Mapped[str] = mapped_column(Text, default="")
-    created_at: Mapped[float] = mapped_column(Float, default=_now)
+    created_at: Mapped[float] = mapped_column(Float, index=True, default=_now)
 
 
 class KnowledgeDocumentRow(Base):
@@ -272,7 +272,7 @@ class InvestigationJobRow(Base):
     worker_id: Mapped[str] = mapped_column(String(120), default="")
     submitted_at: Mapped[float] = mapped_column(Float, default=_now)
     started_at: Mapped[float | None] = mapped_column(Float, nullable=True)
-    finished_at: Mapped[float | None] = mapped_column(Float, nullable=True)
+    finished_at: Mapped[float | None] = mapped_column(Float, index=True, nullable=True)
 
 
 class OperatorRegistryRow(Base):
@@ -374,7 +374,7 @@ class AlertDeliveryRow(Base):
     acked_at: Mapped[float | None] = mapped_column(Float, nullable=True)
     ack_deadline: Mapped[float | None] = mapped_column(Float, nullable=True)
     last_error: Mapped[str] = mapped_column(Text, default="")
-    created_at: Mapped[float] = mapped_column(Float, default=_now)
+    created_at: Mapped[float] = mapped_column(Float, index=True, default=_now)
 
 
 class AuditLogRow(Base):
