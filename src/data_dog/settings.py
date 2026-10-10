@@ -717,6 +717,21 @@ def notify_sweep_interval_s() -> float:
     return max(1.0, _get_float("DD_NOTIFY_SWEEP_INTERVAL_S", default=15.0))
 
 
+def notify_sweep_lease_ttl_s() -> float:
+    """升级 sweeper 的**单持有者租约** TTL（秒）。默认 60s。
+
+    为什么要租约：sweeper 是进程内线程。多副本时每个副本都会扫到同一批"到期未 ack"的
+    投递行，于是**同一个值班人被重复通知**——台账按 `delivery_id`（=hash(event_id, level)）
+    去重，但**通知在去重之前就已经发出去了**（`_deliver` 是"先 send 再 upsert 台账"）。
+    租约保证同一时刻只有一个副本在扫（见 `state/lease.py` 与 `EscalationSweeper`）。
+
+    取值约束：**必须显著大于扫描间隔**，否则租约会在两轮之间过期、别的副本插进来扫，
+    又变成重复升级。故实际取值 = `max(配置值, 3 × 扫描间隔)`。
+    """
+    configured = max(1.0, _get_float("DD_NOTIFY_SWEEP_LEASE_TTL_S", default=60.0))
+    return max(configured, 3.0 * notify_sweep_interval_s())
+
+
 def notify_http_timeout_s() -> float:
     """webhook/IM 通知的 HTTP 超时（秒）。默认 5s。"""
     return max(0.1, _get_float("DD_NOTIFY_HTTP_TIMEOUT_S", default=5.0))

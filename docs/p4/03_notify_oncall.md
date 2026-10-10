@@ -117,8 +117,15 @@ GET  /v1/notifications             投递记录（审计）
 - **通知可靠性 = 适配器的可靠性**：webhook 失败按 outbox 重试语义处理（3 次→dead），
   **不保证必达**（要必达需接专业告警平台，属更大工程）。
 - **IM/SMTP 凭据**走环境变量，不进仓库。
-- sweeper 是**进程内后台线程**：单副本正确；多副本需加租约（否则重复升级）——
-  与「缺口-5 多副本协调」同源问题。
+- sweeper 是**进程内后台线程**，但已加**单持有者租约**（`state/lease.py`，key
+  `alert:escalation:sweeper`）：多副本时同一时刻只有一个副本在扫，不再重复升级。
+  **为什么必须**：台账按 `delivery_id = hash(event_id, level)` 去重，而
+  `_deliver` 是"**先 `registry.send()` 再 upsert 台账**"——去重挡的是台账，
+  **通知已经发出去了**（值班人被重复打扰，P0 场景下会让人开始忽略告警）。
+  TTL 实际取值 = `max(DD_NOTIFY_SWEEP_LEASE_TTL_S, 3 × 扫描间隔)`；租约不可用时
+  **本轮不扫**（失败关闭：到期行还在库里，下轮接着扫，不丢计时）。
+  `/readyz` 的 `checks.escalation` 会报出 `lease_holder` 与 `skipped_ticks`。
+  **边界**：memory 状态后端不提供跨副本保证（多副本须用 postgres/redis）。
 
 ## 7. 依赖
 

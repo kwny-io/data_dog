@@ -20,6 +20,7 @@ from ..runtime import (
     _STARTED_AT,
     _VERSION,
     _db_reachable,
+    _get_escalation,
     _get_job_runner,
     _log,
     _state,
@@ -86,6 +87,23 @@ def readyz() -> JSONResponse:
             checks["investigation_workers"] = {"ok": True,
                                                "queue_depth": runner.queue_depth()}
         ready = ready and bool(checks["investigation_workers"]["ok"])
+
+    # 告警升级 sweeper（仅在启用通知时报告）：**故意不影响就绪**——它是可选增强，
+    # 起不来不该让整个实例被摘流量（那只会让告警升级更没人做）。但要把"谁在负责
+    # 升级扫描"暴露出来：多副本时一眼看出租约归属、以及自己是不是一直在让位。
+    if settings.notify_enabled():
+        sweeper = _get_escalation()
+        if sweeper is None:
+            checks["escalation"] = {"ok": False,
+                                    "error": "已启用通知但升级 sweeper 未运行"}
+        else:
+            checks["escalation"] = {
+                "ok": True,
+                "interval_s": settings.notify_sweep_interval_s(),
+                "lease_ttl_s": settings.notify_sweep_lease_ttl_s(),
+                "lease_holder": sweeper.holder,
+                "skipped_ticks": int(getattr(sweeper, "skipped_ticks", 0)),
+            }
 
     body = {"status": "ready" if ready else "not_ready", "checks": checks}
     return JSONResponse(status_code=200 if ready else 503, content=body)

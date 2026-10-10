@@ -432,7 +432,7 @@ docker run --rm -p 8000:8000 <你的账号>/data-dog:0.1.0
 | 传输加密 | `compose.prod.yaml` 里 Caddy 自动申请 HTTPS；应用内**无**安全响应头 | HSTS / `X-Content-Type-Options` 等头部 |
 | 多租户隔离 | 应用层越权过滤 + **PG RLS** + 租户绑定密钥；绑定的租户由**服务端**注入 | 仍靠"受信网关/绑定密钥"承担主体派生；无用户级 RBAC |
 | 限流 | **共享令牌桶**（`StateStore`：memory/postgres/redis，多副本一致） | 后端须选非 `memory`（默认随库里类型自动选）；`memory` 多副本下各限各的 |
-| 水平扩展 | 有状态算子已外置 + 分片 + file 源租约；异步 job 有共享队列 + 条件领取 | **值班 sweeper 仍是进程内线程**（多副本会并发升级 → 需租约）；**异步 job 完成非原子**（报告落库与 job 终态是两个事务；`save_report` 失败被吞后仍标 succeeded）；job 表需保留策略 |
+| 水平扩展 | 有状态算子已外置 + 分片；file 源与**告警升级 sweeper** 都有单持有者租约（`state/lease.py`）；异步 job 有共享队列 + 条件领取 | **异步 job 完成非原子**（报告落库与 job 终态是两个事务；`save_report` 失败被吞后仍标 succeeded）；**job 卡 pending/running 无恢复扫描**；job 表需保留策略 |
 | 可观测 | Prometheus 指标 + JSON 结构化日志 + W3C traceparent 传播 | 日志聚合、完整追踪（无 OTel SDK） |
 | 前端控制台 | **服务端代理**（浏览器不持有凭据）+ 可选 Basic 门（`DD_WEB_BASIC_AUTH`） | 用户级登录/RBAC；现为**单租户**控制台（租户由 `DD_WEB_TENANT` 决定） |
 | 多地部署 | 跨地域多活为**应用层**近似，RPO > 0 | 数据库同步复制设施（非应用代码可解） |

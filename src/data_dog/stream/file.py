@@ -37,7 +37,7 @@ from typing import TYPE_CHECKING, Any
 from .base import StreamMessage, StreamSource
 
 if TYPE_CHECKING:
-    from .lease import Lease
+    from ..state.lease import Lease
 
 
 class FileTailSource(StreamSource):

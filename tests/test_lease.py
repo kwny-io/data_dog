@@ -16,11 +16,11 @@ from __future__ import annotations
 
 import json
 
+from data_dog.state.lease import Lease
 from data_dog.state.memory import InMemoryStateStore
 from data_dog.stream.bus import MqttSource, shared_topic
 from data_dog.stream.factory import build_source
 from data_dog.stream.file import FileTailSource
-from data_dog.stream.lease import Lease
 
 
 class _Clock:

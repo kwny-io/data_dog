@@ -68,7 +68,7 @@
 | 18 | `src/data_dog/service/investigation_jobs.py:128-133,148-168` | worker 常驻循环：取不到活就 `Event.wait(poll_s=0.2)`；`stop(wait=False)` 不等线程退出 | — 单次等待有上限 · ✅ 0.2s · — | 无需（附带问题见 §3.2） |
 | 19 | `src/data_dog/state/checkpoint.py:129-131`、`src/data_dog/alerting/escalation.py:277` | 周期任务 `Event.wait(interval)`（`while not self._stop.wait(...)`）：停止信号立即唤醒，不拖满间隔 | — 单次等待有上限 · ✅ interval · — | 无需 |
 | 20 | `src/data_dog/stream/bus.py:140-142`、`src/data_dog/stream/file.py:99` | 源 `poll(timeout)` 透传为 kafka `timeout_ms` / 文件轮询；单次有上限 | — 单次 · ✅ timeout · — | 无需 |
-| 21 | `src/data_dog/stream/lease.py:45-94` | file 消费者租约 TTL（默认 30s）+ 每轮 `renew()`；接管判据是**过期**（时间上限），无重试环 | ✅（TTL 过期即抢） · ✅ TTL · — | 合规 |
+| 21 | `src/data_dog/state/lease.py`（`Lease.acquire/renew`） | 单持有者租约 TTL（file 源默认 30s、升级 sweeper 默认 60s）+ 每轮 `renew()`；接管判据是**过期**（时间上限），无重试环。**已移到 `state/`**：它是 `StateStore` 之上的通用原语，file 源与告警 sweeper 共用 | ✅（TTL 过期即抢） · ✅ TTL · — | 合规 |
 | 22 | `src/data_dog/paths.py:27`、`src/data_dog/operator_factory/verification.py:61`、`src/data_dog/mujoco_sim/simulate.py:211`、`src/data_dog/operator_factory/dsl.py:182,246,555,562` | `for _ in range(...)` / `while True` 是**目录上溯 / 数值迭代 / 采样 / DSL 解析循环**，不是重试 | — | 无需 |
 | 23 | `src/data_dog/cli.py:151`、`src/data_dog/operator_factory/sandbox_exec.py:143`、`src/data_dog/knowledge.py:105`、`src/data_dog/mcp_context.py:176`、`src/data_dog/state/redis.py:158` | `while True` 是**交互 REPL / worker 主循环 / stdout 读循环 / SCAN 游标**，不是重试 | — | 无需 |
 

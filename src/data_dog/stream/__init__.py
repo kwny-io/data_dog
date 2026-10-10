@@ -4,9 +4,11 @@
 """
 from __future__ import annotations
 
+# Lease 已移到 `state/`（它是 StateStore 之上的通用原语，告警 sweeper 也用）；这里继续
+# 导出，保持 `from data_dog.stream import Lease` 可用。
+from ..state.lease import Lease, default_owner
 from .base import QueueSource, StreamMessage, StreamSource
 from .factory import build_router, build_source
-from .lease import Lease, default_owner
 from .runner import StreamRunner
 from .sharding import ShardRouter, pick_owner, pick_shard, shard_key
 

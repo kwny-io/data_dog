@@ -80,7 +80,7 @@ def build_source(kind: str | None = None) -> StreamSource:
 def _file_lease(path: str):
     """构造 file 源的选主租约（基于共享状态后端）。"""
     from ..state import get_state_store
-    from .lease import Lease, default_owner
+    from ..state.lease import Lease, default_owner
     return Lease(get_state_store(), f"stream:lease:file:{path}",
                  default_owner(), ttl_s=settings.stream_file_lease_ttl_s())
 

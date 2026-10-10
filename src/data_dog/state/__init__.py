@@ -24,10 +24,13 @@ from __future__ import annotations
 
 from .base import MutateFn, StateStore
 from .factory import get_rate_store, get_state_store, reset_state_store
+from .lease import Lease, default_owner
 
 __all__ = [
+    "Lease",
     "MutateFn",
     "StateStore",
+    "default_owner",
     "get_rate_store",
     "get_state_store",
     "reset_state_store",

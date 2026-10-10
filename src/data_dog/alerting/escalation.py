@@ -254,41 +254,124 @@ class EscalationEngine:
 # ------------------------------------------------------------------ sweeper
 
 class EscalationSweeper:
-    """周期跑 `EscalationEngine.sweep_once` 的后台线程。
+    """周期跑 `EscalationEngine.sweep_once` 的后台线程（**带单持有者租约**）。
+
+    为什么必须租约（多副本的正确性，不只是"省点活"）
+    ------------------------------------------------
+    `sweep_once` 是"列表到期行 → 逐条升级"。多副本各自扫时，两个副本会**同时**看到同一条
+    到期投递，各自走 `_escalate_row`：先 `set_delivery_status(escalated)`，再
+    `_deliver`（**先 `registry.send()`，之后才 upsert 台账**）。台账按
+    `delivery_id = hash(event_id, level)` 去重，但**通知已经发出去了**——结果是同一个
+    值班人被重复打扰（P0 场景下这是"狼来了"，会让人开始忽略告警）。
+    故用 `state/lease.py` 的租约保证同一时刻只有一个副本在扫。
+
+    语义（与租约原语一致）
+    --------------------
+    - 每轮先 `renew()`（我持有就续期），拿不到就 `acquire()`（无主/过期才能抢）；
+    - **不是持有者 → 本轮不扫**（下一轮再看），并可观测（`skipped_ticks`）；
+    - **租约不可用 → 也不扫**（失败关闭）：协调不上时宁可不升级——到期行还在库里、
+      下轮恢复接着扫，**不丢计时**；而"两个副本同时升级"发出的重复通知收不回来；
+    - 单副本（或未配共享后端）时行为与从前一致：只有自己，租约恒为自持。
 
     与 `CheckpointLoop` 同样用 `Event.wait(timeout)`——停止信号能立刻唤醒，不拖满
     整个间隔才退出。
     """
 
     def __init__(self, engine: EscalationEngine, *,
-                 interval_s: float | None = None) -> None:
+                 interval_s: float | None = None,
+                 lease: Any = None) -> None:
         self._engine = engine
         self._interval = interval_s if interval_s is not None \
             else settings.notify_sweep_interval_s()
         self._interval = max(1.0, float(self._interval))
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self.skipped_ticks = 0
+        # 租约默认建在**共享状态**上（memory 后端退化为进程内选主，与限流/候选归并同一边界）。
+        # 显式传 None 会构造默认租约；要完全不要租约（只在测试里合理）传 lease=False。
+        if lease is False:
+            self._lease = None
+        elif lease is None:
+            from ..state import get_state_store
+            from ..state.lease import Lease, default_owner
+            self._lease = Lease(
+                get_state_store(), "alert:escalation:sweeper", default_owner(),
+                ttl_s=settings.notify_sweep_lease_ttl_s())
+        else:
+            self._lease = lease
+        self._holding = False
 
     @property
     def alive(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
 
+    @property
+    def holder(self) -> str:
+        """当前租约持有者（无租约或无主返回空串）——供 `/healthz` 类诊断。"""
+        return self._lease.holder() if self._lease is not None else ""
+
+    def _may_sweep(self) -> bool:
+        """本轮是否有权扫描：先续约，不成再尝试抢占；异常 → 失败关闭（不扫）。"""
+        if self._lease is None:
+            return True
+        try:
+            ok = self._lease.renew() or self._lease.acquire()
+        except Exception as e:                           # noqa: BLE001
+            self.skipped_ticks += 1
+            _log.warning("升级 sweeper 租约不可用，本轮不扫（失败关闭）", extra={
+                "error": f"{type(e).__name__}: {e}"})
+            return False
+        if ok and not self._holding:
+            self._holding = True
+            _log.info("本副本取得升级 sweeper 租约（开始负责升级扫描）",
+                      extra={"lease": self._lease.key, "owner": self._lease.owner})
+        elif not ok and self._holding:
+            self._holding = False
+            _log.warning("本副本失去升级 sweeper 租约（另一副本接管）",
+                         extra={"lease": self._lease.key})
+        if not ok:
+            self.skipped_ticks += 1
+        return ok
+
+    def sweep_tick(self) -> dict[str, Any] | None:
+        """跑一轮（若有租约）。返回统计；本轮不归我扫 / 失败关闭 → None。"""
+        if not self._may_sweep():
+            return None
+        try:
+            stats = self._engine.sweep_once()
+        except Exception as e:                           # noqa: BLE001
+            # 扫描失败不致命（下轮再试），但必须记 error，别静默
+            _log.error("告警升级扫描失败", extra={
+                "error": f"{type(e).__name__}: {e}"})
+            return None
+        if stats["escalated"] or stats["failed"] or stats["no_next_level"]:
+            _log.info("告警升级扫描", extra=stats)
+        return stats
+
     def _run(self) -> None:
         while not self._stop.wait(self._interval):
-            try:
-                stats = self._engine.sweep_once()
-                if stats["escalated"] or stats["failed"] or stats["no_next_level"]:
-                    _log.info("告警升级扫描", extra=stats)
-            except Exception as e:                       # noqa: BLE001
-                # 扫描失败不致命（下轮再试），但必须记 error，别静默
-                _log.error("告警升级扫描失败", extra={
-                    "error": f"{type(e).__name__}: {e}"})
+            self.sweep_tick()
 
     def start(self) -> None:
+        # 启动即抢一次租约（不在等完第一个间隔之后才抢）：否则这段时间里
+        # `/readyz` 会显示"没人负责升级"，而且多副本同时启动时会白等一轮。
+        # 抢不到不影响启动——只是本副本暂不负责扫描（下一轮再试）。
+        self._may_sweep()
         self._thread = threading.Thread(target=self._run, name="dd-escalation",
                                         daemon=True)
         self._thread.start()
-        _log.info("告警升级 sweeper 已启动", extra={"interval_s": self._interval})
+        _log.info("告警升级 sweeper 已启动", extra={
+            "interval_s": self._interval,
+            "lease": self._lease.key if self._lease is not None else "",
+            "lease_ttl_s": settings.notify_sweep_lease_ttl_s() if self._lease else 0.0,
+            "holding": self._holding})
 
     def stop(self) -> None:
         self._stop.set()
+        # 主动让出：别人可以立刻接管，而不必等 TTL 过期（少一段无人升级的窗口）
+        if self._lease is not None:
+            try:
+                self._lease.release()
+            except Exception:                            # noqa: BLE001
+                pass
+        self._holding = False

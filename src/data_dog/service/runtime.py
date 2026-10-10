@@ -196,7 +196,8 @@ def _start_escalation_if_enabled() -> None:
     sweeper.start()
     _set_escalation(sweeper)
     _log.info("告警升级 sweeper 已启动", extra={
-        "interval_s": settings.notify_sweep_interval_s()})
+        "interval_s": settings.notify_sweep_interval_s(),
+        "lease_ttl_s": settings.notify_sweep_lease_ttl_s()})
 def _stop_escalation() -> None:
     sweeper = _get_escalation()
     if sweeper is None:
