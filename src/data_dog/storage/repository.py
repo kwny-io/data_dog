@@ -115,22 +115,70 @@ def _upsert(session: Session, model: Any, pk: Any, pk_kwargs: dict[str, Any],
         return False
 
 
+def _upsert_one_stmt(session: Session, model: Any, pk_kwargs: dict[str, Any],
+                     values: dict[str, Any]) -> bool:
+    """**一条语句**的幂等 upsert；方言不支持时返回 False（调用方回退到 `_upsert`）。
+
+    为什么要换掉"get + SAVEPOINT + INSERT + RELEASE"（每行 4 条语句 → **1 条**）
+    --------------------------------------------------------------------------
+    旧写法的存在理由是扛"并发两个请求同时 `get` 到 None"这个竞态（实测 8 并发写同一 id
+    会有 2 个抛 `IntegrityError`）：把 INSERT 包进 SAVEPOINT，撞唯一键就回滚 SAVEPOINT
+    再改更新。**它是正确的**——但代价是每行 4 条语句，而且**两次 `SAVEPOINT`/`RELEASE`
+    与 upsert 前的两个 `get` 合起来占掉每请求约 5 条**
+    （`docs/write_path_batching.md` §7.1 的实测清单）。
+
+    `INSERT … ON CONFLICT DO UPDATE` 把同一件事故交给数据库**原子**完成：
+    **既是 1 条语句，又根本没有"先查后插"的窗口**——竞态从"被兜住"变成"不存在"。
+    这与 ④ 的分批删除是同一类判断：**能交给数据库一次做完的事，不要拆成多次往返。**
+
+    `created_at` **不进更新集**：它是**首次写入**的时间，也是 ④ 保留策略的判据
+    （按 ingestion 时间清理）。重复投递若把它刷新成"刚写入"，一条被反复重投的老事件
+    就**永远不会被清理**——那会让保留策略静默失效。
+    """
+    try:
+        dialect = session.get_bind().dialect.name
+    except Exception:                             # noqa: BLE001 - 拿不到方言就走回退
+        return False
+    if dialect == "postgresql":
+        from sqlalchemy.dialects.postgresql import insert as _insert
+    elif dialect == "sqlite":
+        from sqlalchemy.dialects.sqlite import insert as _insert
+    else:
+        return False
+
+    stmt = _insert(model).values(**pk_kwargs, **values)
+    updatable = {k: getattr(stmt.excluded, k) for k in values if k != "created_at"}
+    if not updatable:                             # pragma: no cover - values 总有字段
+        return False
+    session.execute(stmt.on_conflict_do_update(
+        index_elements=list(pk_kwargs.keys()), set_=updatable))
+    return True
+
+
 # ---------------------------------------------------------------- 候选
 
+def _candidate_values(d: dict[str, Any]) -> dict[str, Any]:
+    """候选行的**列值**（唯一来源：ORM 写入与 Core upsert 共用它，避免两处漂移）。"""
+    return {
+        "device_sn": d.get("device_sn", ""),
+        "component_ref": d.get("component_ref", ""),
+        "signal": d.get("signal", ""),
+        "severity_hint": d.get("severity_hint", "info"),
+        "window_start": d.get("window_start", ""),
+        "window_end": d.get("window_end", ""),
+        "sample_count": int(d.get("sample_count", 0)),
+        "rule_matches": list(d.get("rule_matches", [])),
+        "anomaly_score": float(d.get("anomaly_score", 0.0)),
+        "evidence": [e if isinstance(e, dict) else _as_dict(e)
+                     for e in d.get("evidence", [])],
+        "evidence_refs": list(d.get("evidence_refs", [])),
+        "detector_provenance": d.get("detector_provenance", ""),
+    }
+
+
 def _apply_candidate(row: Any, d: dict[str, Any]) -> None:
-    row.device_sn = d.get("device_sn", "")
-    row.component_ref = d.get("component_ref", "")
-    row.signal = d.get("signal", "")
-    row.severity_hint = d.get("severity_hint", "info")
-    row.window_start = d.get("window_start", "")
-    row.window_end = d.get("window_end", "")
-    row.sample_count = int(d.get("sample_count", 0))
-    row.rule_matches = list(d.get("rule_matches", []))
-    row.anomaly_score = float(d.get("anomaly_score", 0.0))
-    row.evidence = [e if isinstance(e, dict) else _as_dict(e)
-                    for e in d.get("evidence", [])]
-    row.evidence_refs = list(d.get("evidence_refs", []))
-    row.detector_provenance = d.get("detector_provenance", "")
+    for k, v in _candidate_values(d).items():
+        setattr(row, k, v)
 
 
 def save_candidates(session: Session, candidates: list[Any], *, tenant_id: str) -> int:
@@ -143,12 +191,14 @@ def save_candidates(session: Session, candidates: list[Any], *, tenant_id: str) 
     for c in candidates:
         d = _as_dict(c)
         cid = d["candidate_id"]
+        pk = {"tenant_id": tenant_id, "candidate_id": cid}
 
-        def apply_fn(row: Any, _d: dict[str, Any] = d) -> None:  # noqa: B023
-            _apply_candidate(row, _d)
+        if not _upsert_one_stmt(session, M.CandidateRow, pk, _candidate_values(d)):
+            # 方言不支持 ON CONFLICT 时回退到旧路径（正确性优先于语句数）
+            def apply_fn(row: Any, _d: dict[str, Any] = d) -> None:  # noqa: B023
+                _apply_candidate(row, _d)
 
-        _upsert(session, M.CandidateRow, (tenant_id, cid),
-                {"tenant_id": tenant_id, "candidate_id": cid}, apply_fn)
+            _upsert(session, M.CandidateRow, (tenant_id, cid), pk, apply_fn)
         n += 1
     return n
 
@@ -431,31 +481,43 @@ def save_telemetry(session: Session, events: list[Any], *, tenant_id: str) -> in
     for e in events:
         d = _as_dict(e)
         eid = d["event_id"]
+        pk = {"tenant_id": tenant_id, "event_id": eid}
 
-        def apply_fn(row: Any, _d: dict[str, Any] = d) -> None:  # noqa: B023
-            _apply_telemetry(row, _d)
+        if not _upsert_one_stmt(session, M.TelemetryEventRow, pk,
+                                _telemetry_values(d)):
+            def apply_fn(row: Any, _d: dict[str, Any] = d) -> None:  # noqa: B023
+                _apply_telemetry(row, _d)
 
-        _upsert(session, M.TelemetryEventRow, (tenant_id, eid),
-                {"tenant_id": tenant_id, "event_id": eid}, apply_fn)
+            _upsert(session, M.TelemetryEventRow, (tenant_id, eid), pk, apply_fn)
         n += 1
     return n
 
 
-def _apply_telemetry(row: Any, d: dict[str, Any]) -> None:
-    # tenant_id 不在此设置：它来自认证上下文（save_telemetry 的显式入参），
-    # 绝不从事件正文取——正文的身份声明是不可信的。
-    row.device_sn = d.get("device_sn", "")
-    row.occurred_at = d.get("occurred_at", "")
+def _telemetry_values(d: dict[str, Any]) -> dict[str, Any]:
+    """遥测行的**列值**（唯一来源：ORM 写入与 Core upsert 共用它）。
+
+    `tenant_id` 不在这里：它来自认证上下文（`save_telemetry` 的显式入参），
+    **绝不从事件正文取**——正文的身份声明是不可信的。
+    """
     ctype = d.get("component_type", "")
     cinst = d.get("component_instance", "")
-    row.component_ref = f"{ctype}.{cinst}" if ctype else d.get("component_ref", "")
-    row.metrics = d.get("metrics", {}) or {}
-    row.status_codes = list(d.get("status_codes", []))
-    row.operating_condition = d.get("operating_condition", "")
-    row.operator_id = d.get("operator_id", "")
-    row.operator_version = d.get("operator_version", "")
-    row.binding_revision = d.get("binding_revision", "")
-    row.raw_log_ref = d.get("raw_log_ref", "")
+    return {
+        "device_sn": d.get("device_sn", ""),
+        "occurred_at": d.get("occurred_at", ""),
+        "component_ref": f"{ctype}.{cinst}" if ctype else d.get("component_ref", ""),
+        "metrics": d.get("metrics", {}) or {},
+        "status_codes": list(d.get("status_codes", [])),
+        "operating_condition": d.get("operating_condition", ""),
+        "operator_id": d.get("operator_id", ""),
+        "operator_version": d.get("operator_version", ""),
+        "binding_revision": d.get("binding_revision", ""),
+        "raw_log_ref": d.get("raw_log_ref", ""),
+    }
+
+
+def _apply_telemetry(row: Any, d: dict[str, Any]) -> None:
+    for k, v in _telemetry_values(d).items():
+        setattr(row, k, v)
 
 
 def list_telemetry(session: Session, *, tenant_id: str,
