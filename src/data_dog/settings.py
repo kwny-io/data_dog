@@ -310,6 +310,54 @@ def _parse_ts(tenant: str, idx: int, field: str, raw: Any) -> float | None:
     return dt.timestamp()
 
 
+def device_signing() -> str:
+    """设备身份签名档位（`DD_DEVICE_SIGNING`，默认 `off`）。
+
+    三档，按"能渐进上线"设计（细节见 `data_plane/device_signature.py`）：
+      - `off`（默认）：完全不验 —— **行为与改动前逐字节一致**（向后兼容，零回归）；
+      - `optional`：**带了签名就必须对**（错的一律拒），没带则放行 —— 渐进上线用，
+        可以一个设备一个设备地开，不需要"全网同一天切换"；
+      - `required`：必须带且必须对；设备没配密钥也拒（失败关闭）。
+
+    取值非法 → 抛 `ValueError`（由服务边界转 503 失败关闭）。**绝不把拼错的值当成
+    `off`**：那会让"我明明开了强制签名"变成"其实一直没验"，是最危险的一类静默降级。
+    """
+    raw = _get("DD_DEVICE_SIGNING", default="off").strip().lower()
+    if raw not in ("off", "optional", "required"):
+        raise ValueError(
+            f"DD_DEVICE_SIGNING 取值非法：{raw!r}（可用 off / optional / required）")
+    return raw
+
+
+def device_keys() -> dict[str, str]:
+    """每设备密钥表 `{device_sn: secret}`（`DD_DEVICE_KEYS`，JSON 对象）。
+
+    与租户密钥环分开配置：设备密钥**量大、生命周期短、由设备侧持有**，和"租户/调用方"
+    的密钥不是一类东西（混在一张表里会让轮换粒度错位——换一把设备密钥不该影响租户）。
+    未配（默认）= 没有设备可验签；此时 `required` 档下所有请求都会被拒（失败关闭，
+    因为"要求签名却没有密钥"意味着配置没做完）。
+
+    解析失败**不静默降级**（降级 = 退回不验签）：抛 `ValueError` → 服务边界 503。
+    """
+    raw = _get("DD_DEVICE_KEYS").strip()
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"DD_DEVICE_KEYS 不是合法 JSON：{e}") from e
+    if not isinstance(data, dict):
+        raise ValueError("DD_DEVICE_KEYS 必须是 JSON 对象 {设备序列号: 密钥}")
+    out: dict[str, str] = {}
+    for sn, secret in data.items():
+        if not isinstance(sn, str) or not sn.strip():
+            raise ValueError("DD_DEVICE_KEYS 的设备序列号必须是非空字符串")
+        if not isinstance(secret, str) or not secret:
+            raise ValueError(f"DD_DEVICE_KEYS[{sn!r}] 的密钥必须是非空字符串")
+        out[sn] = secret
+    return out
+
+
 def tenant_export_limit() -> int:
     """`GET /v1/tenant/export` 每表最多导出多少行（`DD_TENANT_EXPORT_LIMIT`，默认 1000）。
 

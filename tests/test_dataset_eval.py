@@ -144,3 +144,51 @@ def test_run_dataset_eval_scoring_caliber(tmp_path, monkeypatch):
     lo, hi = out["wilson_95ci"]
     assert lo <= out["accuracy"] <= hi
     print("PASS test_run_dataset_eval_scoring_caliber")
+
+
+def test_workers_parallelize_only_the_judgement_never_the_replay(tmp_path, monkeypatch):
+    """`--workers` 的两条硬约束（真 LLM 那栏靠它才跑得完，但不能拿正确性换速度）：
+
+    1. **回放必须始终串行**：`mujoco.MjModel/MjData` 实例不是线程安全的，并发回放会
+       **静默**产出错值——而错值会直接污染对外发布的准确率。这里用并发峰值断言钉住。
+    2. **并行结果必须与串行逐条一致**：`ThreadPoolExecutor.map` 保序，聚合口径不受影响。
+    """
+    import threading
+    import time as _time
+
+    recs = [_rec(f"r{i}", "F1_stall" if i % 2 else None, 0.5) for i in range(8)]
+    (tmp_path / "shard_00000.jsonl").write_text(
+        "\n".join(json.dumps(r) for r in recs) + "\n", encoding="utf-8")
+
+    lock = threading.Lock()
+    live = {"n": 0, "max": 0}
+
+    def fake_replay(rec):
+        with lock:
+            live["n"] += 1
+            live["max"] = max(live["max"], live["n"])
+        _time.sleep(0.01)          # 拉长临界区，让并发真有机会撞上
+        with lock:
+            live["n"] -= 1
+        return object()
+
+    def fake_eval_one(sample, label, provider, cand=None):
+        _time.sleep(0.01)          # 模拟"等 LLM"（这才是可以并行的那段）
+        return {"fault": label["fault"], "ground_truth": label["expected"],
+                "agent_disposition": label["expected"], "hit": True}
+
+    monkeypatch.setattr(de, "replay", fake_replay)
+    monkeypatch.setattr(de, "eval_one", fake_eval_one)
+
+    serial = de.run_dataset_eval(str(tmp_path), n=100, seed=7,
+                                 provider=object(), workers=1)
+    assert live["max"] == 1, "串行档下回放竟然并发了"
+
+    live["max"] = 0
+    parallel = de.run_dataset_eval(str(tmp_path), n=100, seed=7,
+                                   provider=object(), workers=4)
+
+    assert live["max"] == 1, (
+        f"回放出现并发（峰值 {live['max']}）——MuJoCo 非线程安全，会静默产出错值")
+    assert parallel == serial, "并行结果与串行不一致（map 未保序，或聚合受顺序影响）"
+    print("PASS test_workers_parallelize_only_the_judgement_never_the_replay")

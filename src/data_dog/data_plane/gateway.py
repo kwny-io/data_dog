@@ -15,7 +15,9 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+from .. import settings
 from ..errors import ToolErrorCode, err
+from .device_signature import check_device_signature
 from .events import RawLogEnvelope
 
 # 认领的编码白名单（未知编码 → 拒绝）
@@ -149,6 +151,22 @@ class TelemetryGateway:
             if size > _MAX_PAYLOAD_BYTES:
                 return self._reject("too_large", ToolErrorCode.INVALID_INPUT,
                                     f"载荷过大: {size}B > {_MAX_PAYLOAD_BYTES}B")
+
+        # 设备身份签名（⑦）：可选/必需两档，默认 off（零回归）。见 device_signature 模块。
+        # **放在限流之前**：验签是纯 HMAC（微秒级），而限流要动共享后端（一次 DB 事务）；
+        # 便宜的检查先做，别让伪造报文去消耗限流后端的写入。
+        try:
+            signing_mode = settings.device_signing()
+            device_keys = settings.device_keys()
+        except ValueError as e:                  # 配置坏 → 失败关闭，绝不降级为"不验签"
+            return self._reject("device_signing_misconfigured",
+                                ToolErrorCode.UNAVAILABLE, str(e))
+        sig_ok, sig_reason, sig_detail = check_device_signature(
+            mode=signing_mode, keys=device_keys, tenant_id=caller.tenant_id,
+            device_sn=caller.device_sn, raw=raw,
+            provided=(auth or {}).get("device_signature"))
+        if not sig_ok:
+            return self._reject(sig_reason, ToolErrorCode.DENIED, sig_detail)
 
         # 限流
         if not self._allow(caller.tenant_id, caller.device_sn):

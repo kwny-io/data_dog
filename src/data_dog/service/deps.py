@@ -10,13 +10,19 @@ from .. import settings
 from ..errors import ToolErrorCode
 
 
-def _auth_from_headers(tenant_id: str | None, device_sn: str | None
-                       ) -> dict[str, Any]:
-    """身份只认请求头（认证主体），不认正文。缺一即拒绝（失败关闭）。"""
+def _auth_from_headers(tenant_id: str | None, device_sn: str | None,
+                       device_signature: str | None = None) -> dict[str, Any]:
+    """身份只认请求头（认证主体），不认正文。缺一即拒绝（失败关闭）。
+
+    `device_signature`（⑦）只是把设备**声称**的签名往后传，**不在这里判定**——
+    验签必须覆盖正文，而本函数拿不到正文（判定在接入网关里做）。
+    """
     if not tenant_id or not device_sn:
         raise HTTPException(status_code=401,
                             detail="缺少可信身份：需要请求头 X-Tenant-Id 与 X-Device-Sn")
-    return {"tenant_id": tenant_id, "device_sn": device_sn, "principal": "http-gateway"}
+    return {"tenant_id": tenant_id, "device_sn": device_sn,
+            "device_signature": device_signature,
+            "principal": "http-gateway"}
 def _tenant_required(tenant_id: str | None) -> str:
     """读路径的租户上下文：只认 `X-Tenant-Id`，缺失/空 → 401（失败关闭）。
 
@@ -71,9 +77,14 @@ def require_tenant(
 def require_tenant_and_device(
     x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
     x_device_sn: str | None = Header(default=None, alias="X-Device-Sn"),
+    x_device_signature: str | None = Header(default=None, alias="X-Device-Signature"),
 ) -> dict[str, Any]:
-    """写入路径的声明式身份校验：租户与设备号都要，缺一 → 401（失败关闭）。"""
-    return _auth_from_headers(x_tenant_id, x_device_sn)
+    """写入路径的声明式身份校验：租户与设备号都要，缺一 → 401（失败关闭）。
+
+    顺带把设备签名（⑦）的**声称值**传下去：验签要覆盖正文，只能由接入网关做
+    （声明式依赖拿不到正文，也不该拿到）。
+    """
+    return _auth_from_headers(x_tenant_id, x_device_sn, x_device_signature)
 
 
 def require_ops_token(
