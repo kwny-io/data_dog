@@ -10,10 +10,13 @@
 from __future__ import annotations
 
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Any
 
 from .base import StateStore
+
+# "该 key 本来不存在"的哨兵：区别于"存在且值为 None"（`mutate` 允许写回 None）。
+_MISSING = object()
 
 
 class InMemoryStateStore(StateStore):
@@ -28,6 +31,34 @@ class InMemoryStateStore(StateStore):
             new_value, result = fn(cur)
             self._data[key] = new_value
             return result
+
+    def mutate_many(self, items: Sequence[tuple[str, Callable[[Any], tuple[Any, Any]]]]
+                    ) -> list[Any]:
+        """整批在**一次持锁**内完成，且**整批原子**（抛错则整批回滚）。
+
+        进程内本就没有提交开销，这里保的是**语义一致**：PG 靠事务回滚、Redis 靠
+        "EXEC 未执行"，内存后端若中途抛错就会留下半批——那会让"换后端是配置动作"
+        这句话变成假的（见 `tests/test_state_store.py` 的跨后端契约断言）。
+        """
+        if not items:
+            return []
+        with self._lock:
+            results: list[Any] = []
+            undo: list[tuple[str, Any]] = []
+            try:
+                for key, fn in items:
+                    undo.append((key, self._data.get(key, _MISSING)))
+                    new_value, result = fn(self._data.get(key))
+                    self._data[key] = new_value
+                    results.append(result)
+            except BaseException:
+                for key, old in reversed(undo):
+                    if old is _MISSING:
+                        self._data.pop(key, None)
+                    else:
+                        self._data[key] = old
+                raise
+            return results
 
     def get(self, key: str) -> Any:
         with self._lock:

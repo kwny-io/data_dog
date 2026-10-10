@@ -74,6 +74,29 @@ def service_port() -> int:
     return _get_int("DD_SERVICE_PORT", default=8000)
 
 
+def service_workers() -> int:
+    """uvicorn worker 进程数（仅 `python -m data_dog.service` 生效）。默认 1。
+
+    为什么需要它（这是"单进程 P99 不达标"的正解之一）
+    ------------------------------------------------
+    本机实测（`docs/write_path_batching.md` §6）：单进程写入服务率约 **36 req/s**，
+    而瓶颈是**每请求的数据库往返次数**（约 16 条 SQL / 5 次事务）× 单次往返 ~2~3ms
+    ——不是 CPU、不是提交吞吐（PG 侧实测 76% 空闲、后端全在 `ClientRead`）。
+    在"往返次数"这一项被结构性削减之前，靠**多进程**把服务率线性放大是唯一能立刻
+    让中负载 P99 达标的旋钮（每进程一份解释器，绕开 GIL）。
+
+    为什么默认 1、而不是按核数自动放大
+    ----------------------------------
+    多 worker 的**正确性前提是"有状态的东西都不在进程内"**。本项目已把状态外置
+    （限流/候选分组走 `StateStore`、调查 job 队列在 DB、升级 sweeper 有租约），
+    所以配了 postgres/redis 时多 worker 是安全的；但 `DD_STATE_BACKEND=memory`
+    下会退化成"各 worker 各算各的"（限流各挡各的、候选分组各归各的）。
+    故默认 1，且在 `__main__` 里对"多 worker + 进程内后端"**失败关闭**——
+    宁可拒绝启动，也不静默给出错误的多副本语义。
+    """
+    return max(1, _get_int("DD_SERVICE_WORKERS", default=1))
+
+
 def log_level() -> str:
     return _get("DD_LOG_LEVEL", default="INFO")
 

@@ -31,6 +31,22 @@ def test_blank_counts_as_unset(monkeypatch):
     assert settings.service_name() == "data-dog"
 
 
+def test_service_workers_defaults_to_single_process(monkeypatch):
+    """默认 1 个 worker：多 worker 需共享状态后端，故**不自动放大**（见 __main__ 守卫）。"""
+    monkeypatch.delenv("DD_SERVICE_WORKERS", raising=False)
+    assert settings.service_workers() == 1
+    monkeypatch.setenv("DD_SERVICE_WORKERS", "4")
+    assert settings.service_workers() == 4
+
+
+def test_service_workers_never_below_one(monkeypatch):
+    """0 / 负数都收敛到 1（uvicorn 的 workers=0 是非法值）。"""
+    monkeypatch.setenv("DD_SERVICE_WORKERS", "0")
+    assert settings.service_workers() == 1
+    monkeypatch.setenv("DD_SERVICE_WORKERS", "-3")
+    assert settings.service_workers() == 1
+
+
 def test_alias_fallback(monkeypatch):
     """规范名优先；未设时回落到历史别名。"""
     monkeypatch.delenv("DD_LLM_VENDOR", raising=False)

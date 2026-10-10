@@ -24,7 +24,7 @@ INSERT），应用 fn，再 UPDATE。行锁保证并发调用串行化——与�
 from __future__ import annotations
 
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Any
 
 from sqlalchemy import text
@@ -73,6 +73,60 @@ class PostgresStateStore(StateStore):
                 {"k": key, "v": _dump(new_value), "t": now},
             )
             return result
+
+    def mutate_many(self, items: Sequence[tuple[str, Callable[[Any], tuple[Any, Any]]]]
+                    ) -> list[Any]:
+        """整批 key 在**一个事务**里读完、改完、一次提交（见 `StateStore.mutate_many`）。
+
+        为什么必须**先排序再加锁**
+        --------------------------
+        两个并发批次若以相反顺序去拿同一组行锁，就会死锁（PG 检测到后杀掉一个，
+        表现为随机的 500）。按 key 排序后所有批次的加锁顺序一致 → 死锁不可能发生。
+        排序只影响**加锁顺序**，不影响结果（`items` 仍按给定顺序应用 fn，故同一 key
+        重复出现时后一次能看到前一次写回的值）。
+
+        这一步把"每个命中一次提交"压成"整条事件一次提交"：在 postgres 后端下，
+        提交次数就是写路径的吞吐上限（`docs/write_path_batching.md` §2.2）。
+        """
+        if not items:
+            return []
+        now = time.time()
+        # 同一 key 只锁一次（去重后排序）。
+        locked = sorted({key for key, _ in items})
+        with self._engine.begin() as conn:
+            current: dict[str, Any] = {}
+            for key in locked:
+                row = conn.execute(
+                    text("SELECT value FROM state_kv WHERE key = :k FOR UPDATE"),
+                    {"k": key},
+                ).fetchone()
+                if row is None:
+                    conn.execute(
+                        text("INSERT INTO state_kv (key, value, updated_at) "
+                             "VALUES (:k, '{}', :t) ON CONFLICT (key) DO NOTHING"),
+                        {"k": key, "t": now},
+                    )
+                    row = conn.execute(
+                        text("SELECT value FROM state_kv WHERE key = :k FOR UPDATE"),
+                        {"k": key},
+                    ).fetchone()
+                cur = row[0] if row is not None else None
+                current[key] = None if cur == {} else cur
+
+            # 锁全部到手后再按输入顺序应用（fn 里可能有依赖顺序的累积语义）。
+            results: list[Any] = []
+            for key, fn in items:
+                new_value, result = fn(current[key])
+                current[key] = new_value
+                results.append(result)
+
+            for key in locked:
+                conn.execute(
+                    text("UPDATE state_kv SET value = CAST(:v AS JSON), updated_at = :t "
+                         "WHERE key = :k"),
+                    {"k": key, "v": _dump(current[key]), "t": now},
+                )
+            return results
 
     def get(self, key: str) -> Any:
         with self._engine.connect() as conn:

@@ -33,7 +33,8 @@ import random
 import threading
 import time
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
+from contextlib import ExitStack
 from functools import lru_cache
 from typing import Any
 
@@ -179,6 +180,59 @@ class RedisStateStore(StateStore):
                     f"Redis 状态更新冲突：重试 {attempt} 次（上限 "
                     f"{_RETRY_MAX_ATTEMPTS} 次 / {_RETRY_DEADLINE_S}s）仍未成功：{key}")
             # 指数退避 + 抖动：把失败者随机错开，打破"同步重试 → 反复互撞"的活锁
+            backoff = min(_RETRY_BASE_SLEEP_S * (2 ** min(attempt, 8)), _RETRY_MAX_SLEEP_S)
+            time.sleep(backoff * (0.5 + random.random()))
+
+    def mutate_many(self, items: Sequence[tuple[str, Callable[[Any], tuple[Any, Any]]]]
+                    ) -> list[Any]:
+        """整批 key 在**一个 WATCH/MULTI/EXEC** 里提交（见 `StateStore.mutate_many`）。
+
+        两级并发控制与 `mutate` 同构：先按 key **排序**逐把拿进程内锁（定序避免死锁），
+        再 WATCH 全部 key 做乐观事务。WATCH 覆盖所有涉及的 key，故任何一个被别人改了
+        都会让 `EXEC` 返回 None → 整批重跑 fn（不会只成功一半）。
+        """
+        if not items:
+            return []
+        keys = sorted({key for key, _ in items})
+        with ExitStack() as stack:
+            for key in keys:
+                stack.enter_context(_local_lock(key))
+            return self._mutate_many_optimistic(keys, items)
+
+    def _mutate_many_optimistic(
+        self, keys: list[str],
+        items: Sequence[tuple[str, Callable[[Any], tuple[Any, Any]]]],
+    ) -> list[Any]:
+        """乐观事务主体（与 `_mutate_optimistic` 同一套退避/双上限预算）。"""
+        client = self._client
+        deadline = time.monotonic() + _RETRY_DEADLINE_S
+        attempt = 0
+        while True:
+            attempt += 1
+            with client.pipeline() as pipe:
+                try:
+                    pipe.watch(*keys)
+                    current = {k: self._load(k) for k in keys}
+                    results: list[Any] = []
+                    for key, fn in items:
+                        new_value, result = fn(current[key])
+                        current[key] = new_value
+                        results.append(result)
+                    pipe.multi()
+                    for key in keys:
+                        pipe.set(key, json.dumps(current[key], ensure_ascii=False,
+                                                 separators=(",", ":")))
+                    pipe.execute()
+                    return results
+                except Exception as e:      # WatchError 或 JSON 异常
+                    if not _is_watch_error(e):
+                        raise
+                finally:
+                    pipe.reset()
+            if attempt >= _RETRY_MAX_ATTEMPTS or time.monotonic() >= deadline:
+                raise RuntimeError(
+                    f"Redis 状态更新冲突：重试 {attempt} 次（上限 "
+                    f"{_RETRY_MAX_ATTEMPTS} 次 / {_RETRY_DEADLINE_S}s）仍未成功：{keys}")
             backoff = min(_RETRY_BASE_SLEEP_S * (2 ** min(attempt, 8)), _RETRY_MAX_SLEEP_S)
             time.sleep(backoff * (0.5 + random.random()))
 

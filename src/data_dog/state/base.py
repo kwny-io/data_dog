@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import time
 from abc import ABC, abstractmethod
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Any
 
 
@@ -37,6 +37,34 @@ class StateStore(ABC):
         实现保证：并发调用同一 key 时，每次调用看到的都是"此前所有已提交变更
         之后的**最新值**"；若在写入前检测到冲突，则重新读取并再次调用 fn。
         """
+
+    def mutate_many(self, items: Sequence[tuple[str, Callable[[Any], tuple[Any, Any]]]]
+                    ) -> list[Any]:
+        """**一次提交**内对多个 key 做原子 read-modify-write，返回与 items 等长的结果。
+
+        为什么需要这个原语（提交次数就是写路径的吞吐上限）
+        --------------------------------------------------
+        一条遥测事件常命中多条规则 → 落在**多个**分组 key 上。逐个 `mutate` 在
+        postgres/redis 后端下就是"**每个命中一次提交**"，而提交吞吐正是本机 PG 实测
+        到的天花板（`docs/write_path_batching.md` §2.2：`5 次事务 × 80 req/s` 已贴住
+        上限）。本原语把 N 次提交压成 1 次，**语义完全不变**——还是同样的读改写、
+        同样的跨副本原子性，只是共用同一个事务。这与逐个调用的区别只在提交次数。
+
+        语义契约
+        --------
+        - **整批原子**（后端须保证）：整批在一个事务 / 一个 `EXEC` 里；任一 key 失败则
+          整批**不生效**（后端上抛异常）。调用方**不要**依赖"部分成功"。
+          ⚠️ 基类默认实现（逐个 `mutate`）**不满足**这一条——它只保证每个 key 各自
+          原子，提供的意义是"未覆写的后端仍可用"。三个内置后端（memory / postgres /
+          redis）都覆写为真整批，并由 `tests/test_state_store.py` 跨后端断言守住。
+        - 同一 key **可以重复出现**：按给定顺序依次应用，后一次 `fn` 看到的 `current`
+          是前一次写回的值。故"同一事件多次命中同一 base"不会丢更新。
+        - 跨 key **不是同一瞬间的快照**：不同 key 之间不承诺一致性（与 `snapshot`
+          同一诚实口径）；要跨 key 一致性请让它们同属一个 key。
+        - 默认实现逐个退化为 `mutate`（**正确，但仍是 N 次提交**）。共享内态后端
+          应覆写以合并提交，这正是本原语存在的意义。
+        """
+        return [self.mutate(key, fn) for key, fn in items]
 
     @abstractmethod
     def get(self, key: str) -> Any:

@@ -15,9 +15,12 @@
   candidate_id（=hash(group_key)）也随之稳定。
 - 内存有界：每个 base 只保留最近 `max_groups` 段（打开中的 + 若干已关闭）。更早的
   已关闭段在前几次 build 时已随幂等 upsert 落库，淘汰不丢真相。
-- 索引键 `_INDEX_KEY` 记录出现过的 base，`build(only_touched=False)` 据此**全量枚举**
-  （跨副本可见）。注意这条登记**每次命中都会走共享后端**，故实例内做了去重——见
-  `_register_index` 的 docstring（那是热路径上的一个单车道）。
+- `build(only_touched=False)` 的**全量枚举**直接按前缀扫描共享后端（`keys("cand:")`），
+  不维护任何索引 key。旧版有一个**全局**索引 `candidate:index`，每个新出现的 base 都要
+  写一次——而它只服务运维/对账路径，对热路径**零收益**，却是所有设备、所有租户共用的
+  一把行锁。前缀扫描本就是 `StateStore.keys(prefix)` 的既有能力，索引纯属冗余。
+- **一条事件的全部命中走一次 `mutate_many`**：逐个 `mutate` 在共享后端下就是"每个命中
+  一次提交"，而提交吞吐正是写路径的实测天花板（`docs/write_path_batching.md` §2.2）。
 
 诚实边界：淘汰旧段后，若某个副本的 build 晚于淘汰、且该段从未被任何副本 emit，
 则该段不会被产出。工程上以"每次 ingest 后立即 build 并落库"规避——见 stream
@@ -26,19 +29,12 @@
 from __future__ import annotations
 
 import hashlib
-from collections import OrderedDict
 from typing import Any
 
 from ..schemas.events import CandidateEvent, EvidenceSummary
 from ..state import get_state_store
 from .candidate import _SEV_RANK, _SEV_SCORE, _parse_time, _signal_of
 from .watermark import Watermark
-
-_INDEX_KEY = "candidate:index"
-
-# 本实例"已登记进共享索引"的 base key 上限（FIFO 淘汰）。淘汰只导致下次多写一次索引，
-# 不影响正确性；有界是为了不随车队规模无限增长。
-_INDEX_CACHE_MAX = 4096
 
 
 class SharedCandidateBuilder:
@@ -64,8 +60,6 @@ class SharedCandidateBuilder:
         # ——让 HTTP 请求/流式 flush 只返回"自己刚处理出来的候选"，而不是共享
         # 存储里所有设备/租户的全部候选。
         self._touched: set[str] = set()
-        # 本实例已经登记进共享索引的 base key（FIFO 有界）。见 _register_index。
-        self._indexed: OrderedDict[str, None] = OrderedDict()
 
     # ---- 内部 ----
     def _base_key(self, device_sn: str, component_ref: str, signal: str,
@@ -73,38 +67,6 @@ class SharedCandidateBuilder:
         # 含租户：不同租户的同名设备不得共享分组状态（否则跨租户合并/候选 id 相撞）。
         prefix = f"{tenant_id}|" if tenant_id else ""
         return f"{self._ns}:{prefix}{device_sn}|{component_ref}|{signal}"
-
-    def _register_index(self, base: str) -> None:
-        """把 base 登记进**共享索引**（只被 `build(only_touched=False)` 全量枚举用）。
-
-        为什么要实例内去重（这里原本是热路径上的一个单车道）
-        --------------------------------------------------
-        索引是**一个全局 key**（`_INDEX_KEY`）。在 postgres/redis 后端下每次 `mutate`
-        都是一次"拿行锁 → 改 → 提交"，于是**所有设备、所有租户的每一次检测命中都在
-        同一个行锁上排队**——吞吐被人为钉在单条提交链上（实测：同库同负载只把共享状态
-        换成进程内，吞吐就从 ~38 抬到 ~47 req/s，见 `docs/write_path_batching.md`）。
-
-        而这条登记**对热路径毫无收益**：HTTP 请求走 `build(only_touched=True)`，用的是
-        本地 `_touched`；索引只服务运维/对账的全量枚举。所以"每次命中都登记"是纯开销。
-
-        去重为什么安全：索引是各副本登记的**并集**。任何 base 要被
-        `build(only_touched=False)` 枚举到，它必须先被**某个**实例首次触碰——而那个实例
-        会登记它。本实例重复登记只是在重写同一个并集。
-        """
-        if base in self._indexed:
-            self._indexed.move_to_end(base)
-            return
-        self._indexed[base] = None
-        if len(self._indexed) > _INDEX_CACHE_MAX:
-            self._indexed.popitem(last=False)     # 淘汰只会让下次多写一次，不影响正确性
-
-        def fn(cur: Any) -> tuple[Any, Any]:
-            keys = list(cur) if isinstance(cur, list) else []
-            if base not in keys:
-                keys.append(base)
-            return keys, None
-
-        self._state.mutate(_INDEX_KEY, fn)
 
     @staticmethod
     def _new_group(device_sn: str, component_ref: str, signal: str,
@@ -155,14 +117,22 @@ class SharedCandidateBuilder:
             hits: list[dict[str, Any]], occurred_at: str, received_at: str,
             raw_ref: str = "", baseline: dict[str, float] | None = None,
             tenant_id: str = "") -> None:
-        """加入一个事件的所有命中（同一事件多规则命中 → 各自归组）。"""
+        """加入一个事件的所有命中（同一事件多规则命中 → 各自归组）。
+
+        **一条事件的全部命中只提交一次**（见 `StateStore.mutate_many`）：逐 key 仍是
+        原子读改写，但 N 个命中共用同一个事务——在共享后端下这直接把"每个命中一次提交"
+        降成"每条事件一次提交"，而提交次数就是写路径的吞吐上限。
+        """
+        if not hits:
+            return
+        now_dt = _parse_time(occurred_at)
+        if self.watermark is not None and now_dt is not None:
+            self.watermark.observe(now_dt.timestamp())
+
+        items: list[tuple[str, Any]] = []
         for h in hits:
             signal = _signal_of(h["rule_id"], h.get("field", ""))
             base = self._base_key(device_sn, component_ref, signal, tenant_id)
-            self._register_index(base)
-            now_dt = _parse_time(occurred_at)
-            if self.watermark is not None and now_dt is not None:
-                self.watermark.observe(now_dt.timestamp())
 
             def fn(cur: Any, _h=h, _now=now_dt, _b=base, _sig=signal
                    ) -> tuple[Any, Any]:
@@ -192,7 +162,9 @@ class SharedCandidateBuilder:
                 self._touched.add(groups[-1]["key"])
                 return st, None
 
-            self._state.mutate(base, fn)
+            items.append((base, fn))
+
+        self._state.mutate_many(items)
 
     def _in_window_with_watermark(self, last_dt: Any, now_dt: Any) -> bool:
         """有界迟到语义下的合并判定（与进程内版同构）。"""
@@ -222,8 +194,11 @@ class SharedCandidateBuilder:
             self._touched.clear()
             bases = sorted({k.split("#", 1)[0] for k in keys})
         else:
-            index = self._state.get(_INDEX_KEY) or []
-            bases = sorted(index)
+            # 全量枚举：直接按前缀扫共享后端。`state_kv` 里的 key 就是 base，所以
+            # `keys(prefix)` 天然给出"出现过哪些 base"，且**跨副本可见**——与旧的全局
+            # 索引并集语义等价，但热路径上不再有任何登记写（也不再有一把全局行锁）。
+            # 诚实边界：前缀扫描是 O(车队规模) 的运维路径操作，别放进请求路径。
+            bases = sorted(self._state.keys(prefix=f"{self._ns}:"))
             keys = None
 
         out: list[CandidateEvent] = []

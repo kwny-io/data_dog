@@ -96,9 +96,80 @@ def test_mutate_returns_fn_result(store):
     assert store.get("k") == {"stored": True}
 
 
+def test_mutate_many_returns_results_in_input_order(store):
+    """整批写入所有 key，结果按**输入顺序**返回。"""
+    out = store.mutate_many([
+        ("k1", lambda c: ({"v": 1}, "r1")),
+        ("k2", lambda c: ({"v": 2}, "r2")),
+    ])
+    assert out == ["r1", "r2"], out
+    assert store.get("k1") == {"v": 1}
+    assert store.get("k2") == {"v": 2}
+
+
+def test_mutate_many_repeats_on_same_key_cumulate(store):
+    """同一 key 在批里出现多次 → 按序应用（后一次看到前一次写回的值），不丢更新。"""
+    def inc(cur: Any) -> tuple[Any, Any]:
+        n = (cur or 0) + 1
+        return n, n
+
+    assert store.mutate_many([("c", inc), ("c", inc), ("c", inc)]) == [1, 2, 3]
+    assert store.get("c") == 3
+
+
+def test_mutate_many_empty_is_noop(store):
+    assert store.mutate_many([]) == []
+
+
+def test_mutate_many_is_all_or_nothing(store):
+    """整批原子：中途抛错 → 前面的 key 也**不生效**（调用方不该看到半批）。
+
+    三个后端用三种机制达成同一语义：PG 事务回滚、Redis 的 `EXEC` 根本没执行、
+    memory 显式回滚。缺了这条，"换后端是配置动作"就不成立。
+    """
+    def boom(cur: Any) -> tuple[Any, Any]:
+        raise RuntimeError("boom")
+
+    with pytest.raises(RuntimeError):
+        store.mutate_many([("a", lambda c: ({"w": 1}, None)), ("b", boom)])
+
+    assert store.get("a") is None, "失败的批次留下了半批（违反整批原子）"
+    assert store.get("b") is None
+
+
+def test_mutate_many_concurrent_no_lost_updates(store):
+    """并发**批次**之间仍不丢更新：批内共享 key 的原子性由行锁/WATCH/本地锁保证。
+
+    同时这条守着**定序加锁**——两个批次若以相反顺序去拿同一组锁就会死锁
+    （PG 会杀掉一个连接、Redis 本地锁会互等），所以 key 必须先排序再逐把拿。
+    """
+    import threading
+
+    n = 12
+    errors: list[BaseException] = []
+
+    def worker(i: int) -> None:
+        try:
+            store.mutate_many([
+                (f"own-{i}", lambda c: ({"i": i}, None)),
+                ("shared", lambda c: (((c or 0) + 1), None)),
+            ])
+        except BaseException as e:        # noqa: BLE001 - 测试要看到后端的任何异常
+            errors.append(e)
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not errors, errors
+    assert store.get("shared") == n, "并发批次丢更新 → 批内原子性不成立"
+    assert all(store.get(f"own-{i}") == {"i": i} for i in range(n))
+
+
 def test_get_missing_is_none(store):
     assert store.get("nope") is None
-
 
 def test_delete(store):
     store.mutate("k", lambda c: ({"x": 1}, None))

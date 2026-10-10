@@ -71,6 +71,22 @@ def get_rate_store() -> StateStore:
     return _rate
 
 
+def effective_state_backend() -> str:
+    """**实际生效**的状态后端名（未显式配置时为自动推导的结果）。
+
+    与 `settings.state_backend()` 的区别：后者是"用户写了什么"（未写为空串），
+    前者是"最终用哪个"。启动期校验（如多 worker 前的共享性检查）必须看这个。
+    """
+    from .. import settings
+    return settings.state_backend() or _auto_backend()
+
+
+def effective_rate_backend() -> str:
+    """**实际生效**的限流后端名（未显式配置时跟随状态后端）。"""
+    from .. import settings
+    return settings.rate_backend() or effective_state_backend()
+
+
 def reset_state_store() -> None:
     """清空缓存（测试切换后端用）。"""
     global _state, _rate
