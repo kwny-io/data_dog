@@ -54,6 +54,15 @@ pytest tests/test_storage.py -q     # 13 项
 
 **数据库强制层（PostgreSQL RLS）**：迁移 `a7b8c9d0e1f2` 对租户表启用 `ROW LEVEL SECURITY` + 策略（`USING`/`WITH CHECK (tenant_id = current_setting('app.tenant_id', true))`）；会话通过 `set_config('app.tenant_id', :t, true)`（事务作用域、绑定参数）注入租户。两条硬边界：**superuser / 表属主默认绕过 RLS** → 生产须用非属主、非 superuser 角色；未设 `app.tenant_id` → 谓词为 NULL → **零行**（失败关闭）。SQLite 无 RLS，本地开发靠上面的应用层隔离。真库验证见 `tests/test_storage_postgres.py`。
 
+**系统级跨租户扫描（`session_scope(system=True)`）——顺带修掉一个静默失效**：上面那条"未设租户 → 零行"是对的失败关闭，但**后台扫描本来就没有租户**（升级 sweeper 要跨租户找到期投递、异步 job 恢复扫描要跨租户找卡死任务）。实测（非特权应用角色 + PG 16 + 本仓迁移）：同一张表，superuser 看到 1 行、应用角色**未设上下文看到 0 行**、设了租户才看到 1 行 —— 也就是说 `sweep_once()` 在生产 PG 上恒为 `scanned=0`，**告警升级根本不发生、且不报错**；CI 未发现是因为 CI 的 PG 腿连的是 superuser（绕过 RLS）。故迁移 `b7c8d9e0f1a2` 给策略加了一条**显式**通道：
+
+```
+USING (tenant_id = current_setting('app.tenant_id', true)
+       OR coalesce(current_setting('app.system_scan', true), 'off') = 'on')
+```
+
+三条纪律：① 只有后台扫描传 `system=True`（全仓仅 2 处调用，可 grep；请求路径绝不传）；② 扫描只负责"找出哪条要处理"，逐条处理仍走 `session_scope(tenant_id=...)` 并照旧带该行的 `tenant_id`；③ **未设上下文依旧零行**——失败关闭不放松（事务作用域，不泄漏到下个事务）。真库回归见 `tests/test_storage_postgres.py::test_rls_system_scan_is_explicit_and_scoped` 与 `..._finds_due_escalations`。
+
 **设计取舍**：多态字段（metrics / evidence / hypotheses / history）用 **JSON**（PostgreSQL 为 JSONB，SQLite 存 JSON 文本），关键字段单独建列 + 索引，避免过早拆表。
 
 ---

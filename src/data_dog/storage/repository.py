@@ -595,6 +595,29 @@ def finish_job(session: Session, job_id: str, *, tenant_id: str,
     return bool(res)
 
 
+def list_stale_jobs(session: Session, *, status: str, older_than_s: float,
+                    now: float | None = None,
+                    limit: int | None = None) -> list[dict[str, Any]]:
+    """列出"卡住"的 job（恢复扫描用）。**跨租户**（系统级后台扫描）。
+
+    判据按状态取**不同时间戳**，因为它们回答的是不同问题：
+      - `pending`：看 `submitted_at` —— "提交后多久还没被任何一个 worker 领走"
+        （典型成因：worker 取件后、条件领取前崩溃）；
+      - `running`：看 `started_at` —— "开工后多久还没结束"（典型成因：进程被杀）。
+    """
+    ts = float(M._now() if now is None else now)
+    cutoff = ts - max(0.0, float(older_than_s))
+    col = (M.InvestigationJobRow.started_at if status == "running"
+           else M.InvestigationJobRow.submitted_at)
+    q = (session.query(M.InvestigationJobRow)
+         .filter(M.InvestigationJobRow.status == status,
+                 col.isnot(None), col < cutoff)
+         .order_by(col))
+    if limit is not None:
+        q = q.limit(max(0, int(limit)))
+    return [_row_dict(r) for r in q.all()]
+
+
 def cancel_job(session: Session, job_id: str, *, tenant_id: str) -> str | None:
     """请求取消 job。返回取消后的状态，或 None（跨租户/不存在）。
 

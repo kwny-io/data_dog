@@ -130,5 +130,23 @@ GET  /v1/investigations/{id}       查报告（**保持现状**，id 既可是 r
   `cancelled`，与 worker 的 `finish_job`（`WHERE status='running'`）在数据库层互斥——
   取消与完成谁也不能覆盖谁。被取消的 job 的 `report_id` 保持 `NULL`。
 
-仍未解（诚实边界，同 §6）：进程内线程池**不是**分布式调度器；job 表需保留策略；
-取件与领取之间崩溃的 job 会停留 pending（需运维扫重投）。
+**已完成（2026-10-10 补充）**
+- **报告与 job 终态同事务**：此前报告在调查实现里单独提交、异常还被吞掉，会出现
+  "job=succeeded 但报告查不到"。现在 `_finish` 把 `finish_job`（条件终态）与
+  `save_report` 放进**一个事务**；事务失败 → 回滚 → 再显式标 `failed(persist_failed)`
+  （不让它挂在 running 等人扫）。顺序刻意是"先条件终态、后写产物"：job 已不是
+  running（例如被取消）→ 不提交产物，符合协作式取消语义。
+- **卡死恢复扫描已内置**：`JobRunner.recover_stale()`（每 `DD_INVESTIGATE_RECOVER_INTERVAL_S`
+  跑一次，默认 60s）——`pending` 过旧 → **重新入队**（幂等：条件领取保证只执行一次）；
+  `running` 过旧 → 标 `failed(abandoned)`，**不自动重跑**（"慢但还活着"与"已死"
+  无法区分，重跑有并发执行同一 job 的风险）。阈值见 `DD_INVESTIGATE_STALE_PENDING_S`
+  （默认 300s）/`DD_INVESTIGATE_STALE_RUNNING_S`（默认 900s，须远大于最坏单次耗时）。
+- **跨租户扫描必须走 `session_scope(system=True)`**（迁移 `b7c8d9e0f1a2`）：
+  否则 RLS 下**零行可见**——恢复扫描与升级扫描会一起静默失效（实测过，见 `docs/storage.md`）。
+
+仍未解（诚实边界，同 §6）：进程内线程池**不是**分布式调度器；**job 表仍需保留策略**
+（定期清已终态且超过 N 天的 job）；僵死判据是时间阈值，极端慢任务可能被误判为
+`abandoned`（阈值可配，且判死是显式可查的 `error_code`）。
+
+复现（本机，离线）：`pytest tests/test_job_atomicity.py -q`（一致性 + 恢复扫描，9 条）；
+真库：`DD_TEST_PG_URL=... pytest tests/test_storage_postgres.py -q`（含系统扫描 2 条）。

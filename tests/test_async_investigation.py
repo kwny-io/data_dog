@@ -151,19 +151,42 @@ def test_failed_job_has_error_code(client, monkeypatch):
 
 # ---------------------------------------------------------------- 取消
 
-def test_cancel_job_is_terminal(client):
-    """取消一个 job → 状态为 cancelled；终态不可被 worker 覆盖回 succeeded。"""
+def test_cancel_job_is_terminal(client, monkeypatch):
+    """取消一个 job → 状态为 cancelled；终态不可被 worker 覆盖回 succeeded。
+
+    **为什么要卡住 worker**：这条用例的语义是"取消发生在完成之前"。原先它依赖
+    "取消请求比离线调查更快"这一时序假设——一旦 worker 先跑完，job 已是
+    `succeeded`，取消接口会如实返回当前状态，断言就随机失败（改动让完成更快后
+    就真的翻出来了）。这里用事件把执行卡住，让"取消先到"成为**确定**前提。
+    """
+    import sys
+    import threading
+
+    mod = sys.modules["data_dog.service.runtime"]
+    started = threading.Event()
+    release = threading.Event()
+    real = mod._execute_investigation
+
+    def _blocked(*args, **kwargs):
+        started.set()
+        assert release.wait(5.0), "测试没有放行 worker"
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(mod, "_execute_investigation", _blocked)
+
     cid = _seed_candidate(client)
     job_id = client.post("/v1/investigations", headers=_Q,
                          json={"candidate_id": cid}).json()["job_id"]
+    assert started.wait(5.0), "worker 未开跑（job 没被领取）"
+
     r = client.post(f"/v1/investigations/jobs/{job_id}/cancel", headers=_Q)
     assert r.status_code == 200, r.text
     assert r.json()["job"]["status"] == "cancelled"
 
-    # 无论 worker 此前是否已开跑，cancelled 都是终态：等一下确认不被覆盖
-    time.sleep(0.3)
+    release.set()                      # 放行 worker：它跑完也不许覆盖终态
+    time.sleep(0.4)
     job = client.get(f"/v1/investigations/jobs/{job_id}", headers=_Q).json()["job"]
-    assert job["status"] == "cancelled"
+    assert job["status"] == "cancelled", "终态被 worker 覆盖了"
 
 
 def test_cancel_unknown_404(client):

@@ -22,19 +22,25 @@
   分布式调度器。要更强保证需外部队列（Celery/RQ/Kafka）。
 - **取消是协作式**：不强制杀线程。取消后 worker 在**步边界**（每次 LLM 调用前）看到
   并停止；一次已发出的 LLM 调用要等它返回。这与既有 `_DeadlineProvider` 的超时语义一致。
-- **崩在取件与领取之间**：若副本取走 job 后、领取前崩溃，该 job 会停留在 pending。
-  这是已知窗口（见 docs/p4/gaps/01_async_investigation.md）；生产应定期扫 pending
-  重投（运维文档记）。本模块不内置分布式恢复。
+- **报告与终态同事务**（已修）：此前报告在调查实现里单独提交、异常还被吞掉，会出现
+  "job=succeeded 但报告缺失"。现在两件事在**一个事务**里做（见 `_finish`）。
+- **卡死窗口已由恢复扫描兜住**（已修）：取件后/领取前崩溃 → job 停在 pending；
+  完成写回前进程被杀 → 停在 running。`recover_stale()` 定期把过旧的 pending
+  **重新入队**（幂等）、把过旧的 running 标 `failed(abandoned)`（**不自动重跑**，
+  避免慢但活着的 worker 与重跑并发）。**边界**：判死依赖时间阈值，阈值须显著大于
+  最坏单次耗时；跨副本不保证"只扫一次"（幂等即可）。
 """
 from __future__ import annotations
 
 import logging
 import threading
+import time
 import uuid
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
+from .. import settings
 from ..state import get_state_store
 from ..state.base import StateStore
 
@@ -88,22 +94,31 @@ class JobRunner:
     """后台 worker 池：从共享队列取件 → 条件领取 → 执行 → 落终态。
 
     `run_fn` 契约：`run_fn(tenant_id, candidate_id, should_cancel) -> dict`，返回
-    `{"status": "succeeded"|"failed", "report_id": str|None, "error_code": str|None}`。
+    `{"status": "succeeded"|"failed"|"cancelled", "report_id": str|None,
+      "error_code": str|None, "report": <报告对象，仅 succeeded 且未落库时>}`。
     把执行逻辑注入进来，本模块只负责并发/生命周期，不耦合 provider/AgentLoop。
+
+    **报告与终态在同一个事务里落库**（见 `_finish`）：此前 `save_report` 在调查实现
+    里单独提交、异常还被吞掉，于是可能出现"job=succeeded 但报告查不到"——查得到
+    任务、查不到产物，是最难解释的一类不一致。
     """
 
     def __init__(self, run_fn: Callable[..., dict[str, Any]], *,
                  workers: int = 4, queue: SharedJobQueue | None = None,
-                 poll_interval_s: float = 0.2) -> None:
+                 poll_interval_s: float = 0.2,
+                 recover_interval_s: float | None = None) -> None:
         self._run_fn = run_fn
         self._workers = max(1, int(workers))
         self._queue = queue or SharedJobQueue()
         self._poll_s = poll_interval_s
+        self._recover_s = (settings.investigate_recover_interval_s()
+                           if recover_interval_s is None else float(recover_interval_s))
         self._executor: ThreadPoolExecutor | None = None
         self._stop = threading.Event()
         self._futures: list[Any] = []
         # 每个 worker 线程用独立 worker_id，便于日志定位"谁在跑这个 job"
         self._worker_ids: dict[int, str] = {}
+        self.recovered: dict[str, int] = {"requeued": 0, "abandoned": 0, "errors": 0}
 
     # ---- 提交 ---------------------------------------------------------
 
@@ -148,7 +163,13 @@ class JobRunner:
     def _worker_loop(self, idx: int) -> None:
         worker_id = f"{threading.current_thread().name}-{idx}"
         self._worker_ids[threading.get_ident()] = worker_id
+        last_recover = time.monotonic()
         while not self._stop.is_set():
+            # 恢复扫描：只让 0 号 worker 做（进程内一次就够；多副本各自扫也没关系，
+            # 见 recover_stale 的幂等性说明）
+            if idx == 0 and time.monotonic() - last_recover >= self._recover_s:
+                last_recover = time.monotonic()
+                self.recover_stale()
             batch = self._pop(batch_size=self._workers)
             if not batch:
                 # 无活可干：短睡后再查（不忙等）
@@ -210,16 +231,126 @@ class JobRunner:
             result = {"status": "failed", "report_id": None,
                       "error_code": "execution_failed"}
 
-        # 落终态。若是被取消（cancelled）→ finish_job 的条件更新会拒绝
-        # （只有 running 能到 succeeded/failed），cancelled 不被覆盖。
+        self._finish(tenant_id=tenant_id, job_id=job_id, result=result)
+
+    def _finish(self, *, tenant_id: str, job_id: str,
+                result: dict[str, Any]) -> None:
+        """落终态：**报告 + job 状态在同一个事务里**（要么都成，要么都不成）。
+
+        顺序刻意是"先条件终态、后写产物"：`finish_job` 是
+        `UPDATE ... WHERE status='running'`，返回 False 说明 job 已不是 running
+        （典型是已被取消）——协作式取消的语义要求**不提交产物**，故此时跳过报告。
+
+        事务整体失败（如报告落库报错）时该事务已回滚，job 会停在 `running`；这里
+        **再补一次显式失败**（`persist_failed`），不让它挂在那儿等人扫。恢复扫描是
+        兜底，不该当主路径。
+        """
+        from ..storage import repository as repo
+        from ..storage.db import session_scope
+
+        status = str(result.get("status", "failed"))
+        report = result.get("report")
         try:
             with session_scope(tenant_id=tenant_id) as s:
-                repo.finish_job(
-                    s, job_id, tenant_id=tenant_id,
-                    status=result.get("status", "failed"),
+                applied = repo.finish_job(
+                    s, job_id, tenant_id=tenant_id, status=status,
                     report_id=result.get("report_id"),
                     error_code=result.get("error_code"))
+                if applied and status == "succeeded" and report is not None:
+                    repo.save_report(s, report, tenant_id=tenant_id)
         except Exception as e:                        # noqa: BLE001
-            _log.error("写 job 终态失败",
+            _log.error("job 终态与报告同事务落库失败（已回滚）",
                        extra={"job_id": job_id,
                               "error": f"{type(e).__name__}: {e}"})
+            try:
+                with session_scope(tenant_id=tenant_id) as s:
+                    repo.finish_job(s, job_id, tenant_id=tenant_id,
+                                    status="failed", error_code="persist_failed")
+            except Exception as e2:                   # noqa: BLE001
+                _log.error("补记 job 失败也失败（留给恢复扫描）",
+                           extra={"job_id": job_id,
+                                  "error": f"{type(e2).__name__}: {e2}"})
+
+    # ---- 卡死恢复 -----------------------------------------------------
+
+    def recover_stale(self, *, pending_after_s: float | None = None,
+                      running_after_s: float | None = None,
+                      limit: int | None = None) -> dict[str, int]:
+        """恢复扫描：把**卡住**的 job 拉回正轨。返回本轮统计。
+
+        两类卡死（此前只写在文档里的窗口）：
+        - `pending` 且过旧 → **重新入队**。成因是"取件后、条件领取前崩溃"，
+          job 在库里但不在队列里，永远不会被执行。重新入队是幂等的：真开工前有
+          条件领取（`UPDATE ... WHERE status='pending'`），重复条目只会被跳过。
+        - `running` 且过旧 → 置 `failed`（`error_code=abandoned`），**不自动重跑**。
+          因为"慢但还活着"的 worker 无法与"已经死了"区分；重跑有让同一 job 被两个
+          worker **并发执行**的风险（那会重复产生 LLM 花费与报告）。判死至少是
+          可解释的，而且把"这次没成"如实写在 job 上。
+
+        多副本可并发调用：入队幂等、终态是条件更新（`finish_job` 只接受 running）。
+        跨租户扫描必须走 `session_scope(system=True)` —— 否则 RLS 下零行可见
+        （见 `storage/db.py` 的说明与迁移 `b7c8d9e0f1a2`）。
+        """
+        from ..storage import repository as repo
+        from ..storage.db import session_scope
+
+        pend = (settings.investigate_stale_pending_s()
+                if pending_after_s is None else float(pending_after_s))
+        run = (settings.investigate_stale_running_s()
+               if running_after_s is None else float(running_after_s))
+        cap = settings.investigate_recover_batch() if limit is None else int(limit)
+        stats = {"requeued": 0, "abandoned": 0, "errors": 0}
+
+        try:
+            with session_scope(system=True) as s:
+                stale_pending = repo.list_stale_jobs(
+                    s, status="pending", older_than_s=pend, limit=cap)
+        except Exception as e:                        # noqa: BLE001
+            _log.warning("恢复扫描（pending）失败",
+                         extra={"error": f"{type(e).__name__}: {e}"})
+            stats["errors"] += 1
+            stale_pending = []
+        for row in stale_pending:
+            try:
+                self._queue.push({"tenant_id": row["tenant_id"],
+                                  "job_id": row["job_id"],
+                                  "candidate_id": row["candidate_id"]})
+                stats["requeued"] += 1
+            except Exception as e:                    # noqa: BLE001
+                _log.warning("重新入队失败", extra={
+                    "job_id": row.get("job_id"),
+                    "error": f"{type(e).__name__}: {e}"})
+                stats["errors"] += 1
+
+        try:
+            with session_scope(system=True) as s:
+                stale_running = repo.list_stale_jobs(
+                    s, status="running", older_than_s=run, limit=cap)
+        except Exception as e:                        # noqa: BLE001
+            _log.warning("恢复扫描（running）失败",
+                         extra={"error": f"{type(e).__name__}: {e}"})
+            stats["errors"] += 1
+            stale_running = []
+        for row in stale_running:
+            try:
+                with session_scope(tenant_id=row["tenant_id"]) as s:
+                    if repo.finish_job(s, row["job_id"],
+                                       tenant_id=row["tenant_id"],
+                                       status="failed",
+                                       error_code="abandoned"):
+                        stats["abandoned"] += 1
+                        _log.warning("僵死 job 已标记失败（不自动重跑）", extra={
+                            "job_id": row.get("job_id"),
+                            "tenant_id": row.get("tenant_id"),
+                            "worker_id": row.get("worker_id", "")})
+            except Exception as e:                    # noqa: BLE001
+                _log.warning("标记僵死 job 失败", extra={
+                    "job_id": row.get("job_id"),
+                    "error": f"{type(e).__name__}: {e}"})
+                stats["errors"] += 1
+
+        for k, v in stats.items():
+            self.recovered[k] = self.recovered.get(k, 0) + v
+        if stats["requeued"] or stats["abandoned"] or stats["errors"]:
+            _log.info("异步 job 恢复扫描", extra=stats)
+        return stats

@@ -217,14 +217,18 @@ def _run_investigation_job(tenant_id: str, candidate_id: str,
     status: str = "failed"
     report_id: str | None = None
     error_code: str | None = "execution_failed"
+    report: Any = None
     try:
+        # persist=False：报告不在这里落库（否则与 job 终态是两个事务），
+        # 交给 JobRunner._finish 与终态同事务写。
         outcome = _execute_investigation(
-            tenant_id, candidate_id, should_cancel=should_cancel)
+            tenant_id, candidate_id, should_cancel=should_cancel, persist=False)
         # 取消：provider 抛 _InvestigationCancelled，_execute_investigation 会
         # 把它翻译成 status="cancelled"（不产出报告）。
         status = outcome.get("status", "failed")
         report_id = outcome.get("report_id")
         error_code = outcome.get("error_code")
+        report = outcome.get("report")
     except Exception as e:                            # noqa: BLE001
         _log.error("异步调查执行异常", extra={
             "candidate_id": candidate_id,
@@ -233,7 +237,8 @@ def _run_investigation_job(tenant_id: str, candidate_id: str,
     finally:
         metrics.investigation_job_duration_seconds.observe(time.monotonic() - started)
         metrics.investigation_jobs_total.labels(status=status).inc()
-    return {"status": status, "report_id": report_id, "error_code": error_code}
+    return {"status": status, "report_id": report_id, "error_code": error_code,
+            "report": report}
 def _db_reachable() -> dict[str, Any]:
     """探测数据库连通性：直接建立一条连接（拿到即通，不做任何查询）。"""
     try:
@@ -331,12 +336,15 @@ def _submit_async_investigation(tenant: str, candidate_id: str,
             "candidate_id": candidate_id,
             "poll": f"/v1/investigations/jobs/{job_id}"}
 def _execute_investigation(tenant: str, candidate_id: str, *,
-                           should_cancel=None) -> dict[str, Any]:
+                           should_cancel=None, persist: bool = True) -> dict[str, Any]:
     """一次调查的**唯一实现**（同步端点与异步 worker 共用）。
 
     返回统一结构，两条路径各自翻译：
       - 同步端点看 `ok`/`http_status`/`detail`/`response`。
-      - worker 看 `status`（succeeded/failed/cancelled）/`report_id`/`error_code`。
+      - worker 看 `status`（succeeded/failed/cancelled）/`report_id`/`error_code`/`report`。
+
+    `persist=False`（worker 路径）：**不落库报告**，而是把报告对象放进 `report` 返回，
+    由调用方与 job 终态在**同一个事务**里写——这样"job 成功 ⇔ 报告存在"才成立。
 
     失败/取消**不抛异常**（除取消用哨兵外），全部收敛成返回值——这样 worker 不必
     区分异常种类，同步端点也能稳定映射 HTTP 状态。
@@ -385,13 +393,20 @@ def _execute_investigation(tenant: str, candidate_id: str, *,
 
     metrics.investigations_total.labels(result="ok").inc()
 
-    # 持久化报告（幂等 upsert）
-    try:
-        with session_scope() as s:
-            repo.save_report(s, report, tenant_id=tenant)
-    except Exception as e:                          # noqa: BLE001
-        # 落库失败不吞掉已算出的结论，但如实标明
-        _log.warning("报告落库失败", extra={"error": f"{type(e).__name__}: {e}"})
+    # 持久化报告（幂等 upsert）。
+    # `persist=False`（异步 worker 路径）：**不在这里落库**，把报告对象交给调用方，
+    # 由它与 job 终态在**同一个事务**里写——否则会出现"job=succeeded 但报告查不到"
+    # （此前正是如此：这里单独提交、异常还被吞掉，job 照样标成功）。
+    report_persisted = False
+    if persist:
+        try:
+            with session_scope() as s:
+                repo.save_report(s, report, tenant_id=tenant)
+            report_persisted = True
+        except Exception as e:                      # noqa: BLE001
+            # 落库失败不吞掉已算出的结论（同步端点把报告原样返回给调用方），
+            # 但**如实标明**：响应里带 `report_persisted=False`，别让调用方以为存住了。
+            _log.warning("报告落库失败", extra={"error": f"{type(e).__name__}: {e}"})
 
     # ---- P3：策略门 → 正式事件 → outbox（全部落库）----
     # 这一步让 /v1/alerts、/v1/feedback、/v1/summary 的 alerts_by_state 在真实
@@ -448,9 +463,15 @@ def _execute_investigation(tenant: str, candidate_id: str, *,
         "trace": trace,
         "usage": usage,
         "alerting": alerting_result,
+        # 落库是否成功**如实回报**（同步路径下报告已随响应返回给调用方，但库里可能没有）
+        "report_persisted": report_persisted,
     }
-    return {"ok": True, "response": response, "status": "succeeded",
-            "report_id": report.investigation_id, "error_code": None}
+    out: dict[str, Any] = {"ok": True, "response": response, "status": "succeeded",
+                           "report_id": report.investigation_id, "error_code": None}
+    if not persist:
+        # 异步 worker：报告交给它，与 job 终态同事务落库（见 investigation_jobs._finish）
+        out["report"] = report
+    return out
 def _make_job_id(tenant_id: str, candidate_id: str) -> str:
     from .investigation_jobs import make_job_id
     return make_job_id(tenant_id, candidate_id)

@@ -483,6 +483,44 @@ def investigate_queue_poll_ms() -> int:
     return max(20, _get_int("DD_INVESTIGATE_QUEUE_POLL_MS", default=200))
 
 
+def investigate_recover_interval_s() -> float:
+    """异步 job 的**卡死恢复扫描**间隔（秒）。默认 60s。
+
+    为什么需要它（两个以前只写在文档里的窗口）
+    - **取件与领取之间崩溃**：worker 把 job 从共享队列取走后、还没条件领取就崩，
+      该 job 会永远停在 `pending`（没人再投它）。
+    - **完成写回时崩溃**：报告落库与 job 终态现在是**一个事务**（不会再出现
+      "job=succeeded 但报告缺失"），但"事务提交前进程被杀"仍会留下 `running`。
+    扫描会：`pending` 且过旧 → **重新入队**（幂等：条件领取保证只执行一次）；
+    `running` 且过旧 → 置 `failed`（`error_code=abandoned`），**不自动重跑**。
+    """
+    return max(1.0, _get_float("DD_INVESTIGATE_RECOVER_INTERVAL_S", default=60.0))
+
+
+def investigate_stale_pending_s() -> float:
+    """`pending` 多久算卡住（秒）→ 重新入队。默认 300s。
+
+    取值要大于"正常排队等待"：队列里排队的 job 也是 `pending`，反复重投只会让队列
+    涨水（虽然条件领取保证不会重复执行）。300s 远大于 LLM 单次调查量级。
+    """
+    return max(1.0, _get_float("DD_INVESTIGATE_STALE_PENDING_S", default=300.0))
+
+
+def investigate_stale_running_s() -> float:
+    """`running` 多久算僵死（秒）→ 标 `failed`。默认 900s。
+
+    必须显著大于"最坏情况下一次调查的耗时"（`DD_INVESTIGATE_TIMEOUT_S` × 步数），
+    否则会把**慢但还活着**的 worker 判死——那会让它的产物写不进去（`finish_job`
+    只接受 `running`），等于白跑一次。故取 15 分钟：90s 超时 × 8 步仍有充裕余量。
+    """
+    return max(10.0, _get_float("DD_INVESTIGATE_STALE_RUNNING_S", default=900.0))
+
+
+def investigate_recover_batch() -> int:
+    """每轮恢复扫描最多处理多少个 job（防一次扫太多把库压住）。默认 100。"""
+    return max(1, _get_int("DD_INVESTIGATE_RECOVER_BATCH", default=100))
+
+
 # ---------------------------------------------------------------- 事件时间（G2）
 
 def allowed_lateness_s() -> float:

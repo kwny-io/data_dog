@@ -226,3 +226,85 @@ def test_rls_blocks_cross_tenant_write(pg_url, app_role):
     msg = str(ei.value).lower()
     assert "row-level security" in msg or "violates" in msg, \
         f"跨租户写入未被 RLS 拒绝，而是：{ei.value!r}"
+
+
+def test_rls_system_scan_is_explicit_and_scoped(pg_url, app_role):
+    """**跨租户后台扫描**：只有显式 `system=True` 才看得见所有租户。
+
+    这是修一个**静默失效**的回归锁（实测发现，非推测）：
+    RLS 在未设 `app.tenant_id` 时零行可见（失败关闭，对的），而升级 sweeper 与
+    异步 job 恢复扫描**本来就没有租户**——不给它们一条显式通道，它们在生产 PG
+    （非 owner/非 superuser 角色）上会永远扫到 0 行：`sweep_once` 恒 `scanned=0`，
+    **告警升级根本不发生**，而且不报错。CI 抓不到是因为 CI 的 PG 腿连的是 superuser
+    （superuser 绕过 RLS）。见迁移 `b7c8d9e0f1a2`。
+
+    三条一起断言，缺一条都可能退化成"要么静默失效、要么把 RLS 放松成人人可见"：
+      1. 未设上下文 → 仍然零行（失败关闭**不放松**）；
+      2. 显式 `system=True` → 看得见两个租户；
+      3. 请求路径（带租户、不带 system）→ 仍然只看自己；
+      4. 标志是**事务作用域**，下一个事务不会继承。
+    """
+    from alembic import command
+    from data_dog.storage import migrations
+    from data_dog.storage.db import session_scope as scope
+
+    command.upgrade(migrations.make_config(pg_url), "head")
+    _grant_app_role(pg_url, app_role)
+    app_url = _as_role(pg_url, app_role)
+
+    for tenant, dev in (("t1", "dev-1"), ("t2", "dev-2")):
+        with scope(app_url, tenant_id=tenant) as s:
+            repo.save_candidates(s, [_cand("c1", device=dev)], tenant_id=tenant)
+
+    # 1) 失败关闭不放松
+    with scope(app_url) as s:
+        assert s.execute(text("SELECT count(*) FROM candidates")).scalar() == 0
+
+    # 2) 显式系统扫描 → 两个租户都看得见
+    with scope(app_url, system=True) as s:
+        rows = s.execute(
+            text("SELECT device_sn FROM candidates ORDER BY device_sn")).fetchall()
+    assert [r[0] for r in rows] == ["dev-1", "dev-2"], \
+        "系统扫描没看到全部租户——跨租户后台任务会静默扫到 0 行"
+
+    # 3) 请求路径仍然只看自己
+    with scope(app_url, tenant_id="t1") as s:
+        rows = s.execute(text("SELECT device_sn FROM candidates")).fetchall()
+    assert [r[0] for r in rows] == ["dev-1"]
+
+    # 4) 事务作用域：不继承
+    with scope(app_url) as s:
+        assert s.execute(text("SELECT count(*) FROM candidates")).scalar() == 0
+
+
+def test_rls_system_scan_finds_due_escalations(pg_url, app_role):
+    """把上一条落到**真实调用点**：升级 sweeper 的跨租户扫描能扫到到期投递。
+
+    修前：以应用角色跑 `list_due_deliveries`（跨租户、无租户上下文）恒返回 0 条 →
+    升级永不发生。这里断言"系统扫描能扫到 1 条、且逐租户会话也读得到它"。
+    """
+    import time as _t
+
+    from alembic import command
+    from data_dog.storage import migrations
+    from data_dog.storage.db import session_scope as scope
+
+    command.upgrade(migrations.make_config(pg_url), "head")
+    _grant_app_role(pg_url, app_role)
+    app_url = _as_role(pg_url, app_role)
+
+    now = _t.time()
+    with scope(app_url, tenant_id="t1") as s:
+        repo.upsert_delivery(s, tenant_id="t1", delivery_id="dlv_1",
+                             event_id="alert_1", level=1, channel="webhook",
+                             target="http://127.0.0.1:1/x", assignee="alice",
+                             status="pending", sent_at=now - 120,
+                             ack_deadline=now - 60, domain="joint_motor")
+
+    with scope(app_url) as s:                    # 没有租户上下文（sweeper 修前的样子）
+        assert repo.list_due_deliveries(s, now=now) == []
+
+    with scope(app_url, system=True) as s:       # 显式系统扫描
+        due = repo.list_due_deliveries(s, now=now)
+    assert len(due) == 1 and due[0]["delivery_id"] == "dlv_1", \
+        "系统扫描没扫到到期投递——生产 PG 上告警升级会静默不发生"

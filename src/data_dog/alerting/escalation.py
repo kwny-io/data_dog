@@ -166,13 +166,18 @@ class EscalationEngine:
         """扫一轮：把「pending 且已过 ack_deadline」的投递逐条升级。返回统计。
 
         **跨租户**扫描（系统级后台进程）——每条命中的行按其自带 tenant_id 单独处理。
+
+        ⚠ 扫描必须走 `system=True`：这是**跨租户**查询，没有租户上下文；而 RLS 在
+        未设 `app.tenant_id` 时**零行可见**（失败关闭）。不传这个开关，本函数在
+        生产 PG（非 superuser 角色）上会永远 `scanned=0`——升级静默不发生。
+        见 `storage/db.py::session_scope` 与迁移 `b7c8d9e0f1a2`。
         """
         from ..storage import repository as repo
 
         now = float(self._clock())
         max_level = settings.notify_max_level()
 
-        with session_scope() as s:
+        with session_scope(system=True) as s:
             due = repo.list_due_deliveries(s, now=now, limit=limit)
 
         stats = {"scanned": len(due), "escalated": 0, "failed": 0,

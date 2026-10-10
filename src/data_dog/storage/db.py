@@ -204,8 +204,8 @@ def get_sessionmaker() -> sessionmaker:
 
 
 @contextmanager
-def session_scope(url: str | None = None, *, tenant_id: str | None = None
-                  ) -> Iterator[Session]:
+def session_scope(url: str | None = None, *, tenant_id: str | None = None,
+                  system: bool = False) -> Iterator[Session]:
     """事务作用域：异常回滚，正常提交，最后关闭。
 
     传 url 时用临时引擎（测试用内存库，不污染全局）。
@@ -214,6 +214,24 @@ def session_scope(url: str | None = None, *, tenant_id: str | None = None
     设过），事务内执行 `set_config('app.tenant_id', <t>, true)`（`true`=事务作用域），
     让行级安全策略按本租户放行。SQLite 无 RLS，跳过（应用层过滤仍然生效）。
     用 `set_config(...)` 绑定参数而非拼接 `SET LOCAL`——杜绝 SQL 注入。
+
+    **`system=True`：系统级跨租户扫描**（升级 sweeper、异步 job 恢复扫描这类后台进程）
+    ------------------------------------------------------------------------------
+    为什么需要这个开关（**曾经的静默失效**）：RLS 策略是
+    `tenant_id = current_setting('app.tenant_id', true)`，未设上下文时右侧为 NULL →
+    **零行可见**（失败关闭，这是对的）。但后台扫描**本来就没有租户**，于是它扫到 0 行：
+    实测（非 owner/非 superuser 的应用角色，PG 16 + 本仓迁移）——
+    `list_due_deliveries` 跨租户扫到 **0**，`sweep_once` 永远 `scanned=0`，
+    **告警升级在生产的 PG 上根本不会发生**；而 CI 的 PG 腿连的是 superuser（绕过 RLS），
+    所以一直没被发现。
+
+    故这里给出一条**显式、可审计**的系统扫描通道：`system=True` 时置
+    `app.system_scan='on'`（同样事务作用域），策略侧多一个 `OR` 分支放行。
+    三条纪律：
+      - **只给后台扫描用**（请求路径绝不传 `system=True`；全仓仅 2 处调用，可 grep）；
+      - 扫描**只负责找出"哪条要处理"**，逐条处理仍走 `session_scope(tenant_id=...)`，
+        写入也照旧带该行的 tenant_id；
+      - 不设上下文时**默认仍然是零行**（失败关闭不放松）。
     """
     if url is not None:
         engine = get_engine(url)
@@ -223,9 +241,11 @@ def session_scope(url: str | None = None, *, tenant_id: str | None = None
         session = get_sessionmaker()()
     tenant = tenant_id if tenant_id is not None else _current_tenant.get()
     try:
-        if tenant and session.bind is not None \
-                and session.bind.dialect.name == "postgresql":
+        is_pg = session.bind is not None and session.bind.dialect.name == "postgresql"
+        if system and is_pg:
             # 事务作用域（is_local=true）：事务结束自动失效，不泄漏到连接池的下次借用
+            session.execute(text("SELECT set_config('app.system_scan', 'on', true)"))
+        if tenant and is_pg:
             session.execute(
                 text("SELECT set_config('app.tenant_id', :t, true)"),
                 {"t": tenant})
