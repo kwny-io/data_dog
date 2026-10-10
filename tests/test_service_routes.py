@@ -74,6 +74,8 @@ ROUTES = (
     ("GET", "/v1/notifications"),
     ("GET", "/v1/audit"),
     ("GET", "/v1/keys"),
+    ("GET", "/v1/tenant/export"),
+    ("POST", "/v1/tenant/purge"),
 )
 
 AUTH_DEPS = {require_tenant, require_tenant_and_device, require_ops_token,

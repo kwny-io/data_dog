@@ -14,8 +14,9 @@ from .operators import router as operators_router
 from .queries import router as queries_router
 from .state import router as state_router
 from .telemetry import router as telemetry_router
+from .tenant import router as tenant_router
 
 
 def all_routers() -> list:
     """按域聚合的路由表；路径互不重叠，故创建顺序不影响匹配。"""
-    return [health_router, state_router, telemetry_router, queries_router, investigations_router, feedback_router, knowledge_router, changes_router, operators_router, forecast_router, notify_router, audit_router, keys_router]
+    return [health_router, state_router, telemetry_router, queries_router, investigations_router, feedback_router, knowledge_router, changes_router, operators_router, forecast_router, notify_router, audit_router, keys_router, tenant_router]

@@ -187,32 +187,11 @@ def _condition(tbl: Any, rule: Rule, cutoff: float) -> Any:
 
 def _purge(session: Any, tbl: Any, cond: Any, batch_size: int,
            max_batches: int) -> tuple[int, int]:
-    """有界批次删除：每批一个短事务，最多 `max_batches` 批。
+    """有界批次删除——实现在 `storage/repository.py`，与 ⑥ 的租户级删除共用同一处。"""
+    from .storage.repository import delete_in_batches
 
-    为什么按主键先查后删、而不是 `DELETE ... LIMIT`：`DELETE` 的 `LIMIT` 不是标准 SQL
-    （PG 不支持；SQLite 只在编译期开了特定选项才有）。按主键列分批是**两边都成立**的
-    写法，且主键从 `Table.metadata` 取（**不硬编码**）——换了复合主键也不用改这里。
-    """
-    from sqlalchemy import delete, select, tuple_
-
-    pk = list(tbl.primary_key.columns)
-    if not pk:                                    # pragma: no cover - 本仓表都有主键
-        raise RuntimeError(f"{tbl.name} 没有主键，无法分批清理")
-
-    deleted = 0
-    batches = 0
-    while batches < max_batches:
-        keys = session.execute(select(*pk).where(cond).limit(batch_size)).all()
-        if not keys:
-            break
-        keys = [tuple(k) for k in keys]
-        if len(pk) == 1:
-            stmt = delete(tbl).where(pk[0].in_([k[0] for k in keys]))
-        else:
-            stmt = delete(tbl).where(tuple_(*pk).in_(keys))
-        deleted += int(session.execute(stmt).rowcount or 0)
-        batches += 1
-    return deleted, batches
+    return delete_in_batches(session, tbl, cond,
+                             batch_size=batch_size, max_batches=max_batches)
 
 
 # ---------------------------------------------------------------- CLI

@@ -20,6 +20,45 @@ from sqlalchemy.orm import Session
 from . import models as M
 
 
+def delete_in_batches(session: Session, table: Any, cond: Any, *,
+                      batch_size: int = 500, max_batches: int = 200
+                      ) -> tuple[int, int]:
+    """按条件**有界分批**删除，返回 `(deleted, batches)`。
+
+    为什么不是一条 `DELETE WHERE ...`：大表上长事务会持锁、把热路径写入堵住
+    （本项目已经因为"同步落库排队"在 P99 上吃过亏，见 `docs/write_path_batching.md`）。
+    为什么不是 `DELETE ... LIMIT`：`LIMIT` **不是标准 SQL**（PG 不支持；SQLite 要编译期
+    开关）。改成**按主键先查后删**，两边都成立。
+
+    主键从 `table.primary_key` 取（**不硬编码**），所以换了复合主键也不用改这里。
+    批数用满即返回——调用方据 `batches == max_batches` 判断"本轮没清完"，下轮继续，
+    而不是"为了清完把库锁死"。
+
+    两个调用方共用同一处：④ 的保留清理（按时间列）与 ⑥ 的租户级删除（按 `tenant_id`）。
+    `cond` 由调用方用**表达式构造器**拼出（本模块不拼 SQL 字符串），值走绑定参数。
+    """
+    from sqlalchemy import delete, select, tuple_
+
+    pk = list(table.primary_key.columns)
+    if not pk:                                    # pragma: no cover - 本仓表都有主键
+        raise RuntimeError(f"{table.name} 没有主键，无法分批删除")
+
+    deleted = 0
+    batches = 0
+    while batches < max_batches:
+        keys = [tuple(k) for k in session.execute(
+            select(*pk).where(cond).limit(batch_size)).all()]
+        if not keys:
+            break
+        if len(pk) == 1:
+            stmt = delete(table).where(pk[0].in_([k[0] for k in keys]))
+        else:
+            stmt = delete(table).where(tuple_(*pk).in_(keys))
+        deleted += int(session.execute(stmt).rowcount or 0)
+        batches += 1
+    return deleted, batches
+
+
 def _as_dict(obj: Any) -> dict[str, Any]:
     if isinstance(obj, dict):
         return dict(obj)

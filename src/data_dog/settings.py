@@ -310,6 +310,17 @@ def _parse_ts(tenant: str, idx: int, field: str, raw: Any) -> float | None:
     return dt.timestamp()
 
 
+def tenant_export_limit() -> int:
+    """`GET /v1/tenant/export` 每表最多导出多少行（`DD_TENANT_EXPORT_LIMIT`，默认 1000）。
+
+    为什么必须**有上限**：导出是"一个请求把某租户的全部历史拉走"。没有上限时，
+    一个存量很大的租户会把内存、响应体、以及数据库连接一起拖垮（而导出端点本身
+    又常常是合规审计时被反复调用的）。有界 + 在响应里显式回 `truncated`，
+    比"看起来能导出全量、实际把服务打挂"诚实得多。
+    """
+    return max(1, _get_int("DD_TENANT_EXPORT_LIMIT", default=1000))
+
+
 def retention_days() -> dict[str, int]:
     """各表的保留天数（`DD_RETENTION_*`）。**0 = 关闭该表的清理**（默认不动）。
 
