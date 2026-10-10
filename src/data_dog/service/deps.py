@@ -83,6 +83,20 @@ def require_ops_token(
     _require_ops_token(x_ops_token)
 
 
+def require_ops_token_scope(
+    x_ops_token: str | None = Header(default=None, alias="X-Ops-Token"),
+) -> dict[str, str]:
+    """同上，但**返回密钥指纹**——供端点留痕用（不回传令牌本身）。
+
+    为什么单独一个依赖而不是在路由里再读一次 header：读两次容易出现
+    "鉴权用了一个值、留痕用了另一个值"的漂移；把两件事绑在同一个依赖里，
+    留痕记的一定就是**刚刚通过校验的那把令牌**。
+    """
+    _require_ops_token(x_ops_token)
+    from .. import audit
+    return {"key_id": audit.key_fingerprint(x_ops_token or "")}
+
+
 def require_tenant_or_ops(
     x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
     x_ops_token: str | None = Header(default=None, alias="X-Ops-Token"),

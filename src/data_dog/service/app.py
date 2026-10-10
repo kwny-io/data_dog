@@ -197,12 +197,16 @@ async def _request_context(request, call_next):
                              response.status_code, duration_ms / 1000.0)
     return response
 def _deny(request, *, status: int, code: ToolErrorCode, detail: str,
-          reason: str) -> JSONResponse:
+          reason: str, key_id: str = "") -> JSONResponse:
     """统一拒绝出口：计数 → **留审计** → 返回统一错误体。
 
     为什么拒绝一定要留痕：`auth.denied` 里最值得看的就是"**声称某租户但密钥不对**"
     这类冒充尝试——它只会出现在失败里。审计写失败不影响这次拒绝的返回
     （`audit.record` 不抛异常），但会记 error 日志 + `data_dog_audit_write_failed_total`。
+
+    `key_id`（②）：密钥环里那把钥匙的**名字**（如 `2026-07`）。它让"**已吊销的那把
+    被谁在什么时候用过**"在台账里可查——只有指纹的话，吊销这把与吊销那把分不出来。
+    未配密钥环（v1 单密钥）时为空串，审计退回按指纹标识（与 ① 行为一致）。
 
     注意：守卫是**最外层**中间件（见 `create_app` 的注册顺序说明），此时请求上下文
     还没建立，故 `request_id` 只能取客户端透传的 `X-Request-Id`（可能为空）。
@@ -213,47 +217,68 @@ def _deny(request, *, status: int, code: ToolErrorCode, detail: str,
         action=audit.ACTION_AUTH_DENIED, outcome=audit.OUTCOME_DENIED,
         tenant_id=request.headers.get("X-Tenant-Id") or None,
         actor=audit.key_fingerprint(_extract_api_key(request)) or "anonymous",
-        target=request.url.path, reason=reason,
+        target=request.url.path, reason=reason, key_id=key_id,
         request_id=request.headers.get("X-Request-Id", ""))
     return JSONResponse(status_code=status,
                         content=_error_body(code, detail, reason=reason))
 
 
+# 密钥环判定 → (HTTP 状态, reason, 给调用方的话)。
+# `unknown_tenant` 与 `mismatch` **必须同码同 reason**：否则"未知租户"与"密钥不对"
+# 的差异就成了**租户枚举**接口（拿一把密钥把租户名试过去）。
+# `revoked`/`expired` 可以单独回：能走到这一步说明调用方**已经出示了那把密钥本身**，
+# 它本来就知道这把钥匙存在——告诉它"这把已失效"是运维必需，不是泄露。
+_TENANT_KEY_DENY: dict[str, tuple[int, str, str]] = {
+    "mismatch": (403, "tenant_key_mismatch", "密钥与所声称的租户不匹配"),
+    "unknown_tenant": (403, "tenant_key_mismatch", "密钥与所声称的租户不匹配"),
+    "revoked": (403, "key_revoked", "该密钥已被吊销（轮换后旧钥匙应立即失效）"),
+    "expired": (403, "key_expired", "该密钥已过期"),
+}
+
+
 async def _api_key_guard(request, call_next):
-    """鉴权守卫：**租户绑定模式**（设了 `DD_TENANT_KEYS`）优先，否则用全局单密钥。
+    """鉴权守卫：**租户密钥环模式**（设了 `DD_TENANT_KEYS`）优先，否则用全局单密钥。
 
     两种模式
     --------
-    1. **租户绑定模式**（推荐对外部署用）：请求带 `X-Tenant-Id` 时，`X-API-Key` 必须
-       等于 `DD_TENANT_KEYS` 里**该租户**绑定的密钥。于是"一把密钥冒充所有租户"不再成立：
-       持 A 的密钥去声称 B → 403（未知租户与密钥不符返回同一状态码，避免租户枚举）。
-       不带租户头的路径（`/metrics`、`/v1/state/*` 运维面）仍走全局密钥，与既有行为一致。
+    1. **租户密钥环模式**（推荐对外部署用）：请求带 `X-Tenant-Id` 时，`X-API-Key` 必须
+       命中该租户密钥环里**处于 active** 的一把（未吊销、未过期）。于是"一把密钥冒充
+       所有租户"不再成立：持 A 的密钥去声称 B → 403（未知租户与密钥不符**同码同 reason**，
+       不做租户枚举）。不带租户头的路径（`/metrics`、`/v1/state/*` 运维面）仍走全局密钥，
+       与既有行为一致。
     2. **全局单密钥模式**（默认，未配 `DD_TENANT_KEYS`）：所有非探针路径都要带正确的
        `X-API-Key`；**不设** `DD_API_KEY` = 不校验（本地开发/评测）。
 
+    ② 的增量：**轮换与吊销**。一个租户可以在册**多把**密钥（v2 写法的 `{"keys": [...]}`）：
+    轮换时旧新并存（调用方逐个切、无需同时改），旧的那把置 `revoked_at` 后**下一次请求
+    即失效**（`settings` 调用时读取、不缓存，所以不需要重启）。过期（`not_after`）同理。
+    被吊销/过期的请求**照样留审计并带上 `key_id`**——"哪把钥匙什么时候被谁用"可查。
+
     为什么保留模式 2：向后兼容——既有部署、评测、CI 都按单密钥跑，切换不能是"静默改变
     语义"。为什么必须有模式 1：模式 2 下租户身份完全由调用方自报，鉴权只回答"你是不是
-    某个合法调用方"，回答不了"你是哪个租户"。配错 `DD_TENANT_KEYS`（JSON 坏）→ 503
-    失败关闭，**绝不退回模式 2**。
+    某个合法调用方"，回答不了"你是哪个租户"。配错 `DD_TENANT_KEYS`（JSON 坏 / 环内
+    id 重复 / 旧新密钥同值）→ 503 失败关闭，**绝不退回模式 2**。
     """
     if request.url.path in _PUBLIC_PATHS:
         return await call_next(request)
 
     try:
-        tenant_keys = settings.tenant_api_keys()
+        keyring = settings.tenant_keyring()
     except ValueError as e:                    # 配置错 → 失败关闭，不降级为单密钥
         return _deny(request, status=503, code=ToolErrorCode.UNAVAILABLE,
                      detail=str(e), reason="tenant_keys_misconfigured")
 
     provided = _extract_api_key(request)
-    if tenant_keys:
+    if keyring:
         tenant = request.headers.get("X-Tenant-Id", "")
         if tenant:
-            bound = tenant_keys.get(tenant)
-            if not bound or not _api_key_ok(provided, bound):
-                return _deny(request, status=403, code=ToolErrorCode.DENIED,
-                             detail="密钥与所声称的租户不匹配",
-                             reason="tenant_key_mismatch")
+            key, verdict = settings.resolve_tenant_key(tenant, provided,
+                                                       keyring=keyring)
+            if verdict != "active":
+                status, reason, detail = _TENANT_KEY_DENY[verdict]
+                return _deny(request, status=status, code=ToolErrorCode.DENIED,
+                             detail=detail, reason=reason,
+                             key_id=key.key_id if key is not None else "")
             return await call_next(request)
         # 无租户头 → 非租户作用域，仍用全局密钥兜（未设全局密钥则拒绝）
         expected = settings.api_key()

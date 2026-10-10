@@ -17,6 +17,9 @@ from __future__ import annotations
 
 import json
 import os
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import Any
 
 
 def _get(canonical: str, *aliases: str, default: str = "") -> str:
@@ -110,8 +113,51 @@ def api_key() -> str:
     return _get("DD_API_KEY")
 
 
-def tenant_api_keys() -> dict[str, str]:
-    """租户绑定密钥表 `{tenant_id: key}`（`DD_TENANT_KEYS`，JSON 对象）。
+@dataclass(frozen=True)
+class TenantKey:
+    """租户的一把密钥，**含生命周期**（② 密钥轮换/吊销）。
+
+    为什么要把"密钥"从字符串升级成带 id + 生命周期的对象
+    --------------------------------------------------
+    静态字符串密钥有两个运维上绕不开的问题：**换不掉**、**撤不掉**。
+    换 = 所有调用方必须同一瞬间改（没有交叠窗口，必然有中断）；撤 = 密钥泄露了
+    只能全量替换 + 重启。带上 `key_id` 与 `not_after`/`revoked_at` 之后：
+
+    - **轮换**：旧新两把**同时在册**（交叠窗口）→ 调用方逐个切换 → 旧那把置
+      `revoked_at`。全程不需要调用方"同时改"，也不需要停机。
+    - **吊销**：给 `revoked_at` 一个时间戳，**下一次请求立即失效**——因为
+      `settings` 是"调用时读取、绝不缓存"（本模块的设计取舍），无需重启。
+    - **可审计**：`key_id` 落进 `audit_log.key_id`，"谁用**哪把**钥匙做了什么"可查。
+      这是把 ① 的安全审计面与密钥生命周期接起来的那根线——没有它，审计只能记
+      一个指纹，"吊销的那把被用过"这件事在台账里认不出来。
+
+    `key_id` 允许为空（v1 单密钥写法）：此时审计退回按**指纹**标识（与 ① 既有行为
+    逐字节一致），这样"没配密钥环"的部署审计记录不会变。
+    """
+
+    tenant_id: str
+    key_id: str
+    secret: str
+    not_after: float | None = None      # epoch 秒；None = 不设到期
+    revoked_at: float | None = None
+
+    def status(self, now: float) -> str:
+        """`active` / `expired` / `revoked`。**吊销优先于过期**（更强的语义先答）。
+
+        只用于运维视图与拒绝原因；**放行判断走 `active()`**，两者同源以免漂移。
+        """
+        if self.revoked_at is not None:
+            return "revoked"
+        if self.not_after is not None and now >= self.not_after:
+            return "expired"
+        return "active"
+
+    def active(self, now: float) -> bool:
+        return self.status(now) == "active"
+
+
+def tenant_keyring() -> dict[str, tuple[TenantKey, ...]]:
+    """租户密钥环 `{tenant_id: (TenantKey, ...)}`（`DD_TENANT_KEYS`，JSON 对象）。
 
     为什么需要它（补一个真实漏洞）
     ----------------------------
@@ -120,12 +166,24 @@ def tenant_api_keys() -> dict[str, str]:
     写 `X-Tenant-Id: victim-a` 与 `victim-b` 均 200。RLS 与复合主键防的是
     "代码写错导致串租户"，防不了"持密钥者主动冒充"。
 
-    配了本表即进入**租户绑定模式**：所持密钥必须与请求头声称的租户绑定一致，
-    否则 403（未知租户与密钥不符返回同一状态码，避免租户枚举）。
-    未配（默认）= 保持原有单密钥行为，向后兼容（本地开发/评测不受影响）。
+    两种写法（同一个环境变量，**v1 逐字节保持原语义**）：
+
+        {"tenant-a": "static-key"}                    ← v1：单密钥（= 一把不过期的 key）
+        {"tenant-b": {"keys": [                       ← v2：密钥环（可轮换/吊销）
+            {"id": "2026-10", "secret": "new",
+             "not_after": "2027-01-01T00:00:00Z"},
+            {"id": "2026-07", "secret": "old",
+             "revoked_at": "2026-10-01T00:00:00Z"}
+        ]}}
+
+    未配（默认）= 保持原有单密钥模式，向后兼容（本地开发/评测不受影响）。
 
     解析失败**绝不静默降级**（降级 = 退回单密钥模式 = 漏洞照旧）：抛 `ValueError`，
-    由服务边界转 503，失败关闭。
+    由服务边界转 503，失败关闭。密钥环内部同样失败关闭，两条**看起来无害但会毁掉
+    审计/轮换语义**的配置一律拒绝：
+      - 同一租户内 `id` 重复 → 审计记下 `key_id` 也分不清是哪把钥匙；
+      - 同一租户内两把 `secret` 相同 → "只吊销旧的那把"在实现上不可能成立
+        （同一密钥值必然同时命中两把），轮换会静默退化成"没轮换"。
     """
     raw = _get("DD_TENANT_KEYS").strip()
     if not raw:
@@ -136,14 +194,120 @@ def tenant_api_keys() -> dict[str, str]:
         raise ValueError(f"DD_TENANT_KEYS 不是合法 JSON：{e}") from e
     if not isinstance(data, dict) or not data:
         raise ValueError("DD_TENANT_KEYS 必须是非空 JSON 对象 {租户id: 密钥}")
-    out: dict[str, str] = {}
-    for tenant, key in data.items():
+    out: dict[str, tuple[TenantKey, ...]] = {}
+    for tenant, value in data.items():
         if not isinstance(tenant, str) or not tenant.strip():
             raise ValueError("DD_TENANT_KEYS 的租户 id 必须是非空字符串")
-        if not isinstance(key, str) or not key:
-            raise ValueError(f"DD_TENANT_KEYS[{tenant!r}] 的密钥必须是非空字符串")
-        out[tenant] = key
+        out[tenant] = _parse_tenant_keys(tenant, value)
     return out
+
+
+def resolve_tenant_key(tenant: str, provided: str, *,
+                       now: float | None = None, keyring: dict[str, tuple[TenantKey, ...]]
+                       | None = None) -> tuple[TenantKey | None, str]:
+    """在租户密钥环里解析出示的密钥，返回 `(命中的 key 或 None, 判定)`。
+
+    判定闭集：`active` / `revoked` / `expired` / `mismatch` / `unknown_tenant`。
+
+    为什么要**分开回"命中但已吊销/过期"与"没命中"**
+    ----------------------------------------------
+    这两类对**调用方**含义完全不同：前者说明"你拿的是一把真钥匙，但它已失效"，
+    调用方该去换钥匙；后者说明"这把钥匙根本不对"，该去查配置或怀疑泄露。
+    且它**不构成信息泄露**——能拿到 `revoked` 的前提是已经出示了那把密钥本身，
+    调用方本来就知道它的存在。租户枚举同样不受影响：`unknown_tenant` 与
+    `mismatch` 在服务边界**回同一个状态码与同一个 reason**。
+
+    为什么必须**全程常量时间、不许提前返回**
+    ----------------------------------------
+    逐个密钥用 `hmac.compare_digest` 比较，且**累积**结果而不是命中即 return：
+    否则"第一把就中"比"最后一把才中"快，攻击者可以用时序差把**密钥在环里的位置**
+    探出来（多密钥轮换期正好暴露"哪把是当前生效的"）。比较次数只与密钥环长度有关，
+    与出示的值无关。
+    """
+    if now is None:
+        import time
+        now = time.time()
+    ring = tenant_keyring() if keyring is None else keyring
+    keys = ring.get(tenant)
+    if not keys:
+        return None, "unknown_tenant"
+
+    import hmac
+    matched: TenantKey | None = None
+    for k in keys:
+        # 不短路：每一把都要比，命中只做记录（见 docstring 的时序说明）。
+        if hmac.compare_digest(provided.encode("utf-8"), k.secret.encode("utf-8")):
+            matched = k
+    if matched is None:
+        return None, "mismatch"
+    return matched, matched.status(now)
+
+
+def _parse_tenant_keys(tenant: str, value: Any) -> tuple[TenantKey, ...]:
+    """v1（字符串）或 v2（`{"keys": [...]}`）→ 规整的密钥元组。"""
+    if isinstance(value, str):
+        if not value:
+            raise ValueError(f"DD_TENANT_KEYS[{tenant!r}] 的密钥必须是非空字符串")
+        return (TenantKey(tenant_id=tenant, key_id="", secret=value),)
+
+    if not isinstance(value, dict):
+        raise ValueError(
+            f"DD_TENANT_KEYS[{tenant!r}] 必须是密钥字符串，或 {{\"keys\": [...]}} 对象")
+
+    entries = value.get("keys")
+    if not isinstance(entries, list) or not entries:
+        raise ValueError(f"DD_TENANT_KEYS[{tenant!r}].keys 必须是非空数组")
+
+    keys: list[TenantKey] = []
+    seen_ids: set[str] = set()
+    seen_secrets: set[str] = set()
+    for i, ent in enumerate(entries):
+        if not isinstance(ent, dict):
+            raise ValueError(f"DD_TENANT_KEYS[{tenant!r}].keys[{i}] 必须是对象")
+        secret = ent.get("secret")
+        if not isinstance(secret, str) or not secret:
+            raise ValueError(
+                f"DD_TENANT_KEYS[{tenant!r}].keys[{i}].secret 必须是非空字符串")
+        key_id = ent.get("id", "")
+        if not isinstance(key_id, str):
+            raise ValueError(f"DD_TENANT_KEYS[{tenant!r}].keys[{i}].id 必须是字符串")
+        key_id = key_id.strip()
+        if key_id:
+            if key_id in seen_ids:
+                raise ValueError(
+                    f"DD_TENANT_KEYS[{tenant!r}] 的 key id 重复：{key_id!r}"
+                    "（审计将无法区分是哪把钥匙）")
+            seen_ids.add(key_id)
+        if secret in seen_secrets:
+            raise ValueError(
+                f"DD_TENANT_KEYS[{tenant!r}] 出现重复的密钥值：轮换时旧新必须是两把"
+                "不同的密钥，否则「只吊销旧的那把」不成立，轮换会静默失效")
+        seen_secrets.add(secret)
+        keys.append(TenantKey(
+            tenant_id=tenant, key_id=key_id, secret=secret,
+            not_after=_parse_ts(tenant, i, "not_after", ent.get("not_after")),
+            revoked_at=_parse_ts(tenant, i, "revoked_at", ent.get("revoked_at")),
+        ))
+    return tuple(keys)
+
+
+def _parse_ts(tenant: str, idx: int, field: str, raw: Any) -> float | None:
+    """ISO-8601 → epoch 秒（`Z` 按 UTC 解释，与全仓时间口径一致）。空值 = 不设。"""
+    if raw is None or raw == "":
+        return None
+    if not isinstance(raw, str):
+        raise ValueError(
+            f"DD_TENANT_KEYS[{tenant!r}].keys[{idx}].{field} 必须是 ISO-8601 字符串")
+    txt = raw.strip()
+    try:
+        dt = datetime.fromisoformat(txt.replace("Z", "+00:00"))
+    except ValueError as e:
+        raise ValueError(
+            f"DD_TENANT_KEYS[{tenant!r}].keys[{idx}].{field} 不是合法 ISO-8601："
+            f"{txt!r}") from e
+    if dt.tzinfo is None:                       # 无时区 → 按 UTC（不猜本地时区）
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.timestamp()
 
 
 def cors_origins() -> list[str]:

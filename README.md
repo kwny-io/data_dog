@@ -13,7 +13,7 @@
 | | 亮点 | 证据 |
 |---|---|---|
 | 🔗 | **全链闭环，一条命令跑通** | 厂商文档 →[P1]→ 算子 →[P2]→ 候选 →[Agent]→ 报告 →[P3]→ 策略门 → SaaS 反馈，`python -m data_dog.e2e.replay_demo` |
-| 🧪 | **1085 项测试，全离线确定性** | `pytest -q` → `1073 passed, 12 skipped`（76 个测试文件，fake provider，无需 API Key、不联网；12 skipped = 未设 `DD_TEST_PG_URL` 的真 PostgreSQL 用例 **×8**（含 RLS 系统扫描 2 条、审计表 RLS 1 条）+ 未设 `DD_TEST_REDIS_URL` 的真 Redis 契约用例 ×4，两者由 CI 的 `postgres` / `redis` 集成腿实测；Redis 后端的行为测试另由 `.[dev]` 里的 `fakeredis` 离线跑） |
+| 🧪 | **1085 项测试，全离线确定性** | `pytest -q` → `1073 passed, 12 skipped`（77 个测试文件，fake provider，无需 API Key、不联网；12 skipped = 未设 `DD_TEST_PG_URL` 的真 PostgreSQL 用例 **×8**（含 RLS 系统扫描 2 条、审计表 RLS 1 条）+ 未设 `DD_TEST_REDIS_URL` 的真 Redis 契约用例 ×4，两者由 CI 的 `postgres` / `redis` 集成腿实测；Redis 后端的行为测试另由 `.[dev]` 里的 `fakeredis` 离线跑） |
 | 🔒 | **热路径确定性：上报不交给模型判断** | 上不上报由**确定性策略门**（四条件决策表 + 冲突消解）决定，同输入永远同结论；模型只出现在"调查报告"那一步 |
 | 🧱 | **不拿 `eval` 执行厂商字符串** | 自建**受限 DSL**：词法 → AST 解释器，无动态执行原语、函数闭集白名单、编译期类型检查 |
 | 🔍 | **诚实抽取，区分"能证实 / 待确认"** | 官方 SDK 头文件明写电机 **90°C 触发保护** → `verified`；无出处的 75°C → `unconfirmed`，**不冒充厂商事实** |
@@ -23,7 +23,7 @@
 | 📊 | **带 ground truth 的规模化评估** | **忠实 MuJoCo 数据集 10 万条**，分层抽 n=2000 跑真实 Agent：**准确率 0.818**（Wilson 95% CI 0.801–0.834）、**normal 误报率 0.064**、逐类召回一并如实报（**F4 偏置 0.43 为当前最低**）；另有 7 个评估 case（含 2 个对抗性：提示注入 / 身份伪装） |
 | 🚚 | **能交付：服务 + 容器 + HTTPS** | FastAPI（liveness / readiness 分离）+ Dockerfile + compose（含 Caddy 自动申请 HTTPS）+ Makefile |
 
-**规模**：源码 140 个 Python 文件 / 23827 行，测试 76 个文件 / 18433 行；前端 `web/` 为 Next.js 15 控制台（60 个 TS/TSX 文件）；5 份正式事件 JSON Schema；27 个 `make` 命令（另有 `help`）。
+**规模**：源码 141 个 Python 文件 / 24097 行，测试 77 个文件 / 18731 行；前端 `web/` 为 Next.js 15 控制台（60 个 TS/TSX 文件）；5 份正式事件 JSON Schema；27 个 `make` 命令（另有 `help`）。
 
 ---
 
@@ -31,7 +31,7 @@
 
 - **遥测接入支持真实流**，但**默认不开启**。`src/data_dog/stream/` 提供四种传输的流式源：**文件/日志尾随**（标准库，机器人本机日志最真实）、**HTTP 推送**（标准库）、**MQTT**、**Kafka**（后两者需可选依赖 `.[mqtt]` / `.[kafka]`）。配 `DD_STREAM_ENABLED=1` + `DD_STREAM_SOURCE=...` 即启用，走与 HTTP 入口**同一条**数据面。默认关闭是因为演示/CI 环境没有真实设备——**不是做不到**。评估集的证据仍来自 mock / 合成 / MuJoCo（可复现），故"真实误报率"仍需真实数据回灌才能定论。
 - **多租户已加数据库强制层（PostgreSQL RLS）**。应用层：`tenant_id` 进复合主键、仓储强制过滤、跨租户读 404；数据库层：迁移 `a7b8c9d0e1f2` 对租户表启用 `ROW LEVEL SECURITY` + 策略（`USING`/`WITH CHECK`）。**适用于 PostgreSQL**；SQLite 无 RLS，本地开发仍是应用层隔离（诚实边界）。另有三条必须知道的边界：**superuser 与表属主默认绕过 RLS** → 生产连接须用**非属主、非 superuser** 角色；未设 `app.tenant_id` → 谓词为 NULL → **零行**（失败关闭）；**后台的跨租户扫描（升级 sweeper、异步 job 恢复扫描）必须走显式 `session_scope(system=True)`**（迁移 `b7c8d9e0f1a2` 给策略加了这条 `OR` 分支）——实测过：不给这条通道，它们在非特权角色下会**扫到 0 行、静默不干活**（`sweep_once` 恒 `scanned=0`），而 CI 的 PG 腿连的是 superuser 所以一直没暴露。真库验证见 `tests/test_storage_postgres.py`（建非特权角色，裸 SQL 断言跨租户读写都被挡；并断言系统扫描只在显式开启时才跨租户、未设上下文依旧零行）。
-- **鉴权分两档，默认那档挡不住租户冒充**。`DD_API_KEY` 是**全局单密钥**，而租户身份来自调用方自报的 `X-Tenant-Id` 请求头——实测（密钥已设、非空）**同一把密钥**以 `victim-a` / `victim-b` 身份写入遥测**两次都是 200**，即"一把密钥 = 全租户通吃"。应用层租户过滤与 RLS 防的是"代码写错导致串租户"，防不了"持密钥者主动冒充"（RLS 按 `app.tenant_id` 放行，而那是冒充者自己填的）。需要真隔离时配 `DD_TENANT_KEYS='{"tenant-a":"…","tenant-b":"…"}'` 进入**租户绑定模式**：带租户头的请求必须出示该租户绑定的密钥，否则 403（未知租户与密钥不符返回同一状态码，不做租户枚举），全局密钥在租户面不再是万能钥匙；配置写坏 → **503 失败关闭**，绝不退回单密钥模式。**边界**：密钥是静态配置，**没有 KMS/轮换/吊销，也没有设备级身份**（那需要前置网关或 mTLS 注入）——收紧到"租户"这一层，不等于完整 IAM。见 `docs/delivery.md`。
+- **鉴权分两档，默认那档挡不住租户冒充**。`DD_API_KEY` 是**全局单密钥**，而租户身份来自调用方自报的 `X-Tenant-Id` 请求头——实测（密钥已设、非空）**同一把密钥**以 `victim-a` / `victim-b` 身份写入遥测**两次都是 200**，即"一把密钥 = 全租户通吃"。应用层租户过滤与 RLS 防的是"代码写错导致串租户"，防不了"持密钥者主动冒充"（RLS 按 `app.tenant_id` 放行，而那是冒充者自己填的）。需要真隔离时配 `DD_TENANT_KEYS='{"tenant-a":"…","tenant-b":"…"}'` 进入**租户绑定模式**：带租户头的请求必须出示该租户绑定的密钥，否则 403（未知租户与密钥不符返回同一状态码，不做租户枚举），全局密钥在租户面不再是万能钥匙；配置写坏 → **503 失败关闭**，绝不退回单密钥模式。**边界**：密钥仍是**环境变量**配置，**没有 KMS 托管**、没有密钥变更审批流，也**没有设备级身份**（那需要前置网关或 mTLS 注入）。**轮换/吊销/过期已落地**（v2 密钥环：一个租户可在册多把，旧新交叠着换、`revoked_at` 后**下一次请求即失效**、`key_id` 进审计、`GET /v1/keys` 只读核对且**永不回密钥本身**）——但签发/吊销仍是**配置动作**，不是密钥管理服务。收紧到"租户这一层**加上它的生命周期**"，不等于完整 IAM。见 `docs/delivery.md`。
 - **有状态后端显式声明 RESP2，Redis 服务端要求 ≥2 而非 ≥6**。redis-py 8.x 默认走 RESP3（连接先发 `HELLO 3`，**Redis 6 才有该命令**），对着 Redis 5.x 直接抛 `unknown command 'HELLO'`——依赖解析、CI（redis:7）全绿，只在真实老环境炸。本模块只用 `WATCH/MULTI/EXEC/GET/SET/TTL/SCAN`（RESP2/RESP3 语义一致），故固定 `protocol=2`，可运行区间放宽到 Redis ≥ 2。真服务契约测试（`tests/test_state_redis_real.py`）与生产共用同一处构造口径，本地 Redis 5.0.14 实测 4/4 通过。
 - **Windows 控制台的 UTF-8 兜底**：演示脚本与 CLI 输出含 `▸`/`✅` 等符号，Windows 简体中文控制台按 GBK 编码 stdout → `UnicodeEncodeError` 直接崩、整链走不完（CI 只跑 Linux，单测全绿也抓不到）。现由 `core/console.py` 在各入口（含 console_script 回调，`__main__` 路径覆盖不到它）统一重配 stdout/stderr 为 UTF-8（`errors="replace"`），`PYTHONIOENCODING=gbk` 下的子进程回归测试守住。
 - **支持水平扩展**：有状态算子已**外置**到可插拔 `StateStore`

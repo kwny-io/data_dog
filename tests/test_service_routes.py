@@ -22,6 +22,7 @@ from fastapi.routing import APIRoute
 from data_dog.service.app import create_app
 from data_dog.service.deps import (
     require_ops_token,
+    require_ops_token_scope,
     require_tenant,
     require_tenant_and_device,
     require_tenant_or_ops,
@@ -72,10 +73,11 @@ ROUTES = (
     ("PUT", "/v1/oncall"),
     ("GET", "/v1/notifications"),
     ("GET", "/v1/audit"),
+    ("GET", "/v1/keys"),
 )
 
 AUTH_DEPS = {require_tenant, require_tenant_and_device, require_ops_token,
-             require_tenant_or_ops}
+             require_ops_token_scope, require_tenant_or_ops}
 
 
 def _api_routes() -> list[APIRoute]:
