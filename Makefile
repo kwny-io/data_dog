@@ -6,7 +6,7 @@ PY ?= $(shell if [ -x .venv/bin/python ]; then echo .venv/bin/python; \
               else echo python; fi)
 PORT ?= 8000
 
-.PHONY: help gates hooks numbers requirements format install test lint typecheck cov serve probe ingest e2e ui bench up up-prod down down-prod logs ps health clean helm-lint verify-chart k8s-e2e retention
+.PHONY: help gates hooks numbers requirements format install test lint typecheck cov serve probe ingest e2e ui bench up up-prod down down-prod logs ps health clean helm-lint verify-chart k8s-e2e retention perf-probe
 
 help:            ## 显示所有命令
 	@echo "make install  安装依赖(含服务)"
@@ -23,6 +23,7 @@ help:            ## 显示所有命令
 	@echo "make probe    探存活/就绪/指标"
 	@echo "make bench    P4-8 软实时基准(起服务→压测→出报告)"
 	@echo "make retention 数据保留清理(默认 dry-run; FORCE=1 真删)"
+	@echo "make perf-probe 写路径进程内性能探针(不压测)"
 	@echo "make ingest   发一条演示日志(过温)"
 	@echo "make up       Docker 起整套(应用+PostgreSQL)"
 	@echo "make down     停 Docker 整套"
@@ -91,6 +92,9 @@ bench:           ## P4-8 软实时基准（一键：起服务→loadgen→报告
 
 retention:       ## 数据保留清理（④）：默认 dry-run 只统计，FORCE=1 才真删
 	$(PY) -m data_dog.retention $(if $(FORCE),,--dry-run)
+
+perf-probe:      ## 写路径进程内性能探针（不压测；--only 单跑才有可比绝对值）
+	$(PY) tools/perf_probe.py --only http --n $(or $(N),300)
 
 ui:              ## 起 Streamlit 演示台
 	$(PY) -m streamlit run ui/app.py
