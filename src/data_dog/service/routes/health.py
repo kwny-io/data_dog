@@ -128,7 +128,10 @@ def metrics_endpoint() -> Response:
         if depth >= 0:
             metrics.investigation_queue_depth.set(depth)
     try:
-        with session_scope() as s:
+        # `system=True`：这些是**跨租户**的库内计数（运维口径），没有租户上下文；
+        # 不给系统扫描通道的话，PostgreSQL 的 RLS 会让它们**恒为 0**——指标看着"正常"
+        # 却永远不动，是最难发现的一类观测失效（见 docs/storage.md 的系统扫描小节）。
+        with session_scope(system=True) as s:
             metrics.db_rows.labels(table="candidates").set(
                 repo.count_rows(s, M.CandidateRow))
             metrics.db_rows.labels(table="alerts").set(
@@ -139,6 +142,8 @@ def metrics_endpoint() -> Response:
                 repo.count_rows(s, M.InvestigationJobRow, status="pending"))
             metrics.db_rows.labels(table="investigation_jobs_running").set(
                 repo.count_rows(s, M.InvestigationJobRow, status="running"))
+            metrics.db_rows.labels(table="audit_log").set(
+                repo.count_rows(s, M.AuditLogRow))
     except Exception as e:                        # noqa: BLE001
         _log.warning("采集库内行数失败", extra={
             "error": f"{type(e).__name__}: {e}"})

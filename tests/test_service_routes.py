@@ -24,6 +24,7 @@ from data_dog.service.deps import (
     require_ops_token,
     require_tenant,
     require_tenant_and_device,
+    require_tenant_or_ops,
 )
 
 # 快照：42 条端点的 (method, path) 与**注册顺序**（有意增删/重排时同步更新它）。
@@ -70,9 +71,11 @@ ROUTES = (
     ("GET", "/v1/oncall"),
     ("PUT", "/v1/oncall"),
     ("GET", "/v1/notifications"),
+    ("GET", "/v1/audit"),
 )
 
-AUTH_DEPS = {require_tenant, require_tenant_and_device, require_ops_token}
+AUTH_DEPS = {require_tenant, require_tenant_and_device, require_ops_token,
+             require_tenant_or_ops}
 
 
 def _api_routes() -> list[APIRoute]:

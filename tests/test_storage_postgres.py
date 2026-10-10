@@ -277,6 +277,45 @@ def test_rls_system_scan_is_explicit_and_scoped(pg_url, app_role):
         assert s.execute(text("SELECT count(*) FROM candidates")).scalar() == 0
 
 
+def test_rls_audit_log_is_tenant_scoped_and_system_scannable(pg_url, app_role):
+    """新表 `audit_log` 的 RLS：租户只见自己；运维（系统扫描）见全部 + 保留租户 `-`。
+
+    锁两件事：① 新迁移给本表建的策略**自带**系统扫描分支（否则运维侧的跨租户审计
+    查询会零行可见——正是 `b7c8d9e0f1a2` 修的那类静默失效）；② 审计确实是租户隔离的。
+    """
+    from alembic import command
+    from data_dog import audit
+    from data_dog.storage import migrations
+    from data_dog.storage.db import session_scope as scope
+
+    command.upgrade(migrations.make_config(pg_url), "head")
+    _grant_app_role(pg_url, app_role)
+    app_url = _as_role(pg_url, app_role)
+
+    with scope(app_url, tenant_id="t1") as s:
+        repo.save_audit(s, tenant_id="t1", audit_id="aud_1", ts=1.0,
+                        action="auth.denied", outcome="denied", actor="k1")
+    with scope(app_url, tenant_id="t2") as s:
+        repo.save_audit(s, tenant_id="t2", audit_id="aud_2", ts=2.0,
+                        action="auth.denied", outcome="denied", actor="k2")
+    with scope(app_url, tenant_id=audit.SYSTEM_TENANT) as s:
+        repo.save_audit(s, tenant_id=audit.SYSTEM_TENANT, audit_id="aud_3", ts=3.0,
+                        action="ops.access", outcome="allowed", actor="k3")
+
+    # 租户视野：只看自己
+    with scope(app_url, tenant_id="t1") as s:
+        assert repo.count_audit(s, tenant_id="t1") == 1
+
+    # 未设上下文 → 零行（失败关闭不放松）
+    with scope(app_url) as s:
+        assert repo.count_audit(s, tenant_id=None) == 0
+
+    # 系统扫描（运维视野）：全部 3 条（含保留租户 `-`）
+    with scope(app_url, system=True) as s:
+        assert repo.count_audit(s, tenant_id=None) == 3
+        assert repo.count_audit(s, tenant_id="t1") == 1
+
+
 def test_rls_system_scan_finds_due_escalations(pg_url, app_role):
     """把上一条落到**真实调用点**：升级 sweeper 的跨租户扫描能扫到到期投递。
 

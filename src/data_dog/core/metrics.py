@@ -100,6 +100,14 @@ investigation_job_duration_seconds = Histogram(
     registry=registry,
 )
 
+# 审计写入失败次数（>0 必须告警：审计是只增证据，写不进去等于合规缺口；
+# 但写入失败**不会**让业务请求失败，所以只能靠这个计数器被发现）
+audit_write_failed = Counter(
+    "data_dog_audit_write_failed_total",
+    "安全审计写入失败次数（审计缺失=合规缺口，须告警）",
+    registry=registry,
+)
+
 # 库内累计量（用 COUNT(*) 聚合，不做全表加载）
 db_rows = Gauge(
     "data_dog_db_rows",

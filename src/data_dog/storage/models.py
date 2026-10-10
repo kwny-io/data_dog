@@ -10,6 +10,7 @@
   knowledge_documents/chunks  用户导入的厂商文档（A7）
   investigation_job  异步调查任务的执行状态（G1）
   state_checkpoint   共享状态的周期快照（G3）
+  audit_log          **安全审计**：谁在何时对什么做了什么、结果如何（A1）
 
 设计取舍：
   - 复杂/多态字段（metrics、hypotheses、evidence…）用 **JSON**（PostgreSQL 为 JSONB，
@@ -374,3 +375,40 @@ class AlertDeliveryRow(Base):
     ack_deadline: Mapped[float | None] = mapped_column(Float, nullable=True)
     last_error: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[float] = mapped_column(Float, default=_now)
+
+
+class AuditLogRow(Base):
+    """**安全审计**记录（A1）：谁在何时对什么做了什么、结果如何。
+
+    与其余"业务台账"的区别——它是给**合规与事故复盘**看的（`docs/slo.md` §6 要求
+    "审计记录保留 ≥ 1 年"，此前 `src/` 里零实现）：
+
+    - **只增不改**（没有更新路径）：审计记录被改写就失去意义。`audit_id` 每条唯一
+      （`aud_<uuid>`），**不是**确定性幂等 id——两次相同事件就是两条事实。
+    - **拒绝也要留痕**：认证/授权**失败**本身就是最值得看的事件（谁在试探哪个租户），
+      所以 `outcome` 有 `denied` 这一档，而不是"只记成功"。
+    - `key_id`：**哪把钥匙**做的（不是密钥本身）——为密钥轮换/吊销（②）预留，
+      也让"某把钥匙在什么时候开始异常"可查。
+    - `request_id` / `trace_id`：与该请求的日志、链路对齐（`core/logging`、`core/tracing`）。
+    - `tenant_id` 放主键（与其余租户表一致）。**无租户上下文的系统事件**（未带
+      `X-Tenant-Id` 的拒绝、运维面操作）记在保留租户 `-` 下（见 `audit.SYSTEM_TENANT`），
+      只有系统扫描/运维查询能看到。
+    """
+    __tablename__ = "audit_log"
+
+    tenant_id: Mapped[str] = mapped_column(String(80), primary_key=True, index=True)
+    audit_id: Mapped[str] = mapped_column(String(120), primary_key=True)
+    ts: Mapped[float] = mapped_column(Float, index=True, default=_now)
+    # 主体：key_id / principal / "anonymous"（不记密钥本身，只记它是哪一把）
+    actor: Mapped[str] = mapped_column(String(160), default="")
+    # 动作：auth.denied / ops.access / tenant.purge / key.rotate …
+    action: Mapped[str] = mapped_column(String(80), index=True, default="")
+    target: Mapped[str] = mapped_column(String(200), default="")
+    # 结果：allowed / denied / error
+    outcome: Mapped[str] = mapped_column(String(20), index=True, default="")
+    reason: Mapped[str] = mapped_column(String(200), default="")
+    request_id: Mapped[str] = mapped_column(String(80), default="")
+    trace_id: Mapped[str] = mapped_column(String(80), default="")
+    key_id: Mapped[str] = mapped_column(String(40), default="")
+    source_ip: Mapped[str] = mapped_column(String(64), default="")
+    detail: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)

@@ -33,7 +33,7 @@ pytest tests/test_storage.py -q     # 13 项
 | 文件 | 职责 |
 |---|---|
 | `db.py` | 引擎/会话管理、`Base`、`init_db`；`DD_DATABASE_URL` 决定连接串 |
-| `models.py` | ORM 表（8 张，见下） |
+| `models.py` | ORM 表（见下表） |
 | `repository.py` | 仓储层：领域对象 ↔ 行的转换、幂等 upsert、查询（**所有方法强制 `tenant_id`**） |
 | `migrations.py` | alembic 迁移封装；启动走 `upgrade_head` |
 
@@ -49,6 +49,7 @@ pytest tests/test_storage.py -q     # 13 项
 | `alert_feedback` | 人工/维修反馈 | P3 | `(tenant_id, id)` |
 | `knowledge_documents` | 用户导入的厂商文档元数据 | A7 | `(tenant_id, document_id)` |
 | `knowledge_chunks` | 文档切片文本 | A7 | `(tenant_id, chunk_id)` |
+| `audit_log` | **安全审计**：谁在何时对什么做了什么、结果如何（只增不改） | A1 | `(tenant_id, audit_id)` |
 
 **多租户**：`tenant_id` 进复合主键——确定性 ID（如 `cand_<hash(device_sn|...)>`）会让两个租户同 `device_sn` 撞同一 PK，`_upsert` 就会静默覆盖他人数据。把租户纳入主键是**正确性要求**，不是可选的过滤列。
 

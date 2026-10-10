@@ -177,6 +177,14 @@ async def _request_context(request, call_next):
         clear_trace()
     response.headers["X-Request-Id"] = rid
     response.headers["traceparent"] = traceparent
+    # 运维面访问留痕（低量、高价值）：`/v1/state/*` 能被跨租户读状态快照，
+    # "谁在什么时候动过运维面"必须可查（`docs/slo.md` §6 的审计要求）。
+    if request.url.path.startswith("/v1/state/") and response.status_code < 400:
+        from .. import audit
+        audit.record(action=audit.ACTION_OPS_ACCESS, outcome=audit.OUTCOME_ALLOWED,
+                     tenant_id=request.headers.get("X-Tenant-Id") or None,
+                     actor=audit.key_fingerprint(request.headers.get("X-Ops-Token", "")),
+                     target=request.url.path, request_id=rid, trace_id=_trace_id)
     # 探针不记访问日志（会被编排层高频轮询，刷屏）
     if request.url.path not in _PUBLIC_PATHS:
         _log.info("请求完成", extra={
@@ -188,6 +196,29 @@ async def _request_context(request, call_next):
         metrics.observe_http(request.method, _route_template(request),
                              response.status_code, duration_ms / 1000.0)
     return response
+def _deny(request, *, status: int, code: ToolErrorCode, detail: str,
+          reason: str) -> JSONResponse:
+    """统一拒绝出口：计数 → **留审计** → 返回统一错误体。
+
+    为什么拒绝一定要留痕：`auth.denied` 里最值得看的就是"**声称某租户但密钥不对**"
+    这类冒充尝试——它只会出现在失败里。审计写失败不影响这次拒绝的返回
+    （`audit.record` 不抛异常），但会记 error 日志 + `data_dog_audit_write_failed_total`。
+
+    注意：守卫是**最外层**中间件（见 `create_app` 的注册顺序说明），此时请求上下文
+    还没建立，故 `request_id` 只能取客户端透传的 `X-Request-Id`（可能为空）。
+    """
+    from .. import audit
+    _state.rejected_requests += 1
+    audit.record(
+        action=audit.ACTION_AUTH_DENIED, outcome=audit.OUTCOME_DENIED,
+        tenant_id=request.headers.get("X-Tenant-Id") or None,
+        actor=audit.key_fingerprint(_extract_api_key(request)) or "anonymous",
+        target=request.url.path, reason=reason,
+        request_id=request.headers.get("X-Request-Id", ""))
+    return JSONResponse(status_code=status,
+                        content=_error_body(code, detail, reason=reason))
+
+
 async def _api_key_guard(request, call_next):
     """鉴权守卫：**租户绑定模式**（设了 `DD_TENANT_KEYS`）优先，否则用全局单密钥。
 
@@ -211,12 +242,8 @@ async def _api_key_guard(request, call_next):
     try:
         tenant_keys = settings.tenant_api_keys()
     except ValueError as e:                    # 配置错 → 失败关闭，不降级为单密钥
-        _state.rejected_requests += 1
-        return JSONResponse(
-            status_code=503,
-            content=_error_body(ToolErrorCode.UNAVAILABLE, str(e),
-                                reason="tenant_keys_misconfigured"),
-        )
+        return _deny(request, status=503, code=ToolErrorCode.UNAVAILABLE,
+                     detail=str(e), reason="tenant_keys_misconfigured")
 
     provided = _extract_api_key(request)
     if tenant_keys:
@@ -224,35 +251,22 @@ async def _api_key_guard(request, call_next):
         if tenant:
             bound = tenant_keys.get(tenant)
             if not bound or not _api_key_ok(provided, bound):
-                _state.rejected_requests += 1
-                return JSONResponse(
-                    status_code=403,
-                    content=_error_body(ToolErrorCode.DENIED,
-                                        "密钥与所声称的租户不匹配",
-                                        reason="tenant_key_mismatch"),
-                )
+                return _deny(request, status=403, code=ToolErrorCode.DENIED,
+                             detail="密钥与所声称的租户不匹配",
+                             reason="tenant_key_mismatch")
             return await call_next(request)
         # 无租户头 → 非租户作用域，仍用全局密钥兜（未设全局密钥则拒绝）
         expected = settings.api_key()
         if not expected or not _api_key_ok(provided, expected):
-            _state.rejected_requests += 1
-            return JSONResponse(
-                status_code=401,
-                content=_error_body(ToolErrorCode.DENIED,
-                                    "非租户作用域端点需要 X-API-Key",
-                                    reason="unauthorized"),
-            )
+            return _deny(request, status=401, code=ToolErrorCode.DENIED,
+                         detail="非租户作用域端点需要 X-API-Key",
+                         reason="unauthorized")
         return await call_next(request)
 
     expected = settings.api_key()
     if expected and not _api_key_ok(provided, expected):
-        _state.rejected_requests += 1
-        return JSONResponse(
-            status_code=401,
-            content=_error_body(ToolErrorCode.DENIED,
-                                "缺少或错误的 X-API-Key",
-                                reason="unauthorized"),
-        )
+        return _deny(request, status=401, code=ToolErrorCode.DENIED,
+                     detail="缺少或错误的 X-API-Key", reason="unauthorized")
     return await call_next(request)
 
 

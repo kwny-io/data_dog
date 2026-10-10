@@ -13,17 +13,17 @@
 | | 亮点 | 证据 |
 |---|---|---|
 | 🔗 | **全链闭环，一条命令跑通** | 厂商文档 →[P1]→ 算子 →[P2]→ 候选 →[Agent]→ 报告 →[P3]→ 策略门 → SaaS 反馈，`python -m data_dog.e2e.replay_demo` |
-| 🧪 | **1050 项测试，全离线确定性** | `pytest -q` → `1039 passed, 11 skipped`（74 个测试文件，fake provider，无需 API Key、不联网；11 skipped = 未设 `DD_TEST_PG_URL` 的真 PostgreSQL 用例 **×7**（含 RLS 系统扫描 2 条）+ 未设 `DD_TEST_REDIS_URL` 的真 Redis 契约用例 ×4，两者由 CI 的 `postgres` / `redis` 集成腿实测；Redis 后端的行为测试另由 `.[dev]` 里的 `fakeredis` 离线跑） |
+| 🧪 | **1065 项测试，全离线确定性** | `pytest -q` → `1053 passed, 12 skipped`（75 个测试文件，fake provider，无需 API Key、不联网；12 skipped = 未设 `DD_TEST_PG_URL` 的真 PostgreSQL 用例 **×8**（含 RLS 系统扫描 2 条、审计表 RLS 1 条）+ 未设 `DD_TEST_REDIS_URL` 的真 Redis 契约用例 ×4，两者由 CI 的 `postgres` / `redis` 集成腿实测；Redis 后端的行为测试另由 `.[dev]` 里的 `fakeredis` 离线跑） |
 | 🔒 | **热路径确定性：上报不交给模型判断** | 上不上报由**确定性策略门**（四条件决策表 + 冲突消解）决定，同输入永远同结论；模型只出现在"调查报告"那一步 |
 | 🧱 | **不拿 `eval` 执行厂商字符串** | 自建**受限 DSL**：词法 → AST 解释器，无动态执行原语、函数闭集白名单、编译期类型检查 |
 | 🔍 | **诚实抽取，区分"能证实 / 待确认"** | 官方 SDK 头文件明写电机 **90°C 触发保护** → `verified`；无出处的 75°C → `unconfirmed`，**不冒充厂商事实** |
 | 🚪 | **fail-closed 贯穿全链** | 身份只在网关注入（正文自称一律丢弃）、兼容绑定拿不准就拒、错误语义收敛为有限错误码，**绝不降级为无鉴权** |
 | 🔁 | **幂等上报** | `(幂等键, revision)` 复合主键，网络重试 / 进程重启都不会产生重复告警 |
-| 🛡 | **安全设计落地** | SSRF 前置校验（仅 http/https、拒绝 localhost/环回/私有/保留，校验**全部解析 IP**）+ **安全取数原语**（重定向**逐跳复验**、连接**钉在校验过的 IP** 上并按主机名校验证书、响应体上限）、`hmac.compare_digest` 常量时间比较、容器非 root、密钥不进镜像、**前端控制台密钥不进浏览器**（服务端代理 `/api/dd` 注入，浏览器不持有凭据） |
+| 🛡 | **安全设计落地** | SSRF 前置校验（仅 http/https、拒绝 localhost/环回/私有/保留，校验**全部解析 IP**）+ **安全取数原语**（重定向**逐跳复验**、连接**钉在校验过的 IP** 上并按主机名校验证书、响应体上限）、**安全审计**（`audit_log`：认证拒绝/运维访问/审计读取都留痕，只增不改、可查、按年保留；`GET /v1/audit` 分租户与运维两种视野）、`hmac.compare_digest` 常量时间比较、容器非 root、密钥不进镜像、**前端控制台密钥不进浏览器**（服务端代理 `/api/dd` 注入，浏览器不持有凭据） |
 | 📊 | **带 ground truth 的规模化评估** | **忠实 MuJoCo 数据集 10 万条**，分层抽 n=2000 跑真实 Agent：**准确率 0.818**（Wilson 95% CI 0.801–0.834）、**normal 误报率 0.064**、逐类召回一并如实报（**F4 偏置 0.43 为当前最低**）；另有 7 个评估 case（含 2 个对抗性：提示注入 / 身份伪装） |
 | 🚚 | **能交付：服务 + 容器 + HTTPS** | FastAPI（liveness / readiness 分离）+ Dockerfile + compose（含 Caddy 自动申请 HTTPS）+ Makefile |
 
-**规模**：源码 138 个 Python 文件 / 23252 行，测试 74 个文件 / 17894 行；前端 `web/` 为 Next.js 15 控制台（60 个 TS/TSX 文件）；5 份正式事件 JSON Schema；27 个 `make` 命令（另有 `help`）。
+**规模**：源码 140 个 Python 文件 / 23610 行，测试 75 个文件 / 18192 行；前端 `web/` 为 Next.js 15 控制台（60 个 TS/TSX 文件）；5 份正式事件 JSON Schema；27 个 `make` 命令（另有 `help`）。
 
 ---
 
@@ -368,6 +368,7 @@ docker compose ps
 | `/v1/knowledge/documents` | POST / GET | 导入 / 列出用户厂商文档（切片落库） |
 | `/v1/knowledge/search` | GET | 词法检索用户文档切片 |
 | `/v1/knowledge/documents/{id}` | DELETE | 删除文档及其切片 |
+| `/v1/audit` | GET | **安全审计**（A1）：认证拒绝 / 运维面访问 / 审计读取；带 `X-Tenant-Id` 看本租户，带 `X-Ops-Token` 看跨租户（含保留租户 `-` 下的系统事件） |
 
 身份**只认请求头** `X-Tenant-Id` / `X-Device-Sn`，正文与查询串里的身份字段一律被忽略（与 P2 网关失败语义一致）；缺租户头 → 401，跨租户读 → 404（不泄露存在性）。
 

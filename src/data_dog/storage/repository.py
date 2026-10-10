@@ -1006,3 +1006,77 @@ def list_due_deliveries(session: Session, *, now: float,
                  M.AlertDeliveryRow.ack_deadline <= now)
          .order_by(M.AlertDeliveryRow.ack_deadline))
     return _page(q, limit, 0)
+
+
+# ---------------------------------------------------------------- 安全审计（A1）
+
+def save_audit(session: Session, *, tenant_id: str, audit_id: str, ts: float,
+               actor: str = "", action: str = "", target: str = "",
+               outcome: str = "", reason: str = "", request_id: str = "",
+               trace_id: str = "", key_id: str = "", source_ip: str = "",
+               detail: dict[str, Any] | None = None) -> dict[str, Any]:
+    """写一条审计记录。**只增不改**——审计被改写就失去证据价值（故没有 update 路径）。
+
+    `audit_id` 唯一但**不幂等**：两次相同事件就是两条事实，与业务台账（按确定性 id
+    UPSERT）相反。
+    """
+    row = M.AuditLogRow(tenant_id=tenant_id, audit_id=audit_id)
+    row.ts = float(ts)
+    row.actor = actor
+    row.action = action
+    row.target = target
+    row.outcome = outcome
+    row.reason = reason
+    row.request_id = request_id
+    row.trace_id = trace_id
+    row.key_id = key_id
+    row.source_ip = source_ip
+    row.detail = dict(detail or {})
+    session.add(row)
+    session.flush()
+    return _row_dict(row)
+
+
+def _audit_query(session: Session, *, tenant_id: str | None, action: str | None,
+                 outcome: str | None, actor: str | None, since: float | None,
+                 until: float | None):
+    q = session.query(M.AuditLogRow)
+    if tenant_id is not None:
+        q = q.filter(M.AuditLogRow.tenant_id == tenant_id)
+    if action:
+        q = q.filter(M.AuditLogRow.action == action)
+    if outcome:
+        q = q.filter(M.AuditLogRow.outcome == outcome)
+    if actor:
+        q = q.filter(M.AuditLogRow.actor == actor)
+    if since is not None:
+        q = q.filter(M.AuditLogRow.ts >= float(since))
+    if until is not None:
+        q = q.filter(M.AuditLogRow.ts <= float(until))
+    return q
+
+
+def list_audit(session: Session, *, tenant_id: str | None,
+               action: str | None = None, outcome: str | None = None,
+               actor: str | None = None, since: float | None = None,
+               until: float | None = None, limit: int | None = None,
+               offset: int = 0) -> list[dict[str, Any]]:
+    """按条件翻审计记录（**新的在前**）。
+
+    `tenant_id=None` = **跨租户**：只给系统/运维查询用（调用方必须走
+    `session_scope(system=True)`，否则 RLS 下零行可见——见 `docs/storage.md`）。
+    """
+    q = _audit_query(session, tenant_id=tenant_id, action=action, outcome=outcome,
+                     actor=actor, since=since, until=until)
+    q = q.order_by(M.AuditLogRow.ts.desc(), M.AuditLogRow.audit_id)
+    return _page(q, limit, offset)
+
+
+def count_audit(session: Session, *, tenant_id: str | None,
+                action: str | None = None, outcome: str | None = None,
+                actor: str | None = None, since: float | None = None,
+                until: float | None = None) -> int:
+    """与 `list_audit` 同一套过滤条件的计数（供分页 `total`/`has_more`）。"""
+    q = _audit_query(session, tenant_id=tenant_id, action=action, outcome=outcome,
+                     actor=actor, since=since, until=until)
+    return int(q.count())

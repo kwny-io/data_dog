@@ -128,7 +128,8 @@ eval_feedback.py  回灌：人工标签 vs Agent 处置 → 一致率 / 误报�
 
 ## 6. 存储模型
 
-8 张表，全部租户作用域（`tenant_id` 进主键）。详见 `docs/storage.md`。
+全部租户作用域（`tenant_id` 进主键），**新增的表都启用 RLS**（策略口径见 `docs/storage.md`；
+后台跨租户扫描需走 `session_scope(system=True)`）。详见 `docs/storage.md`。
 
 | 表 | 主键 | 来源 |
 |---|---|---|
@@ -140,6 +141,12 @@ eval_feedback.py  回灌：人工标签 vs Agent 处置 → 一致率 / 误报�
 | `alert_feedback` | `(tenant_id, id)` | P3 |
 | `knowledge_documents` | `(tenant_id, document_id)` | A7 |
 | `knowledge_chunks` | `(tenant_id, chunk_id)` | A7 |
+| `investigation_job` | `(tenant_id, job_id)` | G1（异步调查） |
+| `oncall_rota` / `alert_delivery` | `(tenant_id, …)` | P4-3（值班/投递台账） |
+| `operator_registry` / `operator_rollout_event` | `(tenant_id, …)` | P4-2（控制面/灰度台账） |
+| `change_records` | `(tenant_id, change_id)` | G7（变更源） |
+| `state_kv` / `state_checkpoint` | `key` / `(tenant_id, checkpoint_id)` | G3（共享状态，**无租户维度**） |
+| `audit_log` | `(tenant_id, audit_id)` | **A1（安全审计，只增不改）** |
 
 迁移由 alembic 版本化（`alembic/versions/`），启动走 `upgrade_head`。
 

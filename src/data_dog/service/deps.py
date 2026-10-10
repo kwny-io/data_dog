@@ -81,3 +81,31 @@ def require_ops_token(
 ) -> None:
     """运维端点的声明式鉴权：未启用运维面 → 404；token 不符 → 401。"""
     _require_ops_token(x_ops_token)
+
+
+def require_tenant_or_ops(
+    x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
+    x_ops_token: str | None = Header(default=None, alias="X-Ops-Token"),
+) -> dict[str, Any]:
+    """**租户或运维**二选一的声明式鉴权，返回"视野"：`{"scope","tenant_id"}`。
+
+    用途：安全审计查询（`/v1/audit`）——租户看自己，运维看全部（含保留租户 `-` 下的
+    系统事件，例如"未带租户头的拒绝"）。
+
+    规则（拿不准就拒，审计是最不该被匿名读的东西）：
+      - 出示了 `X-Ops-Token`：必须匹配 `DD_OPS_TOKEN`（未启用运维面 → 404；不匹配 → 401），
+        成功后视野为**全部租户**。**不静默降级**成租户视野——"带了运维令牌却只看到
+        自己"会让人以为审计丢了数据；
+      - 否则必须带 `X-Tenant-Id`（缺失 → 401），视野为**该租户**。
+
+    为什么做成声明式依赖（而不是在路由函数体里读 header）：`tests/test_service_routes.py`
+    会反射 `route.dependant` 断言"每个 /v1 端点都挂了鉴权依赖"——写在依赖里才能被它看见，
+    写在函数体里只能靠人肉 review。
+    """
+    if x_ops_token:
+        _require_ops_token(x_ops_token)
+        from .. import audit
+        # 只回传**指纹**（哪把令牌），不回传令牌本身——调用方要留痕时用它
+        return {"scope": "all", "tenant_id": None,
+                "key_id": audit.key_fingerprint(x_ops_token)}
+    return {"scope": "tenant", "tenant_id": _tenant_required(x_tenant_id)}
