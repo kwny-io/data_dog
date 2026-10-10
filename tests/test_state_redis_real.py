@@ -31,9 +31,11 @@ pytestmark = [
 
 @pytest.fixture()
 def store():
-    import redis
+    from data_dog.state.redis import make_client
 
-    client = redis.Redis.from_url(URL, decode_responses=True)
+    # 用生产同一处构造口径（含 RESP2 显式声明），否则这份"真服务契约测试"验的
+    # 就不是线上那条连接路径，Redis 5.x 上的 HELLO 不兼容反而测不出来。
+    client = make_client(URL)
     client.flushdb()
     s = RedisStateStore(client=client)
     try:
@@ -86,9 +88,9 @@ def test_external_writer_conflict_is_retried(store):
 
     这条只能在**真服务**上验：fakeredis 的 pipeline 语义不保证同样时机。
     """
-    import redis
+    from data_dog.state.redis import make_client
 
-    other = redis.Redis.from_url(URL, decode_responses=True)
+    other = make_client(URL)
     try:
         store.mutate("race", lambda cur: ({"v": 1}, None))
         seen: list[object] = []

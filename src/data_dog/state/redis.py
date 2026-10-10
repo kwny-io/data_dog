@@ -105,13 +105,36 @@ def _is_watch_error(exc: BaseException) -> bool:
     return type(exc).__name__ == "WatchError"
 
 
+def make_client(url: str) -> Any:
+    """按统一口径构造 Redis 客户端（生产路径与"真服务契约测试"共用这一处）。
+
+    为什么显式 `protocol=2`（RESP2），而不是用 redis-py 的默认值
+    ------------------------------------------------------------
+    redis-py 8.x 的默认协议是 **RESP3**，连接时会先发 `HELLO 3`——而 `HELLO` 是
+    **Redis 6.0 才有的命令**。于是对着 Redis 5.x（企业里仍在跑的老版本、Windows
+    移植版也停在这个版本）连接会直接抛：
+
+        ResponseError: unknown command `HELLO`, with args beginning with: `3`
+
+    这是**装得上、连不上**的静默天花板：`pyproject` 里的 `redis>=5.0` 约束的是
+    **客户端**版本，跟**服务端**版本无关，所以依赖解析一切正常、CI（redis:7）也全绿，
+    只有到真实老环境才炸。
+
+    本模块只用 `WATCH`/`MULTI`/`EXEC`/`GET`/`SET`/`TTL`/`SCAN`，这些在 RESP2 与
+    RESP3 下**语义完全一致**，没有任何 RESP3 专属能力被用到——故固定 RESP2：
+    可运行区间从"Redis ≥ 6"放宽到"Redis ≥ 2.0"，代价为零。
+    """
+    import redis  # 延迟导入：无 redis 依赖时不影响其它后端
+
+    return redis.Redis.from_url(url, decode_responses=True, protocol=2)
+
+
 class RedisStateStore(StateStore):
     def __init__(self, url: str = "", *, client: Any = None) -> None:
         if client is not None:
             self._client = client          # 测试注入（如 fakeredis）
         else:
-            import redis  # 延迟导入：无 redis 依赖时不影响其它后端
-            self._client = redis.Redis.from_url(url, decode_responses=True)
+            self._client = make_client(url)
 
     def _load(self, key: str) -> Any:
         raw = self._client.get(key)

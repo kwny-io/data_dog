@@ -52,7 +52,10 @@ rag = [
 postgres = [
     "psycopg[binary]>=3.1",
 ]
-# Redis 共享状态后端（限流/候选归并跨副本一致时装）
+# Redis 共享状态后端（限流/候选归并跨副本一致时装）。
+# 注意：这里约束的是**客户端**版本，与**服务端**版本无关。客户端 8.x 默认 RESP3
+# （连接发 `HELLO 3`，Redis 6 才有）——本项目显式用 RESP2（见 state/redis.py
+# make_client），故服务端 Redis ≥ 2 即可，Redis 5.x 老环境也能跑。
 redis = [
     "redis>=5.0",
 ]
