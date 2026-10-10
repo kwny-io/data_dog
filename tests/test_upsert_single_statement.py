@@ -19,6 +19,7 @@
 """
 from __future__ import annotations
 
+import re
 from types import SimpleNamespace
 from typing import Any
 
@@ -203,3 +204,47 @@ def test_component_ref_is_composed_from_type_and_instance(url):
     _save_telemetry(url, [_telemetry()])
     assert _scalar(url, "SELECT component_ref FROM telemetry_events") == \
         "joint_motor.front_left_hip"
+
+
+# ---------------------------------------------------------------- 6) 语句缓存
+
+def test_upsert_statement_is_built_once_and_reused(url):
+    """语句结构只随表变化 ⇒ 必须**缓存复用**，不能每行重建。
+
+    实测（`write_path_batching.md` §9）：每请求只执行 2 条语句，却有 **28 次**
+    SQLAlchemy schema 对象构造；缓存后 HTTP+落库 CPU 从 **7.76 → 6.51 ms/请求（−16%）**。
+    """
+    from data_dog.storage import repository as r
+
+    r._UPSERT_STMT_CACHE.clear()
+    a = r._upsert_stmt(r.M.TelemetryEventRow, "sqlite")
+    b = r._upsert_stmt(r.M.TelemetryEventRow, "sqlite")
+
+    assert a is not None
+    assert a is b, "第二次调用没有命中缓存——又回到每行重建 Core 语句"
+    assert ("sqlite", "telemetry_events") in r._UPSERT_STMT_CACHE
+
+
+def test_cached_statement_targets_every_updatable_column():
+    """更新列**从表结构推导**：除主键与 `created_at` 外**一个都不能漏**。
+
+    漏一列的表现是"重复投递时那一列永远不更新"——静默、且很难发现。
+    这条把"表结构"与"更新集"钉在一起，将来加列也不会漏。
+    """
+    from sqlalchemy.dialects.sqlite import dialect as sqlite_dialect
+
+    from data_dog.storage import repository as r
+
+    for model in (r.M.TelemetryEventRow, r.M.CandidateRow):
+        stmt = r._upsert_stmt(model, "sqlite")
+        compiled = str(stmt.compile(dialect=sqlite_dialect()))
+        pk = {c.name for c in model.__table__.primary_key.columns}
+        expected = {c.name for c in model.__table__.columns} - pk - {"created_at"}
+
+        assert "DO UPDATE SET" in compiled, compiled
+        set_cols = set(re.findall(r"(\w+)\s*=\s*excluded\.", compiled))
+        assert set_cols == expected, (
+            f"{model.__tablename__} 的更新集与表结构不一致\n"
+            f"  漏: {sorted(expected - set_cols)}\n  多: {sorted(set_cols - expected)}")
+        assert "created_at" not in set_cols, (
+            "created_at 进了更新集——重复投递会刷新首次写入时间，④ 的保留策略会静默失效")

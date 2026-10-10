@@ -115,6 +115,49 @@ def _upsert(session: Session, model: Any, pk: Any, pk_kwargs: dict[str, Any],
         return False
 
 
+# upsert 语句缓存：键 = (方言, 表名)。语句结构只随表变化，**与数据无关**。
+_UPSERT_STMT_CACHE: dict[tuple[str, str], Any] = {}
+
+
+def _upsert_stmt(model: Any, dialect: str) -> Any:
+    """按 `(方言, 表)` **缓存** upsert 语句；方言不支持返回 None。
+
+    为什么必须缓存（实测出来的纯浪费）
+    ---------------------------------
+    `docs/write_path_batching.md` §9 的剖析：每请求只**执行 2 条语句**，却有
+    **28 次** SQLAlchemy schema 对象构造（`schema.__init__` / `_make_proxy` /
+    `visit_bindparam` / `_append_param_parameter`）。原因是旧写法每行都
+    `insert(model).values(...).on_conflict_do_update(...)` —— **重建整个 Core 语句对象**。
+    而语句结构只随表变化、跟数据无关，每行重建纯属浪费 CPU（HTTP+落库层实测
+    **7.76 ms/请求**，是数据面 0.039 ms 的 **200 倍**，单核上限因此只有 ~129 req/s）。
+
+    值改由 `session.execute(stmt, params)` 传入：既省掉对象构造，又能让编译缓存命中
+    **同一条**语句（结构固定）。
+
+    更新列**从表结构推导**（非主键、非 `created_at`），而不是从本次的 values 推导——
+    这样"哪些列该被 upsert 覆盖"只写一遍，不会与 `_*_values()` 的字段清单漂移。
+    """
+    key = (dialect, model.__tablename__)
+    cached = _UPSERT_STMT_CACHE.get(key)
+    if cached is not None:
+        return cached
+    if dialect == "postgresql":
+        from sqlalchemy.dialects.postgresql import insert as _insert
+    elif dialect == "sqlite":
+        from sqlalchemy.dialects.sqlite import insert as _insert
+    else:
+        return None
+
+    base = _insert(model)
+    pk = [c.name for c in model.__table__.primary_key.columns]
+    keep_out = set(pk) | {"created_at"}     # created_at = 首次写入时间，不覆盖（见下）
+    upd = [c.name for c in model.__table__.columns if c.name not in keep_out]
+    stmt = base.on_conflict_do_update(
+        index_elements=pk, set_={c: base.excluded[c] for c in upd})
+    _UPSERT_STMT_CACHE[key] = stmt
+    return stmt
+
+
 def _upsert_one_stmt(session: Session, model: Any, pk_kwargs: dict[str, Any],
                      values: dict[str, Any]) -> bool:
     """**一条语句**的幂等 upsert；方言不支持时返回 False（调用方回退到 `_upsert`）。
@@ -139,19 +182,10 @@ def _upsert_one_stmt(session: Session, model: Any, pk_kwargs: dict[str, Any],
         dialect = session.get_bind().dialect.name
     except Exception:                             # noqa: BLE001 - 拿不到方言就走回退
         return False
-    if dialect == "postgresql":
-        from sqlalchemy.dialects.postgresql import insert as _insert
-    elif dialect == "sqlite":
-        from sqlalchemy.dialects.sqlite import insert as _insert
-    else:
+    stmt = _upsert_stmt(model, dialect)
+    if stmt is None:
         return False
-
-    stmt = _insert(model).values(**pk_kwargs, **values)
-    updatable = {k: getattr(stmt.excluded, k) for k in values if k != "created_at"}
-    if not updatable:                             # pragma: no cover - values 总有字段
-        return False
-    session.execute(stmt.on_conflict_do_update(
-        index_elements=list(pk_kwargs.keys()), set_=updatable))
+    session.execute(stmt, {**pk_kwargs, **values})
     return True
 
 
