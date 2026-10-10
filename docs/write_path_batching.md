@@ -96,6 +96,13 @@
 
 ### 3.1 ✅ SQLite：WAL + `synchronous=NORMAL` + `busy_timeout`（**确证有效**）
 
+**完整性复核（防止"数字好看其实是写不进去"）**：另起一次 8 秒写入压测（30 workers），
+落库后直接数库：**`telemetry_events` 1202 行 / 请求 1204 次、`candidates` 30 行**
+（30 个设备各一条）——写入确实持久化，不是 207 `persist_failed` 的快路径。
+另外这次 30 workers 下实测 **143 req/s**，而 60 workers 下只有 **64 req/s**：
+同一个库、同一份代码，**并发翻倍吞吐反而减半**，与"SQLite 单写者 + 锁排队/争用主导"
+一致（也再次说明压测并发数必须与后端容量匹配，否则测的是排队）。
+
 `storage/db.py::_apply_sqlite_pragmas`，在连接事件上执行；默认开，`DD_SQLITE_WAL=0` 可关。
 `engine_kwargs` 的 SQLite 分支**逐字节不变**（有精确断言守着本地行为）。
 
