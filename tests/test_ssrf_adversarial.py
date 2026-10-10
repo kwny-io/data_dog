@@ -12,9 +12,13 @@ IPv6 映射的 IPv4、userinfo `@` 混淆、控制字符、空 DNS 答案、重�
 1. **离线**：任何测试都不得真的走 DNS。autouse 夹具把 `socket.getaddrinfo` 换成"记录 +
    `gaierror`"，若有用例穿透到真实解析，teardown 直接断言失败——既避免联网，也避免
    "本机 DNS 恰好泛解析"造成的假绿。
-2. **如实记录**：发现校验函数行为与"防 SSRF/失败关闭"的宣称不符时，**不改 src**，而是写
-   "记录当前真实行为"的用例，并在 docstring 里标明这是缺陷/缺口（见文件末尾的
-   `test_*_current_behavior` 系列）。这些断言描述的是事实，不是期望值。
+2. **如实记录，然后修掉**：发现校验函数行为与"防 SSRF/失败关闭"的宣称不符时，先写
+   "记录当前真实行为"的用例（docstring 标明是缺陷/缺口），**再在 src 里修**，并把那些用例
+   翻成"必须拒绝/已关闭"。**不允许**以"记录现状"为名长期留着一个已知缺口。
+   两条曾经记录的**调用侧**缺口（重定向不逐跳复验、校验与建连之间无 IP 钉住）已在
+   `data_plane.fetch.safe_request` 里关闭，对应用例见 `tests/test_http_safe.py`；
+   本文件剩余的两条只描述**校验器自身的能力边界**（它看不到 302、没有 repeated-call 记忆），
+   不是待修项。
 """
 from __future__ import annotations
 
@@ -203,17 +207,14 @@ def test_non_http_scheme_matrix_rejected():
 
 # ------------------------------------------------------- 重定向 / 路径混淆
 
-def test_redirect_and_path_confusion_are_not_inspected():
-    """记录当前真实行为（**安全缺口，未修**）：只校验初始 URL 的 authority。
+def test_validate_url_does_not_inspect_path_or_query_by_design():
+    """`validate_url` 只校验 authority：path/query 里的内网地址**不参与**（设计如此）。
 
-    内网/元数据地址藏在 query、path、甚至 302 重定向目标里时，`validate_url` 完全看不见：
-    它拿到的 host 始终是 `evil.example`，于是"放行"。这不是测试放宽——这是被测函数的能力
-    边界。缺口在于**调用方**：`alerting.notifiers._post_json` 与
-    `evidence.change_source.WebhookChangeSource._post` 都用 `urllib.request.urlopen`，
-    默认跟随 3xx 重定向，且没有任何一跳重新过 `validate_url`。于是一个攻击者可控的公网
-    域名（或一个被接管的可信 webhook）回 302 到 169.254.169.254 即可读到云凭据。
-    修法方向（不在本次范围，见报告）：禁用自动重定向，或在 opener 的
-    `redirect_request` 里对每一跳重新校验。
+    它不是"缺口"，而是**能力边界**：URL 校验器无法预知重定向，也不该替调用方猜路径语义。
+    真正的防线在**取数层**——`data_plane.fetch.safe_request` 现在不再自动跟随重定向，
+    每一跳都重跑结构检查 + IP 检查（见 `tests/test_http_safe.py` 的
+    `test_redirect_to_metadata_is_refused_and_second_hop_never_sent`）。
+    本用例只把"校验器的边界"钉住，避免有人误以为 `validate_url` 能挡住 302。
     """
     rec = _Resolver(["93.184.216.34"])
     for u in [
@@ -225,7 +226,7 @@ def test_redirect_and_path_confusion_are_not_inspected():
         d = validate_url(u, resolver=rec)
         assert d.allowed, "记录事实：路径/query 里的内网地址不参与 authority 校验"
         assert rec.hosts[-1] == "evil.example"
-    print("PASS test_redirect_and_path_confusion_are_not_inspected")
+    print("PASS test_validate_url_does_not_inspect_path_or_query_by_design")
 
 
 # ------------------------------------------------------- 超长 URL
@@ -271,21 +272,20 @@ def test_dns_rebinding_any_private_answer_rejects():
     print("PASS test_dns_rebinding_any_private_answer_rejects")
 
 
-def test_dns_rebinding_toctou_has_no_pinning():
-    """记录当前真实行为（**安全缺口，未修**）：校验与取数之间没有解析结果钉住。
+def test_toctou_window_at_validator_is_closed_at_fetch_layer():
+    """`validate_url` 无记忆（同名两次解析可以不同）→ 谁"先校验、后 urlopen"谁就有 TOCTOU 窗口。
 
-    `validate_url` 无缓存、无 repeated-call 记忆：同名第一次解析到公网 → 放行；第二次
-    （真正发请求时）解析已切到内网 → 拒。也就是说"先校验、后取数"之间存在经典 TOCTOU
-    窗口。防御手段本可以是 `FetchDecision.resolved_ips`（钉住 IP 或直接连 IP），但没有
-    任何调用方用它：`pipeline._payload` 只看 `allowed`、`notifiers._target_allowed` 只取
-    `reason`、`WebhookChangeSource._check_url` 只缓存布尔值。
+    这正是为什么取数必须走 `safe_request`：它**把 `resolved_ips[0]` 钉成连接目标**，
+    之后再怎么改口都影响不了这次请求（见 `tests/test_http_safe.py` 的
+    `test_connection_is_pinned_to_validated_ip_when_resolver_changes_later`，
+    那里用真实本机 server + 一个"第二次就改口"的解析器做了行为验证）。
     """
     seq = _Resolver(["93.184.216.34"])
     assert validate_url("https://evil.example/x", resolver=seq).allowed
     seq.answers = ["10.0.0.9"]                     # 同名第二次解析已切内网
     assert not validate_url("https://evil.example/x", resolver=seq).allowed
-    assert seq.hosts == ["evil.example", "evil.example"]     # 外层没有任何记忆
-    print("PASS test_dns_rebinding_toctou_has_no_pinning")
+    assert seq.hosts == ["evil.example", "evil.example"]     # 校验器本身没有任何记忆
+    print("PASS test_toctou_window_at_validator_is_closed_at_fetch_layer")
 
 
 def test_empty_dns_answer_is_rejected():

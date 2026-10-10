@@ -13,17 +13,17 @@
 | | 亮点 | 证据 |
 |---|---|---|
 | 🔗 | **全链闭环，一条命令跑通** | 厂商文档 →[P1]→ 算子 →[P2]→ 候选 →[Agent]→ 报告 →[P3]→ 策略门 → SaaS 反馈，`python -m data_dog.e2e.replay_demo` |
-| 🧪 | **1019 项测试，全离线确定性** | `pytest -q` → `1010 passed, 9 skipped`（71 个测试文件，fake provider，无需 API Key、不联网；9 skipped = 未设 `DD_TEST_PG_URL` 的真 PostgreSQL 用例 ×5 + 未设 `DD_TEST_REDIS_URL` 的真 Redis 契约用例 ×4，两者由 CI 的 `postgres` / `redis` 集成腿实测；Redis 后端的行为测试另由 `.[dev]` 里的 `fakeredis` 离线跑） |
+| 🧪 | **1031 项测试，全离线确定性** | `pytest -q` → `1022 passed, 9 skipped`（72 个测试文件，fake provider，无需 API Key、不联网；9 skipped = 未设 `DD_TEST_PG_URL` 的真 PostgreSQL 用例 ×5 + 未设 `DD_TEST_REDIS_URL` 的真 Redis 契约用例 ×4，两者由 CI 的 `postgres` / `redis` 集成腿实测；Redis 后端的行为测试另由 `.[dev]` 里的 `fakeredis` 离线跑） |
 | 🔒 | **热路径确定性：上报不交给模型判断** | 上不上报由**确定性策略门**（四条件决策表 + 冲突消解）决定，同输入永远同结论；模型只出现在"调查报告"那一步 |
 | 🧱 | **不拿 `eval` 执行厂商字符串** | 自建**受限 DSL**：词法 → AST 解释器，无动态执行原语、函数闭集白名单、编译期类型检查 |
 | 🔍 | **诚实抽取，区分"能证实 / 待确认"** | 官方 SDK 头文件明写电机 **90°C 触发保护** → `verified`；无出处的 75°C → `unconfirmed`，**不冒充厂商事实** |
 | 🚪 | **fail-closed 贯穿全链** | 身份只在网关注入（正文自称一律丢弃）、兼容绑定拿不准就拒、错误语义收敛为有限错误码，**绝不降级为无鉴权** |
 | 🔁 | **幂等上报** | `(幂等键, revision)` 复合主键，网络重试 / 进程重启都不会产生重复告警 |
-| 🛡 | **安全设计落地** | SSRF 前置校验（仅 http/https、拒绝 localhost/环回/私有/保留，校验**全部解析 IP**；IP 未 pin 到连接，接线时需在连接层再校验）、`hmac.compare_digest` 常量时间比较、容器非 root、密钥不进镜像 |
+| 🛡 | **安全设计落地** | SSRF 前置校验（仅 http/https、拒绝 localhost/环回/私有/保留，校验**全部解析 IP**）+ **安全取数原语**（重定向**逐跳复验**、连接**钉在校验过的 IP** 上并按主机名校验证书、响应体上限）、`hmac.compare_digest` 常量时间比较、容器非 root、密钥不进镜像 |
 | 📊 | **带 ground truth 的规模化评估** | **忠实 MuJoCo 数据集 10 万条**，分层抽 n=2000 跑真实 Agent：**准确率 0.818**（Wilson 95% CI 0.801–0.834）、**normal 误报率 0.064**、逐类召回一并如实报（**F4 偏置 0.43 为当前最低**）；另有 7 个评估 case（含 2 个对抗性：提示注入 / 身份伪装） |
 | 🚚 | **能交付：服务 + 容器 + HTTPS** | FastAPI（liveness / readiness 分离）+ Dockerfile + compose（含 Caddy 自动申请 HTTPS）+ Makefile |
 
-**规模**：源码 138 个 Python 文件 / 22669 行，测试 71 个文件 / 16977 行；前端 `web/` 为 Next.js 15 控制台（56 个 TS/TSX 文件）；5 份正式事件 JSON Schema；27 个 `make` 命令（另有 `help`）。
+**规模**：源码 138 个 Python 文件 / 22885 行，测试 72 个文件 / 17219 行；前端 `web/` 为 Next.js 15 控制台（56 个 TS/TSX 文件）；5 份正式事件 JSON Schema；27 个 `make` 命令（另有 `help`）。
 
 ---
 

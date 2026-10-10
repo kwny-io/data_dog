@@ -218,12 +218,13 @@ class JsonlChangeSource:
 class WebhookChangeSource:
     """按需 POST 查询 CMDB API（拉取式）。
 
-    **SSRF 防护**：请求前必须过 `data_plane.fetch.validate_url`——内网/环回/
-    保留地址一律拒绝（与 P2 受控引用解析同一套校验）。
+    **SSRF 防护**：请求前必须过 `data_plane.fetch`——`validate_url` 做前置快速失败，
+    真正的每请求安全（**逐跳复验重定向 + 连接钉在校验过的 IP 上**）由 `safe_request` 保证。
 
     `fetcher` 可注入（测试不联网）：签名 `(url, timeout) -> list[dict]`。
-    默认使用标准库 urllib；**默认不自动联网**（生产按需）。若 goal 校验不过，
-    `query` 返回空列表并记 reason（调用方/日志可见）。
+    默认走 `safe_request`（标准库 `http.client` + 显式连接目标）；**默认不自动联网**（生产按需）。
+    若 URL 校验不过，`query` 返回空列表并记 reason（调用方/日志可见）；请求失败则**显式抛错**
+    （不静默返回空——那会把"CMDB 挂了"伪装成"没有变更"）。
     """
 
     def __init__(self, url: str, *, timeout: float = 5.0,
@@ -250,14 +251,21 @@ class WebhookChangeSource:
     def _post(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
         if self._fetcher is not None:
             return self._fetcher(self.url, self.timeout)
-        import urllib.request
+        from ..data_plane.fetch import safe_request
         data = json.dumps(payload).encode("utf-8")
-        # URL 已过 validate_url（仅 http/https、且拒绝环回/私有/保留地址），S310 不适用
-        req = urllib.request.Request(       # noqa: S310
-            self.url, data=data,
-            headers={"Content-Type": "application/json"}, method="POST")
-        with urllib.request.urlopen(req, timeout=self.timeout) as resp:  # noqa: S310
-            body = json.loads(resp.read().decode("utf-8"))
+        # 走 safe_request（**每跳复验重定向 + 连接钉在校验过的 IP 上**），不再用裸 urlopen：
+        # urlopen 会自动跟随 3xx 且不看目标，于是"公网 CMDB 域名 → 302 → 169.254.169.254"
+        # 就能绕过只校验初始 URL 的门（本模块此前自认的缺口之一）。
+        # `_check_url` 保留为**快速失败**的前置检查；真正的每请求安全由这一层保证
+        # （缓存的布尔值挡不住"校验之后 DNS 改口"）。
+        res = safe_request(self.url, method="POST", data=data,
+                           headers={"Content-Type": "application/json"},
+                           timeout_s=self.timeout)
+        if not res.ok:
+            # 失败**显式抛出**（与既有口径一致：变更源出错绝不静默返回空列表）
+            raise RuntimeError(
+                f"change source 请求失败: {res.error or res.status} (hops={list(res.hops)})")
+        body = json.loads(res.body.decode("utf-8"))
         return body if isinstance(body, list) else body.get("changes", [])
 
     def query(self, *, device_sn: str, component: str = "",

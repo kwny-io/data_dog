@@ -33,8 +33,9 @@ class IMNotifier:        # 飞书/钉钉/企微 群机器人 webhook（国内值
 class NotifierRegistry:  # 按 route.channel 选 notifier
 ```
 
-**复用安全件**：webhook 目标 URL **必须**过 `data_plane/fetch.validate_url`（防 SSRF）——
-别让"通知"变成 SSRF 入口。
+**复用安全件**：webhook 目标 URL **必须**过 `data_plane/fetch`——`validate_url` 做前置
+快速失败，取数走 `safe_request`（**逐跳复验重定向 + 连接钉在校验过的 IP 上**，
+`allow_private` 显式放行本机/受信内网）——别让"通知"变成 SSRF 入口。
 
 ### 3.2 数据模型（新表）
 

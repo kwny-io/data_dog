@@ -51,7 +51,7 @@ raw envelope
 | `resolver.py` | 兼容绑定：版本区间匹配；无匹配 `not_found`、多匹配 `ambiguous` |
 | `chain.py` | Parser / Normalizer / StatusCodeNormalizer / Enricher / Window / Detector |
 | `candidate.py` | 候选构建：同信号合并去重、severity 取最高、证据 |
-| `fetch.py` | **SSRF 安全**的受控引用校验（仅 http/https，拒绝内网/环回/保留） |
+| `fetch.py` | **SSRF 安全**：`validate_url` 受控引用校验（仅 http/https，拒绝内网/环回/保留）+ `safe_request` 安全取数（逐跳复验重定向、连接钉 IP） |
 | `pipeline.py` | 端到端编排 |
 
 ---
@@ -73,7 +73,24 @@ raw envelope
 - 解析域名后校验**所有** IP（防 DNS rebinding）；
 - 端口白名单、大小上限、失败关闭。
 
-> **诚实边界**：`fetch.py` 是**纯校验模块，不含任何网络请求**；它校验解析出的所有 IP 均为公网，但**解析结果未 pin 到实际连接**——真正的取数由调用方执行。因此在"校验通过"与"建立连接"之间仍存在 DNS rebinding 的时间窗。**接入真实网络请求时，必须在连接层用已校验的 IP 重建连接（不二次解析域名）**，否则校验只是前置防线而非完备防护。
+### 5.1 安全取数原语 `safe_request`（**取数必须用它，不要用裸 `urlopen`**）
+
+`validate_url` 只回答"这个 URL 能不能请求"，它既看不见 302 的目标，也管不住"校验之后
+DNS 改口"。真正的取数走 `fetch.safe_request`：
+
+| 缺口 | 做法 |
+|---|---|
+| `urlopen` 默认跟随 3xx 且不看目标（"公网域名 → 302 → `169.254.169.254`" 可读云凭据） | **不自动跟随**：每一跳重跑结构检查 + IP 检查，任一跳不过 → 整体失败且不再往下发；跳数上限 3 |
+| 校验与建连之间**二次解析**（DNS 重绑定 TOCTOU） | **把连接钉在校验出的 `resolved_ips[0]`**：`http.client` 连那个 IP，不再解析；TLS 的 SNI/证书校验仍按**主机名**（否则要么验不过、要么只能关校验） |
+| 响应体无上限 | `max_bytes`（默认 64 KiB）截断 |
+| 失败语义散乱 | 一律返回 `SafeResponse(ok=False, error=...)`，不抛异常 |
+
+透明性：3xx 跟随 `max_redirects`（默认 3）跳；`301/302/303` 按浏览器语义降级为 GET（丢 body），
+`307/308` 保留方法与 body。`allow_private=True` 是**显式信任放宽**（对应
+`DD_NOTIFY_ALLOW_PRIVATE=1`）：只跳过"解析结果必须是公网"，结构检查与钉住照旧，**仅限本机/受信内网**。
+
+> 调用方已全部切换：`alerting/notifiers.py::_post_json`、`evidence/change_source.py::_post`。
+> 回归见 `tests/test_http_safe.py`（12 条，离线）与 `tests/test_ssrf_adversarial.py`。
 
 > 注意：若本机开着代理（fake-IP 模式），公网域名可能被解析到保留段 `198.18.x.x` → 会被严格拒。这是**预期的安全行为**，不是 bug。
 

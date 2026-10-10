@@ -5,15 +5,14 @@
 最危险的地方：投递失败若被当成成功，值班人永远不会收到告警（静默失败）。
 
 本文件的三条纪律：
-1. **不出网**：HTTP 层一律打桩（`urllib.request.urlopen` / `smtplib.SMTP`），
-   只断言"我们发出的报文长什么样"与"异常如何被收敛成 DeliveryResult"；
+1. **不出网**：HTTP 层一律打桩（传输层 `data_plane.fetch._default_transport` /
+   `smtplib.SMTP`），只断言"我们发出的报文长什么样"与"异常如何被收敛成 DeliveryResult"；
 2. **失败即 ok=False**：HTTP 非 2xx、抛错、适配器异常都不许伪装成投递成功；
 3. SSRF 门本身用桩替掉（真实公网 URL 会触发 DNS，用例必须离线）。
 """
 from __future__ import annotations
 
 import json
-import urllib.error
 from types import SimpleNamespace
 
 import pytest
@@ -27,43 +26,42 @@ from data_dog.alerting.notifiers import (
     NotifierRegistry,
     Route,
 )
+from data_dog.data_plane import fetch
 
 
-class _FakeResponse:
-    """`urlopen` 的最小响应替身（支持 `with` 与 `.status`）。"""
+class _TransportRecorder:
+    """记录每次 `PinnedRequest`，并按需返回状态码或抛异常。
 
-    def __init__(self, status: int = 200, body: bytes = b'{"ok":true}') -> None:
+    打桩点从"`urllib.request.urlopen`"移到了 `data_plane.fetch._default_transport`：
+    取数现在走 `safe_request`（**逐跳复验重定向 + 连接钉在校验过的 IP 上**），
+    不再是裸 urlopen——所以"不出网"要打在传输层这一处。
+    """
+
+    def __init__(self, *, status: int = 200, body: bytes = b'{"ok":true}',
+                 exc: Exception | None = None) -> None:
         self.status = status
-        self._body = body
-
-    def read(self) -> bytes:
-        return self._body
-
-    def __enter__(self) -> _FakeResponse:
-        return self
-
-    def __exit__(self, *exc) -> bool:
-        return False
-
-
-class _UrlopenRecorder:
-    """记录每次 POST 的 Request，并按需返回状态码或抛异常。"""
-
-    def __init__(self, *, status: int = 200, exc: Exception | None = None) -> None:
-        self.status = status
+        self.body = body
         self.exc = exc
         self.requests: list = []
-        self.timeouts: list = []
 
-    def __call__(self, req, timeout=None):
+    def __call__(self, req):
         self.requests.append(req)
-        self.timeouts.append(timeout)
         if self.exc is not None:
             raise self.exc
-        return _FakeResponse(self.status)
+        return fetch.RawResponse(self.status, self.body, {})
 
     def payload(self) -> dict:
-        return json.loads(self.requests[0].data.decode("utf-8"))
+        return json.loads(self.requests[0].body.decode("utf-8"))
+
+
+@pytest.fixture()
+def transport(monkeypatch):
+    """把默认传输换成替身（自动回收）。用法：`rec = transport(status=503)`。"""
+    def _install(*, status=200, body=b'{"ok":true}', exc=None):
+        rec = _TransportRecorder(status=status, body=body, exc=exc)
+        monkeypatch.setattr(fetch, "_default_transport", rec)
+        return rec
+    return _install
 
 
 class _FakeSMTP:
@@ -123,7 +121,7 @@ def test_target_allowed_url_parse_failure_is_denied(monkeypatch):
         raise ValueError("bad url")
 
     monkeypatch.setattr(N, "urlparse", _boom)
-    assert N._target_allowed("http://x/hook") == (False, "URL 解析失败")
+    assert N._target_allowed("http://93.184.216.34/hook") == (False, "URL 解析失败")
     print("PASS test_target_allowed_url_parse_failure_is_denied")
 
 
@@ -155,39 +153,40 @@ def test_target_allowed_consults_ssrf_gate_for_public_url(monkeypatch):
 # ---------------------------------------------------------------- _post_json
 
 
-def test_post_json_http_error_is_delivery_failure(monkeypatch):
-    """服务端返回 4xx/5xx（urlopen 抛 HTTPError）→ ok=False + 回执带状态码。"""
-    err = urllib.error.HTTPError("http://x/hook", 500, "boom", None, None)
-    monkeypatch.setattr(N.urllib.request, "urlopen", _UrlopenRecorder(exc=err))
+# 用**公网 IP 字面量**（example.com 的地址）而不是 `http://x/hook`：后者解析不了，
+# 会被安全门在"发请求之前"拒掉（`url_denied: 域名解析失败`），根本走不到传输层桩
+# ——那测的就不是投递路径了。（"解析不了就拒"本身另有专门用例。）
+def test_post_json_http_error_is_delivery_failure(transport):
+    """服务端返回 5xx → ok=False + 回执带状态码（HTTP 错误现在是**普通响应**，
+    不再像裸 urlopen 那样抛 HTTPError）。"""
+    transport(status=500, body=b"boom")
 
-    ok, detail, receipt = N._post_json("http://x/hook", {"a": 1}, timeout_s=2.5)
+    ok, detail, receipt = N._post_json("http://93.184.216.34/hook", {"a": 1}, timeout_s=2.5)
     assert ok is False
     assert detail == "HTTP 500"
     assert receipt == "http_500"
     print("PASS test_post_json_http_error_is_delivery_failure")
 
 
-def test_post_json_non_2xx_status_is_delivery_failure(monkeypatch):
+def test_post_json_non_2xx_status_is_delivery_failure(transport):
     """非 2xx 的**正常响应**同样算失败（不假装投递成功），并带上超时预算。"""
-    rec = _UrlopenRecorder(status=503)
-    monkeypatch.setattr(N.urllib.request, "urlopen", rec)
+    rec = transport(status=503)
 
-    ok, detail, receipt = N._post_json("http://x/hook", {"a": 1}, timeout_s=2.5)
+    ok, detail, receipt = N._post_json("http://93.184.216.34/hook", {"a": 1}, timeout_s=2.5)
     assert (ok, detail, receipt) == (False, "HTTP 503", "http_503")
-    assert rec.timeouts == [2.5]
-    assert rec.requests[0].get_method() == "POST"
+    assert [r.timeout_s for r in rec.requests] == [2.5]
+    assert rec.requests[0].method == "POST"
     assert rec.payload() == {"a": 1}
     print("PASS test_post_json_non_2xx_status_is_delivery_failure")
 
 
-def test_post_json_connection_error_is_delivery_failure(monkeypatch):
-    """连不上（URLError）→ ok=False 且 detail 带异常类型，绝不冒充投递成功。"""
-    err = urllib.error.URLError("connection refused")
-    monkeypatch.setattr(N.urllib.request, "urlopen", _UrlopenRecorder(exc=err))
+def test_post_json_connection_error_is_delivery_failure(transport):
+    """连不上 → ok=False 且 detail 带异常类型，绝不冒充投递成功。"""
+    transport(exc=ConnectionRefusedError("connection refused"))
 
-    ok, detail, receipt = N._post_json("http://x/hook", {"a": 1}, timeout_s=1.0)
+    ok, detail, receipt = N._post_json("http://93.184.216.34/hook", {"a": 1}, timeout_s=1.0)
     assert ok is False
-    assert detail.startswith("URLError:")
+    assert detail.startswith("ConnectionRefusedError:")
     assert receipt == ""
     print("PASS test_post_json_connection_error_is_delivery_failure")
 
@@ -205,12 +204,11 @@ def test_im_private_target_denied_by_default(monkeypatch):
     print("PASS test_im_private_target_denied_by_default")
 
 
-def test_im_posts_text_payload_from_env_url(monkeypatch):
+def test_im_posts_text_payload_from_env_url(monkeypatch, transport):
     """路由没给 target 时回落到 `DD_IM_WEBHOOK_URL`，并 POST 文本载荷（subject+body）。"""
     monkeypatch.setenv("DD_NOTIFY_ALLOW_PRIVATE", "1")
     monkeypatch.setenv("DD_IM_WEBHOOK_URL", "http://127.0.0.1:9/hook")
-    rec = _UrlopenRecorder(status=200)
-    monkeypatch.setattr(N.urllib.request, "urlopen", rec)
+    rec = transport(status=200)
 
     res = IMNotifier().send(_note(), route=Route("im", ""))
     assert res.ok is True and res.receipt == "http_200"

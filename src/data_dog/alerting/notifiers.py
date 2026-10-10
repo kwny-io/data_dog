@@ -9,7 +9,10 @@
 ------------------------------------
 webhook / IM 的目标是**外部 URL**，直接 POST 等于给攻击者一个 SSRF 跳板（用它探测
 内网/云元数据）。故目标 URL **必须先过** `data_plane/fetch.validate_url` 的 SSRF
-校验（拒内网/回环/非公网 IP、拒非 http(s) 协议）。默认**失败关闭**——拿不准就拒。
+校验（拒内网/回环/非公网 IP、拒非 http(s) 协议）；**真正的取数走 `safe_request`**
+——裸 `urllib.request.urlopen` 会跟随 3xx 且不看目标、建连时还会二次解析 DNS，
+正好能绕过只校验初始 URL 的门（这两处缺口已修，见 `fetch.py` 的安全取数原语）。
+默认**失败关闭**——拿不准就拒。
 仅显式 `DD_NOTIFY_ALLOW_PRIVATE=1`（本地测试 / 受信内网）才放行内网目标。
 
 诚实边界
@@ -25,15 +28,13 @@ from __future__ import annotations
 import json
 import logging
 import smtplib
-import urllib.error
-import urllib.request
 from dataclasses import dataclass, field
 from email.message import EmailMessage
 from typing import Any, Protocol, runtime_checkable
 from urllib.parse import urlparse
 
 from .. import settings
-from ..data_plane.fetch import validate_url
+from ..data_plane.fetch import safe_request, validate_url
 
 _log = logging.getLogger(__name__)
 
@@ -133,20 +134,23 @@ def _target_allowed(url: str) -> tuple[bool, str]:
 
 def _post_json(url: str, payload: dict[str, Any], *,
                timeout_s: float) -> tuple[bool, str, str]:
-    """POST 一个 JSON，返回 (ok, detail, receipt)。非 2xx / 网络错 → ok=False。"""
+    """POST 一个 JSON，返回 (ok, detail, receipt)。非 2xx / 网络错 → ok=False。
+
+    走 `data_plane.fetch.safe_request`（**逐跳复验重定向 + 连接钉在校验过的 IP 上**）。
+    此前用的是裸 `urllib.request.urlopen`：它默认跟随 3xx 且不看目标，于是
+    "攻击者可控的公网 webhook → 302 → 169.254.169.254" 就能绕过只校验初始 URL 的门；
+    而且它建连时会**再解析一次** DNS（经典 TOCTOU）。两处缺口都在 safe_request 里关掉。
+    """
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    req = urllib.request.Request(
-        url, data=data, method="POST",
-        headers={"Content-Type": "application/json"})
-    try:
-        with urllib.request.urlopen(req, timeout=timeout_s) as resp:  # noqa: S310
-            code = int(getattr(resp, "status", 200) or 200)
-            ok = 200 <= code < 300
-            return ok, ("" if ok else f"HTTP {code}"), f"http_{code}"
-    except urllib.error.HTTPError as e:
-        return False, f"HTTP {e.code}", f"http_{e.code}"
-    except Exception as e:                            # noqa: BLE001
-        return False, f"{type(e).__name__}: {e}", ""
+    res = safe_request(url, method="POST", data=data,
+                       headers={"Content-Type": "application/json"},
+                       timeout_s=timeout_s,
+                       allow_private=settings.notify_allow_private_targets())
+    if res.ok:
+        return True, "", f"http_{res.status}"
+    if res.status:                       # 有 HTTP 状态码 → 回执带状态码（与旧行为一致）
+        return False, f"HTTP {res.status}", f"http_{res.status}"
+    return False, res.error, ""          # 传输层失败（含被安全门拒绝）
 
 
 # ---------------------------------------------------------------- 具体通道
