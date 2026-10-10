@@ -362,6 +362,19 @@
    后续每次"新起服务"其实**绑不上端口、卡在启动**，而压测流量**全部打在那个残留服务上**
    ——那个进程用的是**另一套配置**（不同的 pool / worker 数）。于是"新配置"的 A/B 实际
    在测一个配置未知的进程。
+
+   **确切机制（后来查清了，值得单独记住）**：`DD_SERVICE_WORKERS>1` 时 uvicorn 用
+   **`multiprocessing.spawn`** 起 worker，这些子进程：
+   - 命令行是 `python -c "from multiprocessing.spawn import spawn_main; ..."`，
+     **不含 `data_dog.service`** ⇒ 任何"按命令行匹配服务"的清理**全部漏掉它们**
+     （本轮实测漏了 **14 个，存活 2.75 小时**）；
+   - **继承了父进程的监听套接字** ⇒ 父进程（uvicorn 的 multiprocess manager）退出后，
+     **端口仍被它们持有、服务仍正常响应**；
+   - `netstat -ano` / `Get-NetTCPConnection` 报的是**已死的父 pid**，`Get-Process` 查不到
+     ⇒ 看起来像"残留 TCP 表项"，实际有活进程在服务（`/healthz` 照样 200，还报 uptime）。
+
+   ⇒ **清理必须按"端口 → socket 持有者"或"父进程的子进程树"来做，不能按命令行匹配。**
+   这也解释了为什么"真身 pid"时有时无：拿到的往往是中间进程或已死的父进程。
 2. **PG 容器的会话残留会让新实例启动挂死**：多次强杀 DB 客户端后，容器里积了 21 个空闲
    连接，此时 PG 形态的服务**永远停在 `Waiting for application startup`**（`py-spy` 显示
    主线程空闲在 asyncio `_poll`，即某个异步 await 不返回；CPU 是启动早期烧的）。

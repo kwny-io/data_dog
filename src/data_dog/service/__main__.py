@@ -13,6 +13,17 @@
 
 这类错误**不会报错**，只会静默给出错误的语义，所以这里**拒绝启动**而不是打个警告：
 与全链其它"拿不准就失败关闭"的口径一致（见 `docs/reliability.md`）。
+
+运维提醒：多 worker 时**必须优雅停止**
+------------------------------------
+`DD_SERVICE_WORKERS>1` 时 uvicorn 用 **`multiprocessing.spawn`** 起 worker，子进程会
+**继承监听套接字**。因此：
+- **优雅停止**（SIGTERM / Ctrl-C → uvicorn 的 multiprocess manager 收子进程）是唯一干净的方式；
+- **直接强杀父进程会留下孤儿 worker**：它们**仍持有端口、继续接客**（实测存活 2.75 小时），
+  而且命令行是 `python -c "from multiprocessing.spawn import spawn_main; …"`、
+  **不含 `data_dog.service`** ⇒ 按命令行匹配的清理脚本**一个都找不到它们**。
+  排查这类残留要**按端口找 socket 持有者**（或按父进程列子进程树），不是按命令行。
+  （`netstat -ano` 会报**已死的父 pid**，`Get-Process` 查不到——很容易被误判成"残留 TCP 表项"。）
 """
 from __future__ import annotations
 
