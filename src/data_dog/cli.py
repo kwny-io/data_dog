@@ -12,11 +12,22 @@ from pathlib import Path
 
 import typer
 
+from .core.console import ensure_utf8_console
 from .providers.config import load_config, save_config
 from .providers.registry import BUILTIN_VENDORS, vendor_ids
 from .schemas.events import CandidateEvent
 
 app = typer.Typer(add_completion=False, help="data_dog：机器狗遥测故障调查 Agent")
+
+
+@app.callback()
+def _console_setup() -> None:
+    """每个子命令执行前统一做一次控制台编码兜底。
+
+    放在 callback 而不是 `if __name__ == "__main__"`：真实入口是 console_script
+    `data-dog = data_dog.cli:app`，那条路径**不经过** `__main__`，写在那里等于没修。
+    """
+    ensure_utf8_console()
 
 
 @app.command()

@@ -22,6 +22,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from ..core.console import ensure_utf8_console
 from ..schemas.events import CandidateEvent
 from .degradation import (
     DIRECT_REPORT,
@@ -69,6 +70,7 @@ def _load_candidates() -> list[CandidateEvent]:
 
 
 def main() -> int:
+    ensure_utf8_console()
     ap = argparse.ArgumentParser()
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args()

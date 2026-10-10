@@ -18,6 +18,7 @@ import json
 import sys
 from pathlib import Path
 
+from ..core.console import ensure_utf8_console
 from ..operator_factory.knowledge import build_knowledge_package
 from ..operator_factory.p1_demo import build_motor_operator
 from ..paths import vendor_docs_dir
@@ -60,6 +61,7 @@ def _raw(event_id: str, **kw):
 
 
 def main() -> int:
+    ensure_utf8_console()
     ap = argparse.ArgumentParser()
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args()

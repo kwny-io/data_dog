@@ -19,6 +19,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from data_dog.agent.loop import AgentLoop
+from data_dog.core.console import ensure_utf8_console
 from data_dog.providers.client import ChatProvider
 from data_dog.schemas.events import CandidateEvent
 from data_dog.synth import (
@@ -263,12 +264,7 @@ def summarize_synth(results: list[dict]) -> dict:
 
 def main():
     import argparse
-    try:                       # Windows 控制台默认 GBK，装不下 ✓ / ⚠ 等字符
-        out = sys.stdout
-        if hasattr(out, "reconfigure"):          # 被重定向的 stdout 替身无此方法
-            out.reconfigure(encoding="utf-8", errors="replace")
-    except Exception:
-        pass
+    ensure_utf8_console()      # Windows 控制台默认 GBK，装不下 ✓ / ⚠ 等字符
     parser = argparse.ArgumentParser(description="data_dog 合成数据 ground truth 评估")
     parser.add_argument("--mode", choices=["offshelf", "real"], default="offshelf",
                         help="offshelf=离线假 provider(默认)；real=真实LLM(需 key)")

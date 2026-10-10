@@ -15,6 +15,7 @@ import json
 import sys
 from pathlib import Path
 
+from ..core.console import ensure_utf8_console
 from ..paths import vendor_docs_dir
 from .dsl import DSLError
 from .knowledge import build_knowledge_package, flag_unconfirmed
@@ -112,6 +113,7 @@ def build_motor_operator(pkg) -> Operator:
 
 
 def main() -> int:
+    ensure_utf8_console()
     ap = argparse.ArgumentParser()
     ap.add_argument("--json", action="store_true", help="机器可读输出")
     args = ap.parse_args()

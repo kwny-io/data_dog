@@ -13,10 +13,12 @@ import argparse
 import json
 import sys
 
+from ..core.console import ensure_utf8_console
 from .replay import run_e2e
 
 
 def main() -> int:
+    ensure_utf8_console()
     ap = argparse.ArgumentParser()
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--with-degradation", action="store_true",

@@ -28,6 +28,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
+from data_dog.core.console import ensure_utf8_console  # noqa: E402
 from data_dog.mujoco_sim.conditions import TrialConfig  # noqa: E402
 from data_dog.mujoco_sim.noise import NoiseConfig, apply_noise  # noqa: E402
 from data_dog.mujoco_sim.simulate import simulate  # noqa: E402
@@ -237,12 +238,7 @@ def _real_provider():
 
 
 def main():
-    try:                       # Windows 控制台默认 GBK，装不下 ⚠ 等字符
-        out = sys.stdout
-        if hasattr(out, "reconfigure"):          # 被重定向的 stdout 替身无此方法
-            out.reconfigure(encoding="utf-8", errors="replace")
-    except Exception:
-        pass
+    ensure_utf8_console()      # Windows 控制台默认 GBK，装不下 ⚠ 等字符
     p = argparse.ArgumentParser(description="MuJoCo 数据集 Agent 评估")
     p.add_argument("--manifest", type=str, required=True, help="含 shard_*.jsonl 的目录")
     p.add_argument("--n", type=int, default=2000)

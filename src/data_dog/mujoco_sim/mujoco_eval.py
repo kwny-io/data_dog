@@ -21,6 +21,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
+from data_dog.core.console import ensure_utf8_console  # noqa: E402
 from data_dog.mujoco_sim.to_sample import make_mujoco_batch
 from data_dog.providers.client import ChatProvider
 from data_dog.synth.synth_eval import (
@@ -110,6 +111,7 @@ def run_mujoco_eval(provider: ChatProvider | Callable[[], ChatProvider] | None =
 
 def main():
     import argparse
+    ensure_utf8_console()      # Windows 控制台默认 GBK，装不下 ✓ / ⚠ 等字符
     p = argparse.ArgumentParser(description="MuJoCo 数据源下 Agent 调查准确率评估")
     p.add_argument("--dur", type=float, default=30.0, help="每段仿真时长（秒）")
     p.add_argument("--json", action="store_true", help="只输出 {n,hit,accuracy} JSON")
