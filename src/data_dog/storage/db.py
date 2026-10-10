@@ -4,6 +4,10 @@
 - SQLite 需要 `check_same_thread=False`（多线程/测试）；PostgreSQL 用连接池。
 - PostgreSQL 的**建连 / 拿连接 / 单条语句**三段等待都有显式上限（见 `engine_kwargs`）：
   数据库不可用或过载时必须快速失败并报错，而不是静默把请求线程钉住几十秒。
+- **池容量也是并发上限**（`DD_DB_POOL_SIZE` / `DD_DB_MAX_OVERFLOW`）：库默认 5+10=15，
+  实测在 60 并发写下会让吞吐停在 15 并发的水平、P99 却差 6.1 倍（见 `settings.db_pool_size`）。
+- SQLite 每条连接应用 WAL / `synchronous=NORMAL` / `busy_timeout`（见 `_apply_sqlite_pragmas`），
+  默认 rollback journal 下"每次 COMMIT 一次 fsync + 写阻塞读"是单机写入只有 36 req/s 的主因。
 - 提供上下文管理器 `session_scope()`：自动 commit / rollback / close。
 """
 from __future__ import annotations
@@ -14,7 +18,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any
 
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, event, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
@@ -100,7 +104,8 @@ def engine_kwargs(target: str) -> dict[str, Any]:
 
     SQLite **刻意不引入**这些参数：本地单文件库没有网络建连、默认`QueuePool` 也不
     会被远端占满，给它加 `pool_timeout`/`connect_timeout` 只会改变既有本地行为
-    （测试与本机开发都依赖该行为不变）。
+    （测试与本机开发都依赖该行为不变）。SQLite 的性能调优走**连接级 PRAGMA**
+    （见 `_apply_sqlite_pragmas`），不在这里。
     """
     from .. import settings
 
@@ -128,6 +133,11 @@ def engine_kwargs(target: str) -> dict[str, Any]:
             _url_options(target), f"-c statement_timeout={statement_ms}")
     kwargs["connect_args"] = connect_args
     kwargs["pool_timeout"] = settings.db_pool_timeout_s()
+    # 池容量 = 并发上限。库默认 5+10=15，实测在 60 并发写下"吞吐与 15 并发相同、
+    # P99 差 6.1 倍"（多出来的线程全在池门口排队）——见 db_pool_size 的 docstring。
+    # 注意：这是**池不够用**，与上面三项"等待有上限"是两件事，两者都要。
+    kwargs["pool_size"] = settings.db_pool_size()
+    kwargs["max_overflow"] = settings.db_max_overflow()
     return kwargs
 
 
@@ -149,8 +159,42 @@ def _merge_pg_options(existing: str, extra: str) -> str:
     return f"{existing.strip()} {extra}".strip()
 
 
+def _apply_sqlite_pragmas(engine: Engine) -> None:
+    """SQLite：每条新连接上应用 PRAGMA（WAL / synchronous=NORMAL / busy_timeout）。
+
+    为什么用 `connect` 事件而不是 `engine_kwargs`：这些不是 `create_engine` 的参数，
+    而是**每条连接**的会话设置。`engine_kwargs` 的 SQLite 分支必须保持**逐字节不变**
+    ——`tests/test_reliability_hardening.py::test_sqlite_engine_kwargs_unchanged_by_pg_hardening`
+    有一条精确相等断言守着它（本地开发/测试行为不能因此改变）。
+
+    三条 PRAGMA 各自解决一个实测问题：
+    - `journal_mode=WAL`：读不再被写阻塞（默认 rollback journal 下写会挡读）。
+    - `synchronous=NORMAL`：默认 FULL 下**每次 COMMIT 一次 fsync**，单机写入只有 36 req/s。
+      WAL + NORMAL 仍是"提交即持久"（进程崩溃不丢），仅断电可能丢最后几个事务。
+    - `busy_timeout=5000`：SQLite 默认**拿到锁就立刻报 SQLITE_BUSY**（表现为随机的
+      "database is locked"）；等 5s 与本仓其它"快速失败"预算同量级。
+    """
+    from .. import settings
+
+    if not settings.sqlite_wal():
+        return                       # 显式关掉 → 保持库默认（旧行为，可审计的选择）
+
+    @event.listens_for(engine, "connect")
+    def _set_pragmas(dbapi_conn: Any, _record: Any) -> None:
+        cur = dbapi_conn.cursor()
+        try:
+            cur.execute("PRAGMA journal_mode=WAL")
+            cur.execute("PRAGMA synchronous=NORMAL")
+            cur.execute("PRAGMA busy_timeout=5000")
+        finally:
+            cur.close()
+
+
 def _make_engine(target: str) -> Engine:
-    return create_engine(target, **engine_kwargs(target))
+    engine = create_engine(target, **engine_kwargs(target))
+    if target.startswith("sqlite"):
+        _apply_sqlite_pragmas(engine)
+    return engine
 
 
 def get_sessionmaker() -> sessionmaker:

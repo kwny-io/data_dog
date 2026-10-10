@@ -15,7 +15,9 @@
   candidate_id（=hash(group_key)）也随之稳定。
 - 内存有界：每个 base 只保留最近 `max_groups` 段（打开中的 + 若干已关闭）。更早的
   已关闭段在前几次 build 时已随幂等 upsert 落库，淘汰不丢真相。
-- 索引键 `_CAND_INDEX` 记录出现过的 base，`build` 据此枚举（跨副本可见）。
+- 索引键 `_INDEX_KEY` 记录出现过的 base，`build(only_touched=False)` 据此**全量枚举**
+  （跨副本可见）。注意这条登记**每次命中都会走共享后端**，故实例内做了去重——见
+  `_register_index` 的 docstring（那是热路径上的一个单车道）。
 
 诚实边界：淘汰旧段后，若某个副本的 build 晚于淘汰、且该段从未被任何副本 emit，
 则该段不会被产出。工程上以"每次 ingest 后立即 build 并落库"规避——见 stream
@@ -24,6 +26,7 @@
 from __future__ import annotations
 
 import hashlib
+from collections import OrderedDict
 from typing import Any
 
 from ..schemas.events import CandidateEvent, EvidenceSummary
@@ -32,6 +35,10 @@ from .candidate import _SEV_RANK, _SEV_SCORE, _parse_time, _signal_of
 from .watermark import Watermark
 
 _INDEX_KEY = "candidate:index"
+
+# 本实例"已登记进共享索引"的 base key 上限（FIFO 淘汰）。淘汰只导致下次多写一次索引，
+# 不影响正确性；有界是为了不随车队规模无限增长。
+_INDEX_CACHE_MAX = 4096
 
 
 class SharedCandidateBuilder:
@@ -57,6 +64,8 @@ class SharedCandidateBuilder:
         # ——让 HTTP 请求/流式 flush 只返回"自己刚处理出来的候选"，而不是共享
         # 存储里所有设备/租户的全部候选。
         self._touched: set[str] = set()
+        # 本实例已经登记进共享索引的 base key（FIFO 有界）。见 _register_index。
+        self._indexed: OrderedDict[str, None] = OrderedDict()
 
     # ---- 内部 ----
     def _base_key(self, device_sn: str, component_ref: str, signal: str,
@@ -66,6 +75,29 @@ class SharedCandidateBuilder:
         return f"{self._ns}:{prefix}{device_sn}|{component_ref}|{signal}"
 
     def _register_index(self, base: str) -> None:
+        """把 base 登记进**共享索引**（只被 `build(only_touched=False)` 全量枚举用）。
+
+        为什么要实例内去重（这里原本是热路径上的一个单车道）
+        --------------------------------------------------
+        索引是**一个全局 key**（`_INDEX_KEY`）。在 postgres/redis 后端下每次 `mutate`
+        都是一次"拿行锁 → 改 → 提交"，于是**所有设备、所有租户的每一次检测命中都在
+        同一个行锁上排队**——吞吐被人为钉在单条提交链上（实测：同库同负载只把共享状态
+        换成进程内，吞吐就从 ~38 抬到 ~47 req/s，见 `docs/write_path_batching.md`）。
+
+        而这条登记**对热路径毫无收益**：HTTP 请求走 `build(only_touched=True)`，用的是
+        本地 `_touched`；索引只服务运维/对账的全量枚举。所以"每次命中都登记"是纯开销。
+
+        去重为什么安全：索引是各副本登记的**并集**。任何 base 要被
+        `build(only_touched=False)` 枚举到，它必须先被**某个**实例首次触碰——而那个实例
+        会登记它。本实例重复登记只是在重写同一个并集。
+        """
+        if base in self._indexed:
+            self._indexed.move_to_end(base)
+            return
+        self._indexed[base] = None
+        if len(self._indexed) > _INDEX_CACHE_MAX:
+            self._indexed.popitem(last=False)     # 淘汰只会让下次多写一次，不影响正确性
+
         def fn(cur: Any) -> tuple[Any, Any]:
             keys = list(cur) if isinstance(cur, list) else []
             if base not in keys:

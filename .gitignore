@@ -9,6 +9,10 @@
 # 本地数据库（SQLite）——运行时生成，不提交
 *.db
 *.db-journal
+# WAL 模式的侧文件：SQLite 现在默认开 WAL（storage/db.py::_apply_sqlite_pragmas），
+# 不加这两条，跑一次服务就会在工作区留下未跟踪的 *.db-wal / *.db-shm。
+*.db-wal
+*.db-shm
 *.sqlite
 *.sqlite3
 

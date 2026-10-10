@@ -176,6 +176,41 @@ def db_statement_timeout_ms() -> int:
     return max(0, _get_int("DD_DB_STATEMENT_TIMEOUT_MS", default=15_000))
 
 
+def db_pool_size() -> int:
+    """连接池常驻连接数（仅 PostgreSQL 生效）。默认 10（SQLAlchemy 默认只有 5）。
+
+    为什么必须可配：**池容量就是并发上限**。实测（`docs/write_path_batching.md`）
+    同库同目标 RPS、只把并发从 60 降到 15（= 当时的池容量 5+10）：
+    **吞吐 72 → 73 req/s 几乎不变，而 P99 1778 → 290ms（6.1×）**——多出来的线程
+    不换来任何吞吐，只堆在池门口。抬高池容量是把这段排队还给服务能力的最省事一步。
+    """
+    return max(1, _get_int("DD_DB_POOL_SIZE", default=10))
+
+
+def db_max_overflow() -> int:
+    """池满后允许临时新建的额外连接数（仅 PostgreSQL 生效）。默认 10。
+
+    容量上界 = `pool_size + max_overflow`。**多副本部署必须满足**
+    `(pool_size + max_overflow) × 副本数 < PG max_connections`（默认 100），
+    否则池会去抢一个不存在的连接，表现为**建连超时**而不是排队——比排队更难定位。
+    """
+    return max(0, _get_int("DD_DB_MAX_OVERFLOW", default=10))
+
+
+def sqlite_wal() -> bool:
+    """SQLite 是否启用 WAL + `synchronous=NORMAL`（默认**开**）。
+
+    默认的 rollback journal + `synchronous=FULL` 下**每次 COMMIT 一次 fsync**，
+    而且写会阻塞读：实测单机写入只有 36 req/s、P99 8.0s（`docs/write_path_batching.md`）。
+    WAL 让读不再被写阻塞。
+
+    `synchronous=NORMAL` 在 WAL 下**仍然是"提交即持久"**（进程崩溃不丢已提交数据），
+    只是**操作系统崩溃/断电**可能丢最后几个已提交事务——这是 SQLite 文档推荐的标准组合，
+    但确实是对耐久性的取舍，故给开关（`DD_SQLITE_WAL=0` 回到旧行为）。
+    """
+    return _get_bool("DD_SQLITE_WAL", default=True)
+
+
 # ---------------------------------------------------------------- 共享状态
 
 def state_backend() -> str:
