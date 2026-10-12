@@ -58,6 +58,14 @@ FILES: dict[str, str] = {
     "op_1/ball_07/119.mat": "ball",
     "op_1/inner_07/106.mat": "inner",
     "op_1/outer_07/131.mat": "outer",
+    "op_2/normal/99.mat": "normal",
+    "op_2/ball_07/120.mat": "ball",
+    "op_2/inner_07/107.mat": "inner",
+    "op_2/outer_07/132.mat": "outer",
+    "op_3/normal/100.mat": "normal",
+    "op_3/ball_07/121.mat": "ball",
+    "op_3/inner_07/108.mat": "inner",
+    "op_3/outer_07/133.mat": "outer",
 }
 _FLAGGED = ("needs_human_review", "confirmed")
 

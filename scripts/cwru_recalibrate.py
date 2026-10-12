@@ -10,7 +10,9 @@
   可解释**（与本仓"热路径是阈值算子"的口径一致），不上黑箱。
 - 特征：时域（rms / peak / kurtosis / crest_factor）+ **包络谱缺陷频率占比**
   （env_bpfo / env_bpfi / env_bsf）。
-- 对照：**旧阈值**（借用合成档：kurtosis>4 或 crest>5） vs **重标定阈值**，都在**测试载荷**上评。
+- 对照：**旧阈值**（借用合成档：kurtosis>4 或 crest>5） vs **重标定阈值**，都只在**测试载荷**上评。
+- `--lolo`：**留一载荷交叉验证**——每个载荷轮流当测试集、其余当标定集，再聚合。单折容易骗人，
+  多折才看得出"到底是标定对了，还是恰好那一折好"。
 """
 from __future__ import annotations
 
@@ -53,65 +55,88 @@ def _bal_acc(rows: list[dict], feat: str, thr: float) -> tuple[float, float, flo
     return (tpr + tnr) / 2.0, tpr, (fp / (fp + tn) if (fp + tn) else 0.0)
 
 
-def _rows_with_hit(rows: list[dict], feat: str, thr: float) -> list[dict]:
+def fit_rule(calib: list[dict]) -> tuple[str, float, list[tuple[float, str, float]]]:
+    """在标定集上为每个特征扫阈值（分位数），返回最优 (feature, thr, 全部打分)。"""
+    feats = [k for k in calib[0] if not k.startswith("__")]
+    scored: list[tuple[float, str, float]] = []
+    for f in feats:
+        vals = sorted(r[f] for r in calib)
+        qs = [vals[int(q * (len(vals) - 1))] for q in np.linspace(0.05, 0.95, 46)]
+        ba, thr = max(((_bal_acc(calib, f, t)[0], t) for t in qs), key=lambda z: z[0])
+        scored.append((ba, f, thr))
+    scored.sort(reverse=True)
+    return scored[0][1], scored[0][2], scored
+
+
+def eval_rule(rows: list[dict], feat: str, thr: float) -> list[dict]:
     return [{"label": r["__label__"],
              "hit": hit(r["__label__"], "needs_human_review" if r[feat] > thr else "rejected")}
             for r in rows]
 
 
+def baseline_rows(rows: list[dict]) -> list[dict]:
+    return [{"label": r["__label__"],
+             "hit": hit(r["__label__"],
+                        "needs_human_review"
+                        if (r["kurtosis"] > 4.0 or r["crest_factor"] > 5.0) else "rejected")}
+            for r in rows]
+
+
 if __name__ == "__main__":
-    ap = argparse.ArgumentParser(description="CWRU 判据重标定（按载荷 held-out）")
+    ap = argparse.ArgumentParser(description="CWRU 判据重标定（按载荷 held-out / LOLO）")
     ap.add_argument("--data-dir", default=str(_ROOT / "data" / "cwru"))
     ap.add_argument("--calib-load", type=int, default=0)
     ap.add_argument("--test-load", type=int, default=1)
+    ap.add_argument("--lolo", action="store_true", help="留一载荷交叉验证（每个载荷轮流当测试集）")
     ap.add_argument("--windows-per-file", type=int, default=4)
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args()
     ensure_utf8_console()
 
     wins = load_windows(Path(args.data_dir), args.windows_per_file, 24000, 12000)
-    calib = [featurize(lb, ld, x) for lb, ld, x in wins if ld == args.calib_load]
-    test = [featurize(lb, ld, x) for lb, ld, x in wins if ld == args.test_load]
-    if not calib or not test:
-        print(f"缺少载荷数据：calib(op_{args.calib_load})={len(calib)} test(op_{args.test_load})={len(test)}",
-              file=sys.stderr)
+    rows_all = [featurize(lb, ld, x) for lb, ld, x in wins]
+    loads = sorted({r["__load__"] for r in rows_all})
+    if len(loads) < 2:
+        print(f"至少需要 2 个载荷，当前 {loads}", file=sys.stderr)
         raise SystemExit(1)
-    feats = [k for k in calib[0] if not k.startswith("__")]
-    print(f"标定 op_{args.calib_load}: {len(calib)} 窗口 | 测试 op_{args.test_load}: {len(test)} 窗口")
 
-    # 标定：每个特征扫阈值，取平衡准确率最高
-    scored = []
-    for f in feats:
-        vals = sorted(r[f] for r in calib)
-        qs = [vals[int(q * (len(vals) - 1))] for q in np.linspace(0.05, 0.95, 46)]
-        best = max(((_bal_acc(calib, f, t)[0], t) for t in qs), key=lambda z: z[0])
-        scored.append((best[0], f, best[1]))
-    scored.sort(reverse=True)
-    print("标定集 top5 规则：")
-    for ba, f, t in scored[:5]:
-        print(f"  {f} > {t:.4g}   bal_acc={ba:.3f}")
+    folds: list[dict] = []
+    agg_base: list[dict] = []
+    agg_new: list[dict] = []
+    combos = [None] if not args.lolo else loads
+    for test_load in (combos if args.lolo else [args.test_load]):
+        if args.lolo:
+            calib = [r for r in rows_all if r["__load__"] != test_load]
+            test = [r for r in rows_all if r["__load__"] == test_load]
+        else:
+            calib = [r for r in rows_all if r["__load__"] == args.calib_load]
+            test = [r for r in rows_all if r["__load__"] == args.test_load]
+        if not calib or not test:
+            continue
+        best_f, best_t, scored = fit_rule(calib)
+        b = summarize(baseline_rows(test))
+        n = summarize(eval_rule(test, best_f, best_t))
+        agg_base += baseline_rows(test)
+        agg_new += eval_rule(test, best_f, best_t)
+        folds.append({"test_load": test_load, "calib_n": len(calib), "test_n": len(test),
+                      "rule": {"feature": best_f, "threshold": round(best_t, 5)},
+                      "baseline": b, "recalibrated": n,
+                      "top3": [{"feature": f, "threshold": round(t, 5), "calib_bal_acc": round(ba, 3)}
+                               for ba, f, t in scored[:3]]})
+        print(f"fold test=op_{test_load} (calib {len(calib)}/{len(test)} 窗口)  "
+              f"规则 {best_f}>{best_t:.4g}  "
+              f"旧阈值 acc={b['accuracy']}/召回={b['fault_recall']}  "
+              f"重标定 acc={n['accuracy']}/召回={n['fault_recall']}")
 
-    best_ba, best_f, best_t = scored[0]
-
-    # 基线要用原始信号（kurtosis/crest 已在特征里，等价）
-    base_rows = [{"label": r["__label__"],
-                  "hit": hit(r["__label__"],
-                             "needs_human_review"
-                             if (r["kurtosis"] > 4.0 or r["crest_factor"] > 5.0) else "rejected")}
-                 for r in test]
-    new_rows = _rows_with_hit(test, best_f, best_t)
-    out = {
-        "calib_load": args.calib_load, "test_load": args.test_load,
-        "calib_n": len(calib), "test_n": len(test),
-        "rule": {"feature": best_f, "threshold": best_t, "calib_bal_acc": round(best_ba, 3)},
-        "baseline_test": summarize(base_rows),
-        "recalibrated_test": summarize(new_rows),
-        "top5": [{"feature": f, "threshold": t, "calib_bal_acc": round(ba, 3)}
-                 for ba, f, t in scored[:5]],
-    }
-    print(f"\n[旧阈值]    测试 accuracy={out['baseline_test']['accuracy']}  "
-          f"召回={out['baseline_test']['fault_recall']}  normal误报={out['baseline_test']['normal_fp_rate']}")
-    print(f"[重标定] {best_f}>{best_t:.4g}  测试 accuracy={out['recalibrated_test']['accuracy']}  "
-          f"召回={out['recalibrated_test']['fault_recall']}  normal误报={out['recalibrated_test']['normal_fp_rate']}")
+    out = {"loads": loads, "windows_per_file": args.windows_per_file, "folds": folds}
+    if args.lolo:
+        out["aggregate"] = {"baseline": summarize(agg_base), "recalibrated": summarize(agg_new),
+                            "base_n": len(agg_base)}
+        print(f"\n[聚合] 旧阈值   accuracy={out['aggregate']['baseline']['accuracy']}  "
+              f"召回={out['aggregate']['baseline']['fault_recall']}  "
+              f"normal误报={out['aggregate']['baseline']['normal_fp_rate']}")
+        print(f"[聚合] 重标定   accuracy={out['aggregate']['recalibrated']['accuracy']}  "
+              f"召回={out['aggregate']['recalibrated']['fault_recall']}  "
+              f"normal误报={out['aggregate']['recalibrated']['normal_fp_rate']}")
     if args.json:
         print(json.dumps(out, ensure_ascii=False))
