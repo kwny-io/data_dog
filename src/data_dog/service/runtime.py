@@ -12,6 +12,7 @@ from ..agent.loop import AgentLoop
 from ..alerting.saas import SaaSTestAdapter
 from ..core import metrics
 from ..core.logging import get_logger
+from ..core.redact import redact
 from ..data_plane.candidate_shared import SharedCandidateBuilder
 from ..data_plane.gateway import TelemetryGateway
 from ..data_plane.p2_demo import _detector_config
@@ -246,7 +247,8 @@ def _db_reachable() -> dict[str, Any]:
         conn.close()
         return {"ok": True, "url_scheme": _url_scheme()}
     except Exception as e:                        # noqa: BLE001
-        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+        # 公开探针：DB 异常消息可能带 DSN/口令 → 脱敏后再回给编排层
+        return {"ok": False, "error": redact(f"{type(e).__name__}: {e}")}
 _PUBLIC_PATHS = frozenset({"/healthz", "/readyz"})
 _DEFAULT_PAGE_SIZE = 50
 _MAX_PAGE_SIZE = 500
@@ -335,6 +337,53 @@ def _submit_async_investigation(tenant: str, candidate_id: str,
     return {"ok": True, "job_id": job_id, "status": "pending",
             "candidate_id": candidate_id,
             "poll": f"/v1/investigations/jobs/{job_id}"}
+_PRIOR_REPORT_SCAN_LIMIT = 200
+
+
+def _prior_report_items(session, tenant: str, *, device_sn: str,
+                        component_ref: str, exclude_candidate: str = "",
+                        limit: int = 5) -> list[dict[str, Any]]:
+    """取该设备/部件的既往调查报告，供 Agent 跨调查记忆（先验）。
+
+    MVP 边界：报告行本身**不含 device/component**（只有 candidate_refs），故这里先按
+    (device, component) 取候选建立映射，再在租户**最近 N 条报告**里内存过滤。
+    规模化时该给 reports 加 (device_sn, component_ref) 列 + 索引，直接 SQL 过滤。
+    """
+    cands = repo.list_candidates(session, tenant_id=tenant, device_sn=device_sn,
+                                 component_ref=component_ref)
+    meta: dict[str, tuple[str, str]] = {
+        c["candidate_id"]: (c.get("component_ref", ""), c.get("signal", ""))
+        for c in cands
+    }
+    if not meta:
+        return []
+    rows = repo.list_reports(session, tenant_id=tenant, limit=_PRIOR_REPORT_SCAN_LIMIT)
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        hit = sorted(set(r.get("candidate_refs") or []) & set(meta))
+        if not hit:
+            continue
+        cid = hit[0]
+        if cid == exclude_candidate:
+            continue
+        comp, sig = meta.get(cid, (component_ref, ""))
+        out.append({
+            "investigation_id": r.get("investigation_id", ""),
+            "candidate_id": cid,
+            "component_ref": comp,
+            "signal": sig,
+            "disposition": r.get("disposition", ""),
+            "severity": r.get("severity"),
+            "confidence": r.get("confidence"),
+            "event_type": r.get("event_type"),
+            "summary": (r.get("summary") or "")[:200],
+            "created_at": r.get("created_at", ""),
+            "counter_evidence_refs": list(r.get("counter_evidence_refs") or [])[:5],
+        })
+    out.sort(key=lambda x: x.get("created_at") or "", reverse=True)
+    return out[:limit]
+
+
 def _execute_investigation(tenant: str, candidate_id: str, *,
                            should_cancel=None, persist: bool = True) -> dict[str, Any]:
     """一次调查的**唯一实现**（同步端点与异步 worker 共用）。
@@ -357,6 +406,10 @@ def _execute_investigation(tenant: str, candidate_id: str, *,
                     "status": "failed", "error_code": "not_found"}
         tel_rows = repo.list_telemetry(s, tenant_id=tenant,
                                        device_sn=row["device_sn"])
+        # 跨调查记忆（先验）：该设备/部件的既往报告（排除本次候选自己）
+        prior_items = _prior_report_items(
+            s, tenant, device_sn=row["device_sn"],
+            component_ref=row["component_ref"], exclude_candidate=candidate_id)
 
     cand = _row_to_candidate(row)
     trace: list[dict[str, Any]] = []
@@ -369,8 +422,18 @@ def _execute_investigation(tenant: str, candidate_id: str, *,
                 "status": "failed", "error_code": "unavailable"}
 
     try:
-        bridge = RepoEvidenceBridge(tel_rows, device_sn=cand.device_sn)
-        tools = InvestigationTools(bridge)
+        bridge = RepoEvidenceBridge(tel_rows, device_sn=cand.device_sn,
+                                    prior_reports=prior_items)
+        # 无损视觉记忆（VISTA-1 式）：设了目录才启用；Pillow 缺失则工具不暴露（零回归）
+        visual = None
+        vdir = settings.visual_evidence_dir()
+        if vdir:
+            from ..evidence.visual import VisualFrameStore
+            visual = VisualFrameStore(vdir)
+            if not visual.available:
+                _log.warning("已设 DD_VISUAL_EVIDENCE_DIR 但 Pillow 不可用，视觉工具不暴露",
+                             extra={"dir": vdir})
+        tools = InvestigationTools(bridge, visual=visual)
         agent = AgentLoop(provider, tools, model=settings.llm_model() or None,
                           max_steps=settings.investigate_max_steps(),
                           trace_cb=trace.append)
@@ -421,7 +484,7 @@ def _execute_investigation(tenant: str, candidate_id: str, *,
     except Exception as e:                          # noqa: BLE001
         _log.warning("P3 上报失败", extra={"error": f"{type(e).__name__}: {e}"})
         alerting_result = {"reported": False,
-                           "reason": f"{type(e).__name__}: {e}"}
+                           "reason": redact(f"{type(e).__name__}: {e}")}
 
     # ---- P4-3：按值班表派发通知（默认关；无值班人则失败关闭）----
     # 在告警落库事务**提交之后**（独立会话）做，避免与落库事务争同一连接锁。
@@ -433,7 +496,7 @@ def _execute_investigation(tenant: str, candidate_id: str, *,
             _log.warning("P4-3 通知派发失败",
                          extra={"error": f"{type(e).__name__}: {e}"})
             alerting_result["dispatch"] = {"dispatched": False,
-                                           "reason": f"{type(e).__name__}: {e}"}
+                                           "reason": redact(f"{type(e).__name__}: {e}")}
 
     report_dict = report.to_dict()
     usage = report_dict.get("model_provenance", {}).get("usage", {})
@@ -528,6 +591,7 @@ def _build_investigation_provider(should_cancel=None) -> Any:
     provider = Provider.from_config(
         cfg.get("vendor_id") or settings.llm_vendor(), key,
         timeout=settings.investigate_timeout_s(),
+        base_url=cfg.get("base_url") or settings.llm_base_url(),
     )
     return _DeadlineProvider(provider, settings.investigate_timeout_s(),
                              should_cancel=should_cancel)

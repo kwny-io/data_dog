@@ -97,8 +97,11 @@ class RepoEvidenceBridge:
 
     def __init__(self, telemetry_rows: list[dict[str, Any]], *, device_sn: str,
                  detector: GeneratedRuleDetector | None = None,
-                 change_source: Any = None):
+                 change_source: Any = None,
+                 prior_reports: list[dict[str, Any]] | None = None):
         self.device_sn = device_sn
+        # 跨调查记忆：该设备/部件的既往报告（调用方已按 component 过滤；空 = 不暴露该工具）。
+        self._prior_reports = list(prior_reports or [])
         # 邻居检测复用**真实算子规则**（阈值出自 operators/generated/*.yaml）。
         # 注入以便测试；默认惰性加载。
         self._detector = detector
@@ -147,6 +150,24 @@ class RepoEvidenceBridge:
     def query_vendor_knowledge(self, component_type, question=None):
         return [dict(item, retriever="repo_kb")
                 for item in VENDOR_KNOWLEDGE.get(component_type, [])]
+
+    @property
+    def supports_prior_memory(self) -> bool:
+        """本设备是否有既往调查报告（决定是否向 Agent 暴露跨调查记忆工具）。"""
+        return bool(self._prior_reports)
+
+    def query_prior_investigations(self, device_sn, component, signal=""):
+        """既往调查报告（先验）。按 component（可选 signal）过滤，新的在前，最多 5 条。"""
+        bad = self._denied(device_sn, component)
+        if bad is not None:
+            return bad
+        items = [p for p in self._prior_reports
+                 if p.get("component_ref") == component
+                 and (not signal or p.get("signal") == signal)]
+        items.sort(key=lambda p: p.get("created_at") or "", reverse=True)
+        return {"device_sn": self.device_sn, "component": component, "signal": signal,
+                "prior_investigations": items[:5], "truncated": len(items) > 5,
+                "note": "既往结论是先验，非本次证据；须与当前证据交叉验证。"}
 
     def _denied(self, device_sn: str, component: str) -> dict[str, Any] | None:
         """统一的越权/设备校验；通过返回 None，否则返回错误 dict。"""

@@ -264,7 +264,8 @@ def _real_provider():
     if not cfg["api_key"]:
         print("real 模式需要先 `data-dog init` 配 key")
         sys.exit(1)
-    return Provider.from_config(cfg["vendor_id"], cfg["api_key"])
+    return Provider.from_config(cfg["vendor_id"], cfg["api_key"],
+                               base_url=cfg.get("base_url") or "")
 
 
 def main():

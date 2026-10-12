@@ -711,6 +711,15 @@ def llm_model() -> str:
     return _get("DD_LLM_MODEL", "DATA_DOG_MODEL")
 
 
+def llm_base_url() -> str:
+    """自定义 OpenAI 兼容端点的 base_url（`DD_LLM_VENDOR=custom` 时用）。
+
+    产品落地：使用者自带模型/网关，只要兼容 OpenAI 协议即可接入。空 = 未配置
+    （用内置三家时无需设置）。见 providers/registry.py 的 custom 分支。
+    """
+    return _get("DD_LLM_BASE_URL", "DATA_DOG_BASE_URL")
+
+
 def llm_timeout_s() -> float | None:
     """LLM 调用超时（秒）。0 或负值 = 不限时（不推荐）。未设 = 60s。"""
     raw = _get("DD_LLM_TIMEOUT_S")
@@ -756,6 +765,35 @@ def investigate_workers() -> int:
 def investigate_queue_poll_ms() -> int:
     """worker 空转时查共享队列的间隔（毫秒）。"""
     return max(20, _get_int("DD_INVESTIGATE_QUEUE_POLL_MS", default=200))
+
+def write_behind() -> bool:
+    """是否把**业务落库**移出请求路径（write-behind 队列 + 后台写入线程）。
+
+    默认 **False**：保持既有同步语义（响应返回前落库完成）。置 1 后
+    `POST /v1/telemetry` 只把落库任务入队就返回——**HTTP 200 不再代表已落库**。
+
+    ⚠️ 语义代价见 `docs/write_path_batching.md` §10：队列满 → 503 失败关闭；
+    后台写失败/进程被杀 → **已返回的 200 无法追回**（数据丢失）。它是"用持久性
+    换延迟"的显式取舍，只在可容忍少量丢失的部署里开，并须对
+    `data_dog_write_behind_total{result=~"failed|rejected_full"}` 告警。
+    """
+    return _get_bool("DD_WRITE_BEHIND", default=False)
+
+
+def write_behind_queue_size() -> int:
+    """write-behind 队列容量（条数）。满了就 503 失败关闭，不静默丢。"""
+    return max(1, _get_int("DD_WRITE_BEHIND_QUEUE", default=1000))
+
+
+def visual_evidence_dir() -> str:
+    """无损视觉记忆的本地目录（VISTA-1 式）。空 = 不启用（默认，零回归）。
+
+    设了就启用视觉证据通道：Agent 可检索 / 调取 / 放大候选窗口内设备相机的原始帧。
+    ⚠️ 裁剪需要 Pillow（可选依赖 `.[vision]`），缺失时视觉工具不暴露；而且要**多模态
+    provider**才真能"看到"图像——纯文本 provider 不要开（本参数只决定证据是否可得，
+    不判断模型能力）。
+    """
+    return _get("DD_VISUAL_EVIDENCE_DIR", default="")
 
 
 def investigate_recover_interval_s() -> float:

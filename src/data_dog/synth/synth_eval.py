@@ -211,22 +211,26 @@ class DeterministicSynthProvider:
                 "hypotheses": [], "missing_evidence": []}
 
 
-def eval_one(sample, label, provider, model=None, cand=None) -> dict:
+def eval_one(sample, label, provider, model=None, cand=None, visual=None,
+             trace_cb=None) -> dict:
     """对单条样本做一次 Agent 调查，返回结果 + 是否命中 ground truth。
 
     这是 `run_synth_eval` / `run_mujoco_eval` / 数据集评估共用的**内循环**——
     抽出来避免口径漂移（改一处、三处一致）。语义与原来的内联循环完全一致。
+
+    `visual`：可选的**无损视觉记忆**（VISTA-1 式，见 evidence/visual.py）。传了就把
+    视觉工具挂给 Agent；不传则纯文本（既有行为逐字节不变）。
     """
     cand = cand or _make_candidate(sample, label)
     # 每个候选用"只含自己这份样本"的数据源，避免多样本同部件覆盖
     source = SyntheticEvidenceSource([sample])
-    tools = InvestigationTools(source)
+    tools = InvestigationTools(source, visual=visual)
     prov = (
         DeterministicSynthProvider()
         if provider is None
         else (provider() if callable(provider) else provider)
     )
-    agent = AgentLoop(prov, tools, model=model)
+    agent = AgentLoop(prov, tools, model=model, trace_cb=trace_cb)
     report = agent.investigate(cand)
     d = report.disposition
     return {
@@ -281,7 +285,8 @@ def main():
         if not cfg["api_key"]:
             print("real 模式需要 data-dog init 先配 key")
             sys.exit(1)
-        provider = Provider.from_config(cfg["vendor_id"], cfg["api_key"])
+        provider = Provider.from_config(cfg["vendor_id"], cfg["api_key"],
+                                         base_url=cfg.get("base_url") or "")
 
     results = run_synth_eval(provider, model=None,
                              n_joints=2, n_seconds=args.n_seconds, seed=args.seed)

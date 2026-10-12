@@ -8,11 +8,14 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Response
 
+from ... import settings
 from ...core import metrics
+from ...core.redact import redact
 from ...storage import repository as repo
 from ...storage.db import session_scope
 from ..deps import require_tenant_and_device
 from ..runtime import _log, _state, _stats_dict
+from ..write_behind import get_writer
 
 router = APIRouter()
 
@@ -54,7 +57,29 @@ def ingest_telemetry(
         "rejected": result.stats.rejected, "candidates": len(result.candidates),
     })
 
-    # 落库（幂等 upsert）：规范化遥测 + 候选
+    candidates_out = [c.to_dict() for c in result.candidates]
+
+    # write-behind（默认关）：落库入队即返回；队列满/线程未起 → 503 失败关闭。
+    # ⚠️ 语义代价（HTTP 200 不再代表已落库）见 docs/write_path_batching.md §10。
+    if settings.write_behind():
+        writer = get_writer()
+        if writer is None:
+            response.status_code = 503
+            return {"ok": False, "error": "write_behind_unavailable",
+                    "detail": "DD_WRITE_BEHIND=1 但后台写入线程未运行",
+                    "stats": _stats_dict(result), "candidates": candidates_out}
+        if not writer.submit(tenant_id=auth["tenant_id"],
+                             normalized=result.normalized,
+                             candidates=result.candidates):
+            response.status_code = 503
+            return {"ok": False, "error": "write_behind_queue_full",
+                    "detail": "写队列已满（落库跟不上）；失败关闭，请重试",
+                    "stats": _stats_dict(result), "candidates": candidates_out}
+        return {"ok": True, "stats": _stats_dict(result),
+                "persisted": {"mode": "write_behind", "queued": True},
+                "candidates": candidates_out}
+
+    # 落库（幂等 upsert）：规范化遥测 + 候选（同步路径——默认行为）
     persisted = {"telemetry": 0, "candidates": 0}
     try:
         with session_scope() as s:
@@ -67,7 +92,7 @@ def ingest_telemetry(
         response.status_code = 207
         return {
             "ok": False, "error": "persist_failed",
-            "detail": f"{type(e).__name__}: {e}",
+            "detail": redact(f"{type(e).__name__}: {e}"),
             "stats": _stats_dict(result),
             "candidates": [c.to_dict() for c in result.candidates],
         }

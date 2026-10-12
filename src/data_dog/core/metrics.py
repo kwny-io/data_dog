@@ -65,6 +65,22 @@ candidates_created_total = Counter(
     registry=registry,
 )
 
+# write-behind（DD_WRITE_BEHIND=1 才用）：result ∈ {enqueued, written, failed, rejected_full}。
+# failed / rejected_full **必须告警**——开了 write-behind 后，这两种情况都意味着
+# "响应已 200 但数据没落库"，是静默丢数据的唯一可见窗口。
+write_behind_total = Counter(
+    "data_dog_write_behind_total",
+    "write-behind 写路径计数（按结果分类）",
+    labelnames=("result",),
+    registry=registry,
+)
+
+write_behind_queue_depth = Gauge(
+    "data_dog_write_behind_queue_depth",
+    "write-behind 队列当前深度（持续 >0 说明落库跟不上）",
+    registry=registry,
+)
+
 # 调查（Agent）执行结果：result ∈ {ok, not_found, timeout, failed}
 investigations_total = Counter(
     "data_dog_investigations_total",

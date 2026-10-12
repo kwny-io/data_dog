@@ -97,6 +97,11 @@ sim = [
 signing = [
     "cryptography>=42.0",
 ]
+# 无损视觉证据（VISTA-1 式）：裁剪/放大需要 Pillow。缺失时视觉工具**不暴露**（零回归），
+# 见 docs/agent_memory_and_vision.md §2。
+vision = [
+    "pillow>=10.0",
+]
 
 [project.scripts]
 data-dog = "data_dog.cli:app"

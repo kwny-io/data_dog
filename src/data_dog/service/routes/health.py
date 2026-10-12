@@ -12,6 +12,7 @@ from fastapi.responses import JSONResponse
 
 from ... import settings
 from ...core import metrics
+from ...core.redact import redact
 from ...storage import migrations
 from ...storage import models as M
 from ...storage import repository as repo
@@ -46,11 +47,12 @@ def readyz() -> JSONResponse:
         checks["migration"] = {"ok": True,
                                "revision": migrations.current_revision()}
     except Exception as e:                        # noqa: BLE001
-        checks["migration"] = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+        # /readyz 是**公开探针**：异常消息先脱敏（可能带 DSN/口令），再回给编排层
+        checks["migration"] = {"ok": False, "error": redact(f"{type(e).__name__}: {e}")}
 
     # 算子绑定（缺厂商文档时降级；只影响接入，不影响服务基本可用）
     if _state.resolver is None:
-        checks["resolver"] = {"ok": False, "error": _state.build_error}
+        checks["resolver"] = {"ok": False, "error": redact(_state.build_error)}
     else:
         checks["resolver"] = {"ok": True}
 

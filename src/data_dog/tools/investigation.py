@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import base64
 from typing import Any
 
 from ..context import RuntimeContext, default_context
@@ -20,9 +21,12 @@ class InvestigationTools:
     校验 / 收紧，越权返回 denied。Agent 无法通过改参数越权。
     """
 
-    def __init__(self, store: EvidenceSource, ctx: RuntimeContext | None = None):
+    def __init__(self, store: EvidenceSource, ctx: RuntimeContext | None = None,
+                 visual: Any | None = None):
         self.store = store
         self.ctx = ctx or default_context()
+        # 无损视觉记忆（VISTA-1 式；可选）。None = 不暴露视觉工具（纯文本链路零回归）。
+        self.visual = visual
 
     def query_candidate_evidence(
         self, device_sn: str, component: str, window_start: str, window_end: str
@@ -85,6 +89,77 @@ class InvestigationTools:
         if isinstance(res, dict) and res.get("ok") is False:
             return res  # 已统一错误（如 denied）
         return ok(res)
+
+    def query_prior_investigations(
+        self, device_sn: str, component: str, signal: str = ""
+    ) -> dict[str, Any]:
+        """查该部件**历史上被调查过的结论**（跨调查记忆）。
+
+        用途是"先验"，不是本次证据：Agent 仍须以当前遥测/知识为准；当前证据与既往
+        相反时判当前。证据源未提供该能力时返回空列表并**显式说明**（不冒充有）。
+        """
+        fn = getattr(self.store, "query_prior_investigations", None)
+        if fn is None:
+            return ok({"device_sn": device_sn, "component": component,
+                       "signal": signal, "prior_investigations": [],
+                       "truncated": False,
+                       "note": "该证据源未提供跨调查记忆"})
+        res = fn(device_sn, component, signal)
+        if isinstance(res, dict) and res.get("ok") is False:
+            return res  # 已统一错误（如 denied）
+        return ok(res)
+
+    def query_visual_evidence(
+        self, device_sn: str, component: str, window_start: str, window_end: str
+    ) -> dict[str, Any]:
+        """列出该部件在时间窗内**无损留存**的相机原始帧（只返回元数据）。
+
+        拿到 frame_id 后用 view_visual_frame 调取原帧；需要看局部细节时带 box 放大。
+        """
+        if self.visual is None:
+            return ok({"frames": [], "note": "未启用视觉证据通道"})
+        frames = self.visual.list_frames(
+            device_sn=device_sn, component_ref=component,
+            window_start=window_start, window_end=window_end, limit=20)
+        return ok({"device_sn": device_sn, "component": component,
+                   "window": f"{window_start}-{window_end}", "frames": frames,
+                   "note": "仅元数据；用 view_visual_frame 调取某帧，可带 box='l,t,r,b' 放大局部。"})
+
+    def view_visual_frame(self, frame_id: str, box: str = "") -> dict[str, Any]:
+        """调取一帧原始图像（base64 内联给多模态模型）；box='l,t,r,b' 时先裁剪放大。
+
+        返回里的 __images__ 会被 AgentLoop 转成一条带图的消息，并从 tool 文本里摘掉
+        （避免 base64 白烧 token）。原帧永不被修改，裁剪产出新帧。
+        """
+        if self.visual is None:
+            return ok({"frame_id": frame_id, "note": "未启用视觉证据通道"})
+        if box:
+            try:
+                nums = [int(x) for x in str(box).replace(" ", "").split(",")]
+            except ValueError:
+                return err(ToolErrorCode.INVALID_INPUT, f"box 需为 'l,t,r,b'：{box}")
+            if len(nums) != 4:
+                return err(ToolErrorCode.INVALID_INPUT, f"box 需 4 个整数：{box}")
+            meta = self.visual.crop(frame_id, nums)
+        else:
+            meta = self.visual.meta(frame_id)
+        if not meta:
+            return err(ToolErrorCode.NOT_FOUND, f"无此帧或无法裁剪：{frame_id}")
+        # A4：帧也要过可信上下文——否则 Agent 能拿别设备/越权部件的帧（存储是全局的）。
+        if meta.get("device_sn") and meta["device_sn"] != self.ctx.device_sn:
+            return err(ToolErrorCode.DENIED, "帧不属于当前设备")
+        comp = meta.get("component_ref", "")
+        if comp and not self.ctx.can_access(self.ctx.device_sn, comp):
+            return err(ToolErrorCode.DENIED, comp)
+        raw = self.visual.get_bytes(meta["frame_id"])
+        if raw is None:
+            return err(ToolErrorCode.NOT_FOUND, f"帧文件缺失：{frame_id}")
+        payload = dict(meta)
+        payload["__images__"] = [{
+            "mime_type": meta.get("mime_type", "image/png"),
+            "data_base64": base64.b64encode(raw).decode("ascii"),
+        }]
+        return ok(payload)
 
     # ---- 工具描述，供模型 / 生成 tool 定义用 ----#
     TOOL_SPECS: dict[str, dict[str, Any]] = {
@@ -162,11 +237,72 @@ class InvestigationTools:
                 "required": ["device_sn", "component", "window_start", "window_end"],
             },
         },
+        "query_prior_investigations": {
+            "name": "query_prior_investigations",
+            "description": (
+                "查询该部件历史上被调查过的结论（跨调查记忆）：既往裁决 / 置信度 / "
+                "摘要 / 证据引用。这是**先验，不是本次证据**——可能过时或工况不同，"
+                "必须与本次遥测/知识交叉验证后再裁决，不得直接复制既往结论。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "device_sn": {"type": "string"},
+                    "component": {"type": "string", "description": "部件标识，如 joint_motor.front_left_hip"},
+                    "signal": {"type": "string", "description": "可选：只看同类信号（如 temperature_high）"},
+                },
+                "required": ["device_sn", "component"],
+            },
+        },
+        "query_visual_evidence": {
+            "name": "query_visual_evidence",
+            "description": (
+                "列出该部件在时间窗内**无损留存**的设备相机原始帧（只返回元数据：frame_id / "
+                "时间 / 尺寸 / 标签）。需要用 view_visual_frame 调取原帧。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "device_sn": {"type": "string"},
+                    "component": {"type": "string", "description": "部件标识，如 joint_motor.front_left_hip"},
+                    "window_start": {"type": "string"},
+                    "window_end": {"type": "string"},
+                },
+                "required": ["device_sn", "component", "window_start", "window_end"],
+            },
+        },
+        "view_visual_frame": {
+            "name": "view_visual_frame",
+            "description": (
+                "调取一帧原始图像直接给模型看（不做文字描述/压缩）；box='l,t,r,b'（像素）时"
+                "先裁剪放大局部。原则：需要细节就调原帧再放大。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "frame_id": {"type": "string", "description": "query_visual_evidence 返回的 frame_id"},
+                    "box": {"type": "string", "description": "可选：'left,top,right,bottom' 像素框，用于放大局部"},
+                },
+                "required": ["frame_id"],
+            },
+        },
     }
 
     def specs(self) -> list:
-        """返回给模型的工具定义列表（供 Provider.chat 用）。"""
-        return list(self.TOOL_SPECS.values())
+        """返回给模型的工具定义列表（供 Provider.chat 用）。
+
+        query_prior_investigations **只在证据源确实提供跨调查记忆时**才暴露：
+        没有既往记录的设备不该多给模型一个只会返回空的工具（白耗一步，还可能
+        诱导模型编造"以前查过"）。
+        """
+        specs = [dict(s) for s in self.TOOL_SPECS.values()]
+        if not getattr(self.store, "supports_prior_memory", False):
+            specs = [s for s in specs if s["name"] != "query_prior_investigations"]
+        # 视觉工具只在**确实挂了无损视觉记忆且 Pillow 可用**时暴露；否则纯文本链路不变。
+        if self.visual is None or not getattr(self.visual, "available", False):
+            specs = [s for s in specs
+                     if s["name"] not in ("query_visual_evidence", "view_visual_frame")]
+        return specs
 
     def call(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
         """按名字+参数调用某个 Tool（AgentLoop 用）。
@@ -204,8 +340,8 @@ class InvestigationTools:
                 else self.ctx.allowed_components
             ),
         )
-        return InvestigationTools(self.store, new_ctx)
+        return InvestigationTools(self.store, new_ctx, visual=self.visual)
 
     def with_context(self, ctx: RuntimeContext) -> InvestigationTools:
         """绑定一个完整的外部可信上下文（如来自 context-injector MCP）。"""
-        return InvestigationTools(self.store, ctx)
+        return InvestigationTools(self.store, ctx, visual=self.visual)

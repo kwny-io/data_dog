@@ -7,6 +7,7 @@ from typing import Any
 from fastapi import Header, HTTPException
 
 from .. import settings
+from ..core.redact import redact
 from ..errors import ToolErrorCode
 
 
@@ -42,7 +43,13 @@ def _extract_api_key(request) -> str:
     return request.headers.get("X-API-Key", "") or ""
 def _error_body(code: ToolErrorCode, detail: Any = "", *, reason: str = ""
                 ) -> dict[str, Any]:
-    """服务边界统一错误体：{ok, error, detail}。错误码保持有限闭集。"""
+    """服务边界统一错误体：{ok, error, detail}。错误码保持有限闭集。
+
+    兜底脱敏：`detail` 可能来自 provider SDK 异常（带密钥 / 大块 base64）。即便源头
+    已脱敏，这里再过一遍——**错误体是直接发给调用方的**，不能靠"上游记得脱敏"。
+    """
+    if isinstance(detail, str) and detail:
+        detail = redact(detail)
     body: dict[str, Any] = {"ok": False, "error": code.value, "detail": detail}
     if reason:
         body["reason"] = reason

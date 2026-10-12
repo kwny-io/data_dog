@@ -38,4 +38,5 @@ prometheus-client>=0.20.0
 # signing: cryptography>=42.0
 # sim: mujoco>=3.1
 # ui: streamlit>=1.30.0
+# vision: pillow>=10.0
 # wasm: wasmtime>=20.0

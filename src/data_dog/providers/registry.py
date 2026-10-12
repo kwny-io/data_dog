@@ -51,9 +51,47 @@ def vendor_ids() -> list[str]:
     return [v.id for v in BUILTIN_VENDORS]
 
 
+CUSTOM_VENDOR_ID = "custom"
+
+
+def _custom_vendor() -> VendorSpec:
+    """自定义 OpenAI 兼容端点（`DD_LLM_VENDOR=custom`）。
+
+    产品落地时使用者自带模型/端点：只要兼容 OpenAI 协议，配三个变量即可接入——
+    `DD_LLM_BASE_URL` / `DD_LLM_API_KEY` / `DD_LLM_MODEL`。刻意**不进**
+    `BUILTIN_VENDORS`（那是"内置推荐"列表）、也不进 `vendor_ids()`：选择它走配置，
+    不走交互式编号。
+
+    为什么还要读 `.env`：`.env` 只会被 dotenv 读成字典，**不会**导出到 `os.environ`，
+    所以 `settings` 可能看不到。这里 settings 优先、`.env` 兜底，两条路都能用。
+    """
+    from .. import settings
+    base = settings.llm_base_url()
+    model = settings.llm_model()
+    if not base or not model:
+        try:
+            from .config import load_env
+            env, _ = load_env()
+            base = base or env.get("DD_LLM_BASE_URL", "") or env.get("DATA_DOG_BASE_URL", "")
+            model = model or env.get("DD_LLM_MODEL", "") or env.get("DATA_DOG_MODEL", "")
+        except Exception:                      # noqa: BLE001 - 兜底失败就留空，由构造处报错
+            pass
+    return VendorSpec(
+        id=CUSTOM_VENDOR_ID,
+        label="自定义 OpenAI 兼容端点",
+        base_url=base,
+        default_model=model,
+        requires_env_key="DD_LLM_API_KEY",
+        doc="任何 OpenAI 兼容服务（自建 / 聚合网关 / 本地 vLLM）："
+            "配 DD_LLM_BASE_URL + DD_LLM_API_KEY + DD_LLM_MODEL。",
+    )
+
+
 def get_vendor(vendor_id: str) -> VendorSpec:
+    if vendor_id == CUSTOM_VENDOR_ID:
+        return _custom_vendor()
     try:
         return BY_ID[vendor_id]
     except KeyError:
-        known = ", ".join(vendor_ids())
+        known = ", ".join([*vendor_ids(), CUSTOM_VENDOR_ID])
         raise ValueError(f"未知供应商: {vendor_id!r}，可用: {known}") from None

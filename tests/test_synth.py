@@ -218,7 +218,7 @@ def test_synth_eval_main_real_mode_offline(monkeypatch, capsys):
     monkeypatch.setattr(config_mod, "load_config",
                         lambda: {"api_key": "fake-key", "vendor_id": "offline"})
     monkeypatch.setattr(client_mod.Provider, "from_config",
-                        staticmethod(lambda vendor_id, api_key: DeterministicSynthProvider()))
+                        staticmethod(lambda vendor_id, api_key, **kw: DeterministicSynthProvider()))
     monkeypatch.setattr(sys, "argv", ["synth_eval", "--mode", "real", "--json",
                                       "--n_seconds", "2"])
     assert main() == 0

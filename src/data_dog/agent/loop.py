@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from ..core.redact import redact
 from ..providers.client import (
     ChatProvider,
     LLMCallError,
@@ -64,6 +65,29 @@ SYSTEM_PROMPT = """你是 data_dog 设备健康调查 Agent，负责复核机器
   "recommended_actions": ["建议动作列表"]
 }
 只能输出这个 JSON，不要输出别的。"""
+
+
+# 跨调查记忆（VISTA-1「无损记忆 + 主动检索」在工业诊断域的同构移植）。
+# 只在证据源确实带既往报告时追加，避免提到一个并不存在的工具。
+PRIOR_MEMORY_PROMPT = """
+
+本部件有**历史调查记录**，可用 query_prior_investigations 调取（无损保留当时的裁决与
+证据引用）。用法与边界：
+- 它是**先验**，不是本次证据：**先查当前遥测/知识，再审既往**；不得因为"以前判过
+  rejected"就跳过证据查询、直接下结论。
+- 若当前证据与既往结论**相反**，以**当前**为准，并在 summary 里说明差异（与既往 X 不同）。
+- 若本次关键证据拿不到，既往结论可降低不确定性，但**不能替代**缺失证据——该判
+  inconclusive / needs_human_review 时照判。"""
+
+
+# 视觉证据通道（VISTA-1 式）。只在挂了无损视觉记忆、且 provider 支持多模态时才有意义——
+# 但"是否支持多模态"由调用方/部署决定，这里只按"工具是否可用"追加说明。
+VISUAL_HARNESS_PROMPT = """
+
+你还有**视觉证据通道**：候选窗口内设备相机的**原始帧**被无损留存（不重编码、不写成
+文字描述）。用 query_visual_evidence 列出帧、view_visual_frame 调取某帧；要看局部细节就
+带 box='l,t,r,b' 放大。原则（对齐 VISTA）：**需要细节时去调原帧再放大**，不要只凭文字
+摘要或降采样印象下结论；但视觉证据也只是证据之一，仍须与遥测/知识交叉验证。"""
 
 
 class AgentLoop:
@@ -127,8 +151,15 @@ class AgentLoop:
         tool_specs = tools.specs()
         tool_params = [LLMToolParam(**s) for s in tool_specs]
 
+        # 跨调查记忆说明只在工具可用时追加（否则系统提示会提到不存在的工具）。
+        system_prompt = SYSTEM_PROMPT
+        if any(s["name"] == "query_prior_investigations" for s in tool_specs):
+            system_prompt += PRIOR_MEMORY_PROMPT
+        if any(s["name"] == "view_visual_frame" for s in tool_specs):
+            system_prompt += VISUAL_HARNESS_PROMPT
+
         messages: list[LLMChatMessage] = [
-            LLMChatMessage(role="system", content=SYSTEM_PROMPT),
+            LLMChatMessage(role="system", content=system_prompt),
             LLMChatMessage(
                 role="user",
                 content=(
@@ -177,8 +208,10 @@ class AgentLoop:
                 except json.JSONDecodeError:
                     args = {}
                 result = tools.call(name, args)
-                collected.append((tc["id"], result))
-                # ReAct 轨迹：把这一步"想调的"记下来
+                # 视觉证据走独立的"图像消息"，不把 base64 塞进 tool 文本（会白烧 token）
+                images = result.pop("__images__", None) if isinstance(result, dict) else None
+                collected.append((tc["id"], result, images))
+                # ReAct 轨迹：把这一步"想调的"记下来（此时 result 已摘掉 base64）
                 self._trace({
                     "type": "tool_call",
                     "step": steps,
@@ -196,7 +229,7 @@ class AgentLoop:
                     tool_calls=resp.get("__raw_tool_calls", []),
                 )
             )
-            for tc_id, result in collected:
+            for tc_id, result, images in collected:
                 messages.append(
                     LLMChatMessage(
                         role="tool",
@@ -204,6 +237,15 @@ class AgentLoop:
                         content=json.dumps(result, ensure_ascii=False),
                     )
                 )
+                if images:
+                    # VISTA-1 式：原始帧作为**独立观察**喂进上下文，供多模态模型直接看。
+                    messages.append(
+                        LLMChatMessage(
+                            role="user",
+                            content="（上一步检索到的视觉证据：设备相机原始帧）",
+                            images=images,
+                        )
+                    )
 
         # 达到最大步数仍未给出结论
         report = InvestigationReport(
@@ -220,6 +262,9 @@ class AgentLoop:
         self, candidate: CandidateEvent, reason: str
     ) -> InvestigationReport:
         """失败关闭：拿不到可信上下文 / 身份不一致时，拒绝调查而不是降级。"""
+        # 报告会被**持久化并经查询端点返回**，故这里再兜一层脱敏：reason 可能带
+        # provider 异常详情（见 core/redact.py）。错误信息可以少，密钥不能漏。
+        reason = redact(reason)
         return InvestigationReport(
             investigation_id=f"inv_{candidate.candidate_id}",
             disposition="needs_human_review",

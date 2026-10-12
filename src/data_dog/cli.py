@@ -58,16 +58,18 @@ def init(
     # 2) 填 key（默认读环境变量已有的，避免重复）
     import os
     existing = os.environ.get(spec.requires_env_key, "")
+    # ⚠️ 两条都不能少：hide_input 防"输入被回显"；default="" + show_default=False 防
+    # "把已有密钥当默认值打印在提示里"（那等于把 key 抄进终端 scrollback / 录屏）。
     key = typer.prompt(
         f"粘贴你的 {spec.label} API Key"
-        + ("（检测到环境变量已有，直接回车沿用）" if existing else ""),
-        default=existing,
+        + ("（检测到环境变量已有，直接回车沿用它）" if existing else ""),
+        hide_input=True, default="", show_default=False,
     )
-    if not key or key == existing:
-        # 若环境变量没有，则必须要求输入
+    if not key:
+        # 回车：优先沿用环境变量，其次 .env（都不打印出来）
         from .providers.config import load_env
         env, _ = load_env()
-        key = env.get(spec.requires_env_key, key)
+        key = existing or env.get(spec.requires_env_key, "")
     if not key:
         typer.echo("未提供 API Key，无法完成接入。", err=True)
         raise typer.Exit(1)

@@ -55,6 +55,7 @@ from .runtime import (
     _stop_job_runner,
     _stream_handle,
 )
+from .write_behind import start_writer_if_enabled, stop_writer
 
 
 async def _lifespan(app: FastAPI):
@@ -100,7 +101,15 @@ async def _lifespan(app: FastAPI):
         # 升级 sweeper 是可选增强：起不来不影响 HTTP 服务（只是无人自动升级告警）
         _log.error("告警升级 sweeper 启动失败",
                    extra={"error": f"{type(e).__name__}: {e}"})
+    try:
+        start_writer_if_enabled()
+    except Exception as e:                           # noqa: BLE001
+        # write-behind 是可选增强：起不来必须让该路径**失败关闭**（路由 503），
+        # 不能悄悄退回同步——否则 DD_WRITE_BEHIND=1 的语义承诺就落空了。
+        _log.error("write-behind 后台写入线程启动失败",
+                   extra={"error": f"{type(e).__name__}: {e}"})
     yield
+    stop_writer()
     _stop_escalation()
     _stop_job_runner()
     _stop_checkpoint()

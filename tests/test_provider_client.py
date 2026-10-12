@@ -204,7 +204,7 @@ def test_load_env_missing_file_is_empty(proj):
 def test_load_config_defaults_without_env_file(proj):
     cfg = load_config(proj)
     assert cfg == {"root": str(proj.resolve()), "vendor_id": "deepseek",
-                   "model": "", "api_key": ""}
+                   "model": "", "api_key": "", "base_url": ""}
     print("PASS test_load_config_defaults_without_env_file")
 
 

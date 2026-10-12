@@ -131,8 +131,17 @@ def _upsert_stmt(model: Any, dialect: str) -> Any:
     而语句结构只随表变化、跟数据无关，每行重建纯属浪费 CPU（HTTP+落库层实测
     **7.76 ms/请求**，是数据面 0.039 ms 的 **200 倍**，单核上限因此只有 ~129 req/s）。
 
-    值改由 `session.execute(stmt, params)` 传入：既省掉对象构造，又能让编译缓存命中
-    **同一条**语句（结构固定）。
+    值改由 `session.execute(stmt, params)` 传入：**省掉的是 Python 侧的语句对象构造**。
+
+    ⚠️ 更正（2026-10-12）：此前这里和服务文档 §9.3 都声称"能让编译缓存命中同一条"，
+    **那是错的**。SQLAlchemy 的方言 `Insert`（`dialects/{postgresql,sqlite}/dml.py`）
+    显式设了 `inherit_cache = False`，其 `OnConflictDoUpdate` 子句的 `inherit_cache`
+    也未设置 —— 于是 `_generate_cache_key()` 返回 `None`，**每次执行都重新编译**。
+    实测：50 次执行 → `visit_on_conflict_do_update` **50 次**、`bindparam_string`
+    **750 次**，`engine._compiled_cache` 始终为空。没有干净的修法（实例级
+    `inherit_cache` 无效；子类化控制不到内部构造的 `OnConflictDoUpdate`；改 `text()`
+    会丢掉 `created_at` 等列默认值、NOT NULL 直接失败；预编译对象不能经 `Session.execute`
+    执行）——故**保持现状**，只把结论改正。
 
     更新列**从表结构推导**（非主键、非 `created_at`），而不是从本次的 values 推导——
     这样"哪些列该被 upsert 覆盖"只写一遍，不会与 `_*_values()` 的字段清单漂移。

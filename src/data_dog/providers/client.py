@@ -13,9 +13,10 @@
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Protocol
 
+from ..core.redact import redact
 from ..errors import ToolErrorCode
 from .registry import VendorSpec, get_vendor
 
@@ -64,6 +65,10 @@ class LLMChatMessage:
     name: str | None = None   # tool 调用名（用于把工具结果喂回模型）
     tool_call_id: str | None = None
     tool_calls: list | None = None  # 仅 assistant 回显用：模型先前发出的原始 tool_calls
+    # 视觉证据（VISTA-1 式无损视觉通道）：每项 {"mime_type": "image/png",
+    # "data_base64": "..."}。**只对多模态 provider 有效**；纯文本 provider 绝不能带它
+    # （OpenAI 兼容接口会因未知 content 形态报错）。默认 None = 纯文本（零变化）。
+    images: list[dict[str, str]] | None = None
 
 
 @dataclass
@@ -122,8 +127,19 @@ class Provider:
 
     @classmethod
     def from_config(cls, vendor_id: str, api_key: str,
-                    timeout: float | None = None) -> Provider:
-        return cls(get_vendor(vendor_id), api_key, timeout=timeout)
+                    timeout: float | None = None, base_url: str = "") -> Provider:
+        """按供应商 id 构造。@@base_url@@ 非空时**覆盖**内置端点的 base_url。
+
+        用于"自带模型/网关"（@@DD_LLM_VENDOR=custom@@）：端点来自配置而非代码，
+        @@.env@@ 里能读到就显式传，读到不就读 @@settings@@（见 registry._custom_vendor）。
+        """
+        spec = get_vendor(vendor_id)
+        if base_url:
+            spec = replace(spec, base_url=base_url)
+        if not spec.base_url:
+            raise ValueError(
+                f"供应商 {vendor_id!r} 缺 base_url：自定义端点请设 DD_LLM_BASE_URL")
+        return cls(spec, api_key, timeout=timeout)
 
     def chat(
         self,
@@ -163,8 +179,12 @@ class Provider:
             if _is_timeout(e):
                 raise LLMCallError(ToolErrorCode.TIMEOUT,
                                    f"LLM 调用超时（{self.timeout}s）") from e
-            raise LLMCallError(ToolErrorCode.UNAVAILABLE,
-                               f"{type(e).__name__}: {e}") from e
+            # ⚠️ 脱敏**在源头做**：SDK 异常消息可能带 Authorization / api_key / 大块
+            # base64（多模态请求体）。这段 detail 会流到 HTTP 错误体与调查报告，故
+            # 先按真实密钥值 + 常见密钥形态抹掉，再截断（见 core/redact.py）。
+            raise LLMCallError(
+                ToolErrorCode.UNAVAILABLE,
+                redact(f"{type(e).__name__}: {e}", secrets=[self._api_key])) from e
         duration_ms = (time.perf_counter() - t0) * 1000.0
         choice = resp.choices[0]
         msg = choice.message
@@ -239,7 +259,19 @@ class Provider:
 def _to_api(m: LLMChatMessage) -> dict:
     if m.role == "tool":
         return {"role": "tool", "tool_call_id": m.tool_call_id, "content": m.content}
-    d: dict = {"role": m.role, "content": m.content}
+    content: object = m.content
+    if m.images:
+        # OpenAI 兼容的"内容分片"：文本 + 内联图片（data URL）。
+        # VISTA-1 的口径：**原始帧直接送模型**，不做有损描述/压缩表征。
+        parts: list[dict] = [{"type": "text", "text": m.content or ""}]
+        for img in m.images:
+            mime = img.get("mime_type") or "image/png"
+            parts.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:{mime};base64,{img.get('data_base64', '')}"},
+            })
+        content = parts
+    d: dict = {"role": m.role, "content": content}
     if m.tool_calls is not None:
         # 回显模型先前发出的 tool_calls，协议要求保留
         d["tool_calls"] = m.tool_calls
