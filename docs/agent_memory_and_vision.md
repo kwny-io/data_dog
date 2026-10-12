@@ -32,6 +32,10 @@
 - **MVP 边界**：`reports` 行不含 device / component，故现在按 `(device, component)` 取候选
   建立映射，再在租户**最近 200 条报告**里内存过滤；规模化应给 `reports` 加
   `(device_sn, component_ref)` 列 + 索引，直接 SQL 过滤。
+- **记忆不绑模型 / key（产品口径）**：报告落在项目自己的 DB（`reports` 表），检索走
+  `_prior_report_items`，**完全不经过 provider**——换模型 / 换 key / 换厂商都不丢记忆，
+  新接入方**直接继承**同一部署里已积累的裁决；视觉帧同理（内容寻址目录）。
+  **按租户隔离**：换 key 不会读到别的租户的记忆（`tests/test_prior_memory_persistence.py`）。
 
 ## 2. 无损视觉记忆（`query_visual_evidence` / `view_visual_frame`）
 
