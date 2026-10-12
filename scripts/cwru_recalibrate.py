@@ -55,9 +55,18 @@ def _bal_acc(rows: list[dict], feat: str, thr: float) -> tuple[float, float, flo
     return (tpr + tnr) / 2.0, tpr, (fp / (fp + tn) if (fp + tn) else 0.0)
 
 
-def fit_rule(calib: list[dict]) -> tuple[str, float, list[tuple[float, str, float]]]:
-    """在标定集上为每个特征扫阈值（分位数），返回最优 (feature, thr, 全部打分)。"""
-    feats = [k for k in calib[0] if not k.startswith("__")]
+# 尺度不变特征：不随录音增益 / 量级漂移——跨工况迁移应优先用它们。
+INVARIANT = {"kurtosis", "crest_factor", "env_bpfo", "env_bpfi", "env_bsf", "env_peak_hz"}
+
+
+def fit_rule(calib: list[dict], allow: set[str] | None = None
+             ) -> tuple[str, float, list[tuple[float, str, float]]]:
+    """在标定集上为每个特征扫阈值（分位数），返回最优 (feature, thr, 全部打分)。
+
+    allow 非空时只在给定特征集合里搜（用于"只用尺度不变特征"的对照）。
+    """
+    feats = [k for k in calib[0]
+             if not k.startswith("__") and (allow is None or k in allow)]
     scored: list[tuple[float, str, float]] = []
     for f in feats:
         vals = sorted(r[f] for r in calib)
@@ -88,12 +97,18 @@ if __name__ == "__main__":
     ap.add_argument("--calib-load", type=int, default=0)
     ap.add_argument("--test-load", type=int, default=1)
     ap.add_argument("--lolo", action="store_true", help="留一载荷交叉验证（每个载荷轮流当测试集）")
+    ap.add_argument("--invariant", action="store_true",
+                    help="只用**尺度不变**特征（kurtosis/crest/env_*），排除 rms/peak 这类带量纲量")
     ap.add_argument("--windows-per-file", type=int, default=4)
+    ap.add_argument("--window-len", type=int, default=24000)
+    ap.add_argument("--stride", type=int, default=12000,
+                    help="步长；=window-len 即**不重叠**窗口（减少窗口间相关性）")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args()
     ensure_utf8_console()
 
-    wins = load_windows(Path(args.data_dir), args.windows_per_file, 24000, 12000)
+    wins = load_windows(Path(args.data_dir), args.windows_per_file,
+                        args.window_len, args.stride)
     rows_all = [featurize(lb, ld, x) for lb, ld, x in wins]
     loads = sorted({r["__load__"] for r in rows_all})
     if len(loads) < 2:
@@ -113,7 +128,7 @@ if __name__ == "__main__":
             test = [r for r in rows_all if r["__load__"] == args.test_load]
         if not calib or not test:
             continue
-        best_f, best_t, scored = fit_rule(calib)
+        best_f, best_t, scored = fit_rule(calib, INVARIANT if args.invariant else None)
         b = summarize(baseline_rows(test))
         n = summarize(eval_rule(test, best_f, best_t))
         agg_base += baseline_rows(test)
@@ -123,10 +138,11 @@ if __name__ == "__main__":
                       "baseline": b, "recalibrated": n,
                       "top3": [{"feature": f, "threshold": round(t, 5), "calib_bal_acc": round(ba, 3)}
                                for ba, f, t in scored[:3]]})
-        print(f"fold test=op_{test_load} (calib {len(calib)}/{len(test)} 窗口)  "
-              f"规则 {best_f}>{best_t:.4g}  "
-              f"旧阈值 acc={b['accuracy']}/召回={b['fault_recall']}  "
-              f"重标定 acc={n['accuracy']}/召回={n['fault_recall']}")
+        n_norm = sum(1 for r in test if r["__label__"] == "normal")
+        print(f"fold test=op_{test_load} (calib {len(calib)} / test {len(test)} 窗口, "
+              f"normal {n_norm})  规则 {best_f}>{best_t:.4g}  "
+              f"旧 acc={b['accuracy']}/召回={b['fault_recall']}/FP={b['normal_fp_rate']}  "
+              f"新 acc={n['accuracy']}/召回={n['fault_recall']}/FP={n['normal_fp_rate']}")
 
     out = {"loads": loads, "windows_per_file": args.windows_per_file, "folds": folds}
     if args.lolo:
