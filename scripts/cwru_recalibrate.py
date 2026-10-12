@@ -27,7 +27,7 @@ _ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_ROOT / "src"))
 sys.path.insert(0, str(_ROOT / "scripts"))
 
-from cwru_eval import hit, load_windows, summarize  # noqa: E402
+from cwru_eval import NORMAL_FS, hit, load_windows, summarize  # noqa: E402
 
 from data_dog.core.console import ensure_utf8_console  # noqa: E402
 from data_dog.evidence.cwru import (  # noqa: E402
@@ -37,9 +37,14 @@ from data_dog.evidence.cwru import (  # noqa: E402
 )
 
 
-def featurize(label: str, load: int, x: np.ndarray) -> dict:
+def featurize(label: str, load: int, x: np.ndarray, fs: float = 12000.0) -> dict:
+    """fs 必须与**该文件的真实采样率**一致，否则包络谱的缺陷频率带会整体偏移。
+
+    正常基线是 48 kHz（证据见 cwru_eval 文件头），旧版把它当 12 kHz →
+    normal 的 env_* 落在错误频带上，跨工况比较因此失真。
+    """
     fr = LOAD_RPM.get(load, 1797.0) / 60.0
-    f = {**features(x), **envelope_features(x, fs=12000.0, fr=fr)}
+    f = {**features(x), **envelope_features(x, fs=fs, fr=fr)}
     f["__label__"], f["__load__"] = label, load
     return f
 
@@ -103,13 +108,15 @@ if __name__ == "__main__":
     ap.add_argument("--window-len", type=int, default=24000)
     ap.add_argument("--stride", type=int, default=12000,
                     help="步长；=window-len 即**不重叠**窗口（减少窗口间相关性）")
+    ap.add_argument("--normal-fs", type=float, default=NORMAL_FS,
+                    help="正常基线采样率（默认 48000，见 cwru_eval 文件头证据；设 12000 做敏感性对照）")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args()
     ensure_utf8_console()
 
     wins = load_windows(Path(args.data_dir), args.windows_per_file,
-                        args.window_len, args.stride)
-    rows_all = [featurize(lb, ld, x) for lb, ld, x in wins]
+                        args.window_len, args.stride, args.normal_fs)
+    rows_all = [featurize(lb, ld, x, fs) for lb, ld, x, fs in wins]
     loads = sorted({r["__load__"] for r in rows_all})
     if len(loads) < 2:
         print(f"至少需要 2 个载荷，当前 {loads}", file=sys.stderr)
@@ -144,7 +151,8 @@ if __name__ == "__main__":
               f"旧 acc={b['accuracy']}/召回={b['fault_recall']}/FP={b['normal_fp_rate']}  "
               f"新 acc={n['accuracy']}/召回={n['fault_recall']}/FP={n['normal_fp_rate']}")
 
-    out = {"loads": loads, "windows_per_file": args.windows_per_file, "folds": folds}
+    out = {"loads": loads, "windows_per_file": args.windows_per_file,
+           "normal_fs": args.normal_fs, "folds": folds}
     if args.lolo:
         out["aggregate"] = {"baseline": summarize(agg_base), "recalibrated": summarize(agg_new),
                             "base_n": len(agg_base)}
