@@ -29,6 +29,7 @@ University，公开、带明确故障标签、第三方镜像可下载）接成 
 """
 from __future__ import annotations
 
+import math
 import struct
 from pathlib import Path
 
@@ -112,14 +113,87 @@ def features(x: np.ndarray) -> dict[str, float]:
             "kurtosis": round(kurt, 3), "crest_factor": round(crest, 3)}
 
 
+# CWRU 驱动端轴承 6205-2RS JEM SKF 的几何（英寸）→ 缺陷频率系数（与转速无关）。
+_BEARING = {"n": 9, "d": 0.3126, "D": 1.537, "theta_deg": 0.0}
+# 各载荷下标称电机转速（CWRU 官方标称）。⚠️ 本镜像仓库的 RPM 变量是**空的**，故用标称值——
+# 这是一个**假设**，不是从数据里读出来的。
+LOAD_RPM = {0: 1797.0, 1: 1772.0, 2: 1750.0, 3: 1730.0}
+
+
+def defect_frequencies(fr: float) -> dict[str, float]:
+    """按轴承几何把转频 fr（Hz）换算成 BPFO / BPFI / BSF / FTF（Hz）。
+
+    BSF 用**滚珠缺陷频率**（= 2× 自旋频率），与文献里的 CWRU 系数一致
+    （BPFO≈3.5848×fr、BPFI≈5.4152×fr、BSF≈4.7135×fr、FTF≈0.3983×fr）。
+    """
+    n, d, D = _BEARING["n"], _BEARING["d"], _BEARING["D"]
+    ratio = (d / D) * math.cos(math.radians(_BEARING["theta_deg"]))
+    return {"ftf": 0.5 * fr * (1 - ratio),
+            "bpfo": 0.5 * n * fr * (1 - ratio),
+            "bpfi": 0.5 * n * fr * (1 + ratio),
+            "bsf": (D / d) * fr * (1 - ratio * ratio)}
+
+
+def _hilbert_envelope(x: np.ndarray) -> np.ndarray:
+    """解析信号包络（用 numpy FFT 实现 Hilbert，避免引入 scipy）。"""
+    n = len(x)
+    X = np.fft.fft(x)
+    h = np.zeros(n)
+    h[0] = 1.0
+    if n % 2 == 0:
+        h[n // 2] = 1.0
+        h[1:n // 2] = 2.0
+    else:
+        h[1:(n + 1) // 2] = 2.0
+    return np.abs(np.fft.ifft(X * h))
+
+
+def envelope_features(x: np.ndarray, *, fs: float = 12000.0, fr: float | None = None,
+                      harmonics: int = 3, band: float = 0.03) -> dict[str, float]:
+    """**包络谱**特征：缺陷频率处的能量占比（经典轴承诊断，远比峭度灵敏）。
+
+    fr 缺省取 1797 rpm（0 HP 标称）。比值 = 缺陷频率及其 2~`harmonics` 次谐波 ±`band`
+    带内能量 / 10 Hz~2 kHz 总能量；因为是**比值**，不受量纲/增益影响。
+    """
+    x = np.asarray(x, dtype=float)
+    x = x[np.isfinite(x)]
+    if x.size < 256:
+        return {}
+    env = _hilbert_envelope(x - x.mean())
+    spec = np.abs(np.fft.rfft(env - env.mean())) ** 2
+    freqs = np.fft.rfftfreq(env.size, d=1.0 / fs)
+    lo, hi = 10.0, min(2000.0, fs / 2.0)
+    inband = (freqs >= lo) & (freqs <= hi)
+    total = float(spec[inband].sum()) or 1.0
+    fr = fr if fr and fr > 0 else 1797.0 / 60.0
+    out: dict[str, float] = {}
+    for name, f0 in defect_frequencies(fr).items():
+        if f0 <= lo or f0 >= hi:
+            continue
+        energy = 0.0
+        for k in range(1, harmonics + 1):
+            fk = f0 * k
+            if fk >= hi:
+                break
+            energy += float(spec[(freqs >= fk * (1 - band)) & (freqs <= fk * (1 + band))].sum())
+        out[f"env_{name}"] = round(energy / total, 4)
+    if inband.any():
+        idx = int(np.argmax(spec[inband]))
+        out["env_peak_hz"] = round(float(freqs[inband][idx]), 1)
+    return out
+
+
 class CWRUEvidenceSource:
     """把**一条** CWRU 信号（一个窗口）接成证据源。"""
 
     def __init__(self, x: np.ndarray, *, device_sn: str = "device-cwru",
-                 component: str = BEARING_COMPONENT):
+                 component: str = BEARING_COMPONENT, rpm: float = 1797.0,
+                 fs: float = 12000.0):
         self.device_sn = device_sn
         self.component = component
         self._x = np.asarray(x, dtype=float)
+        self._rpm = float(rpm)      # 缺陷频率换算用（镜像里 RPM 为空，故按载荷标称传入）
+        self._fs = float(fs)
 
     def _denied(self, device_sn: str, component: str):
         if component != self.component:
@@ -134,7 +208,9 @@ class CWRUEvidenceSource:
             return bad
         x = self._x
         ref_hi = max(8, int(len(x) * _REF_END_FRAC))
-        main, ref = features(x), features(x[:ref_hi])
+        fr = self._rpm / 60.0
+        main = {**features(x), **envelope_features(x, fs=self._fs, fr=fr)}
+        ref = {**features(x[:ref_hi]), **envelope_features(x[:ref_hi], fs=self._fs, fr=fr)}
         if not main:
             return None
         return {"device_sn": self.device_sn, "component": component,
@@ -149,7 +225,15 @@ class CWRUEvidenceSource:
                  "source": "CWRU 公开数据集（case.edu）",
                  "thresholds": {"kurtosis_alert": 4.0, "crest_factor_alert": 5.0,
                                 "rms_alert": 0.6},
-                 "note": "滚动轴承早期缺陷常先表现为**峭度 / 波峰因子抬升**，RMS 后知后觉。"}]
+                 "envelope_thresholds": {"env_bpfo_alert": 0.08, "env_bpfi_alert": 0.08,
+                                         "env_bsf_alert": 0.08},
+                 "defect_frequency_note": (
+                     "包络谱在**缺陷频率**处的能量占比比峭度灵敏得多：env_bpfo 抬升 → 外圈、"
+                     "env_bpfi → 内圈、env_bsf → 滚珠。占比是相对量，不受增益影响。"),
+                 "defect_frequencies_hz": {"BPFO": 3.5848, "BPFI": 5.4152,
+                                           "BSF": 4.7135, "FTF": 0.3983},
+                 "note": "轴承早期缺陷常先表现为峭度/波峰因子抬升、RMS 后知后觉；"
+                         "但**峭度对早期微弱缺陷不敏感**，包络谱缺陷频率才是主判据。"}]
 
     def query_neighbor_events(self, device_sn, component, window_start, window_end):
         return []

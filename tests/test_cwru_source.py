@@ -5,7 +5,14 @@ import struct
 
 import numpy as np
 
-from data_dog.evidence.cwru import BEARING_COMPONENT, CWRUEvidenceSource, features, read_mat_vector
+from data_dog.evidence.cwru import (
+    BEARING_COMPONENT,
+    CWRUEvidenceSource,
+    defect_frequencies,
+    envelope_features,
+    features,
+    read_mat_vector,
+)
 
 
 def _tag(t: int, data: bytes) -> bytes:
@@ -57,3 +64,29 @@ def test_source_returns_metrics_and_denies_others():
     bad2 = src.query_telemetry("other-device", BEARING_COMPONENT, "w0", "w0")
     assert bad2["ok"] is False
     print("PASS test_source_returns_metrics_and_denies_others")
+def test_defect_frequency_multipliers_match_literature():
+    f = defect_frequencies(30.0)
+    assert abs(f["bpfo"] / 30.0 - 3.5848) < 0.01
+    assert abs(f["bpfi"] / 30.0 - 5.4152) < 0.01
+    assert abs(f["bsf"] / 30.0 - 4.7135) < 0.02
+    assert abs(f["ftf"] / 30.0 - 0.3983) < 0.01
+    print("PASS test_defect_frequency_multipliers_match_literature")
+
+
+def test_envelope_finds_defect_frequency():
+    """在 BPFO 间隔上打冲击 → 包络谱在 env_bpfo 上显著高于干净噪声、也高于 env_bpfi。"""
+    fs, fr = 12000.0, 1772.0 / 60.0
+    bpfo = defect_frequencies(fr)["bpfo"]
+    n = 24000
+    rng = np.random.default_rng(0)
+    clean = rng.normal(0.0, 0.05, n)
+    sig = clean.copy()
+    step = fs / bpfo
+    for k in range(int(n / step)):
+        i = int(k * step)
+        sig[i:i + 3] += 5.0
+    ev_sig = envelope_features(sig, fs=fs, fr=fr)
+    ev_clean = envelope_features(clean, fs=fs, fr=fr)
+    assert ev_sig["env_bpfo"] > ev_clean["env_bpfo"] * 3, (ev_sig, ev_clean)
+    assert ev_sig["env_bpfo"] > ev_sig["env_bpfi"], ev_sig
+    print("PASS test_envelope_finds_defect_frequency")
