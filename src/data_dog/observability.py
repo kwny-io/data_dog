@@ -33,6 +33,16 @@ def lookup_price(vendor_id: str, model: str) -> list[float] | None:
     for k, v in _PRICES.items():
         if k.startswith(prefix) and model.startswith(k[len(prefix):]):
             return v
+    # 自带端点（custom）：价格由使用者声明（DD_LLM_PRICE_IN/OUT，USD/1M tokens）。
+    # 未声明 → None（cost_usd=0 且 cost_estimated=True）——**绝不假装知道价钱**。
+    if vendor_id == "custom":
+        try:
+            from . import settings
+            pin, pout = settings.llm_price_in(), settings.llm_price_out()
+        except Exception:                          # noqa: BLE001
+            return None
+        if pin or pout:
+            return [pin, pout]
     return None
 
 

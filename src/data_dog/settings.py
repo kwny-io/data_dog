@@ -711,6 +711,20 @@ def llm_model() -> str:
     return _get("DD_LLM_MODEL", "DATA_DOG_MODEL")
 
 
+def llm_price_in() -> float:
+    """自定义端点的**输入价**（USD / 1M tokens）。0 = 未声明。
+
+    价格表只内置了三家公开定价；自带端点（DD_LLM_VENDOR=custom）由使用者声明，
+    否则成本一律显示"未定价"（cost_estimated=True），**绝不假装知道价钱**。
+    """
+    return max(0.0, _get_float("DD_LLM_PRICE_IN", default=0.0))
+
+
+def llm_price_out() -> float:
+    """自定义端点的**输出价**（USD / 1M tokens）。0 = 未声明。"""
+    return max(0.0, _get_float("DD_LLM_PRICE_OUT", default=0.0))
+
+
 def llm_base_url() -> str:
     """自定义 OpenAI 兼容端点的 base_url（`DD_LLM_VENDOR=custom` 时用）。
 

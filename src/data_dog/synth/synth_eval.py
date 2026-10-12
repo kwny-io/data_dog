@@ -242,6 +242,8 @@ def eval_one(sample, label, provider, model=None, cand=None, visual=None,
         "confidence": round(float(report.confidence), 2),
         "summary": report.summary[:90],
         "hit": expected_vs_actual(d, label),
+        # 可观测性：本次调查的 token / 耗时 / 估算成本（供成本分布统计；无 provider 时为空）
+        "usage": report.model_provenance.get("usage", {}),
     }
 
 

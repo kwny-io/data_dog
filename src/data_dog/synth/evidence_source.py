@@ -36,7 +36,15 @@ class SyntheticEvidenceSource:
         sample = self._by_joint.get(component)
         if sample is None:
             return None
-        return sample.telemetry(component)
+        res = dict(sample.telemetry(component))
+        # ⚠️ 证据里**绝不能带 ground truth**：那等于把答案喂给 Agent（**评测污染**）。
+        # 此前它一直在 payload 里——确定性 provider 不读它，所以一直没暴露；但真 LLM
+        # 评测会读到，任何"准确率"都可能被它抬高。
+        res.pop("fault_ground_truth", None)
+        # valid_mask 是**逐点**掩码（12000 点 ≈ 2 万 tokens/次），而 Agent 只需要丢包率
+        # （packet_loss_rate 已单独给出）。去掉它把单次证据从 ~20k tokens 降回 ~1k。
+        res.pop("valid_mask", None)
+        return res
 
     def query_vendor_knowledge(self, component_type, question=None):
         # 复用内置厂商知识（阈值/原因）
