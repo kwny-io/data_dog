@@ -775,6 +775,83 @@ def investigate_offline() -> bool:
     return _get_bool("DD_INVESTIGATE_OFFLINE", default=False)
 
 
+def llm_retries() -> int:
+    """单次模型调用的**额外重试次数**（DD_LLM_RETRIES，默认 1，0 = 不重试）。
+
+    为什么默认 1 而不是 0：providers/client.py 刻意设了 SDK 的 `max_retries=0`——把重试
+    预算收回**我们自己的** deadline，那是对的一半；错的一半是"我们自己的重试一直没写"，
+    于是上游 504/连接重置一次就把整次调查打成失败关闭（还多堆一条人工工单）。
+    只重试可重试的错（超时/不可用/被限流），且每次尝试都要再过一遍 deadline。
+    """
+    return max(0, _get_int("DD_LLM_RETRIES", default=1))
+
+
+def llm_retry_base_ms() -> int:
+    """重试退避基数（毫秒，DD_LLM_RETRY_BASE_MS，默认 300）：第 n 次等待
+    `base * 2^(n-1)` 再加 50%~150% 抖动（避免多副本同步重试打上游）。"""
+    return max(0, _get_int("DD_LLM_RETRY_BASE_MS", default=300))
+
+
+def llm_fallback_model() -> str:
+    """备用模型（DD_LLM_FALLBACK_MODEL，默认空 = 不降级）。
+
+    主模型在重试次数内都没成功时，用它再试**一次**——"降级到一个能用的模型"
+    比"整次调查失败关闭"对使用者更有价值。留空即维持旧行为。
+    """
+    return _get("DD_LLM_FALLBACK_MODEL", default="")
+
+
+def llm_budget_tokens_per_day() -> int:
+    """每租户**每日** token 上限（DD_LLM_BUDGET_TOKENS_PER_DAY）。0 = 不限（默认）。
+
+    为什么默认不限：加这个模块之前的行为必须一字不变；治理是**按需开启**的能力，
+    不是替使用者拍一个额度。开启后额度耗尽会 fail-closed（429），见 budget.py。
+    """
+    return max(0, _get_int("DD_LLM_BUDGET_TOKENS_PER_DAY", default=0))
+
+
+def llm_budget_usd_per_day() -> float:
+    """每租户**每日**花费上限（USD，估算值）。0 = 不限（默认）。"""
+    return max(0.0, _get_float("DD_LLM_BUDGET_USD_PER_DAY", default=0.0))
+
+
+def llm_budget_tokens_per_month() -> int:
+    """每租户**每月** token 上限。0 = 不限（默认）。"""
+    return max(0, _get_int("DD_LLM_BUDGET_TOKENS_PER_MONTH", default=0))
+
+
+def llm_budget_usd_per_month() -> float:
+    """每租户**每月**花费上限（USD，估算值）。0 = 不限（默认）。"""
+    return max(0.0, _get_float("DD_LLM_BUDGET_USD_PER_MONTH", default=0.0))
+
+
+def llm_budget_enforce() -> bool:
+    """额度耗尽是否**拦下**（DD_LLM_BUDGET_ENFORCE，默认 1 = 拦）。
+
+    置 0 = 只记用量不拦（灰度：先看几天真实用量，再决定阈值）。
+    """
+    return _get_bool("DD_LLM_BUDGET_ENFORCE", default=True)
+
+
+def investigate_queue_max() -> int:
+    """异步调查队列**准入上限**（DD_INVESTIGATE_QUEUE_MAX，默认 0 = 不限制）。
+
+    超限 → POST /v1/investigations 回 429 + Retry-After，而不是收下再排队。
+    为什么需要：队列是 state store 里的一个 list，**没有上限**；提交快于消费时
+    "已受理"是假的——用户以为在排队，其实只是一直在等。准入控制要把背压显式化。
+    """
+    return max(0, _get_int("DD_INVESTIGATE_QUEUE_MAX", default=0))
+
+
+def investigate_idempotency_ttl_s() -> float:
+    """提交幂等窗口（秒，DD_INVESTIGATE_IDEMPOTENCY_TTL_S，默认 1800）。
+
+    同一个 (租户, Idempotency-Key) 在窗口内重复提交 → 返回**同一个** job/报告，
+    不重复调模型。置 0 = 关闭幂等（回退到旧行为）。
+    """
+    return max(0.0, _get_float("DD_INVESTIGATE_IDEMPOTENCY_TTL_S", default=1800.0))
+
+
 def investigate_async() -> bool:
     """`POST /v1/investigations` 默认是否异步（提交→202 job 句柄）。
 

@@ -18,7 +18,8 @@ class ToolErrorCode(str, Enum):
     CONTRACT_MISMATCH = "contract_mismatch"  # 契约/协议不符
     TIMEOUT = "timeout"                      # 超时
     UNAVAILABLE = "unavailable"              # 依赖服务不可用
-    RATE_LIMITED = "rate_limited"            # 被限流
+    RATE_LIMITED = "rate_limited"            # 被限流（频次）
+    BUDGET_EXCEEDED = "budget_exceeded"      # 租户额度/花费耗尽（与限流是两件事：那是频次，这是花费）
     EXECUTION_FAILED = "execution_failed"    # 执行失败（兜底）
 
 
@@ -48,6 +49,7 @@ _HTTP_STATUS = {
     ToolErrorCode.TIMEOUT: 504,
     ToolErrorCode.UNAVAILABLE: 503,
     ToolErrorCode.RATE_LIMITED: 429,
+    ToolErrorCode.BUDGET_EXCEEDED: 429,
     ToolErrorCode.EXECUTION_FAILED: 500,
 }
 

@@ -26,12 +26,21 @@ class LLMCallError(RuntimeError):
 
     调用方可用 `e.code` 稳定分类（timeout / unavailable），无需认识各 SDK
     的异常类型。
+
+    `retryable`：**默认按错误码判定**（超时/不可用/被限流 = 可以再试；鉴权/入参/
+    契约不符 = 重试没意义）。调用方可以显式覆盖——典型是"整次调查的总预算已耗尽"，
+    它借 TIMEOUT 这个码传播，但**绝不能**被重试层当成"上游抖了一下"。
     """
 
-    def __init__(self, code: ToolErrorCode, detail: str = ""):
+    _RETRYABLE = frozenset({ToolErrorCode.TIMEOUT, ToolErrorCode.UNAVAILABLE,
+                            ToolErrorCode.RATE_LIMITED})
+
+    def __init__(self, code: ToolErrorCode, detail: str = "",
+                 *, retryable: bool | None = None):
         super().__init__(detail or code.value)
         self.code = code
         self.detail = detail
+        self.retryable = (code in self._RETRYABLE) if retryable is None else bool(retryable)
 
 
 def _is_timeout(e: BaseException) -> bool:

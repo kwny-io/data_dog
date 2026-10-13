@@ -116,6 +116,25 @@ investigation_job_duration_seconds = Histogram(
     registry=registry,
 )
 
+# 租户 LLM 额度（治理）：超限次数按**阶段**分（接活前 / 跑一半），便于区分
+# "还没花钱就被拦"与"已经花了一半被拦"。
+llm_budget_exceeded_total = Counter(
+    "data_dog_llm_budget_exceeded_total",
+    "因租户 LLM 额度/花费耗尽被拦下的次数（按阶段）",
+    labelnames=("stage",),
+    registry=registry,
+)
+llm_budget_tokens_total = Counter(
+    "data_dog_llm_budget_tokens_total",
+    "记入租户额度的 token 数（**不带租户标签**，避免基数爆炸）",
+    registry=registry,
+)
+llm_budget_usd_total = Counter(
+    "data_dog_llm_budget_usd_total",
+    "记入租户额度的估算花费（USD；按价格表估算，不是账单）",
+    registry=registry,
+)
+
 # 审计写入失败次数（>0 必须告警：审计是只增证据，写不进去等于合规缺口；
 # 但写入失败**不会**让业务请求失败，所以只能靠这个计数器被发现）
 audit_write_failed = Counter(

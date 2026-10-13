@@ -56,9 +56,9 @@
 | 6 | `src/data_dog/alerting/notifiers.py:134-149`（`_post_json`，调用点 `:165,:189`） | HTTP/IM 通知：单次 `urlopen(timeout=DD_NOTIFY_HTTP_TIMEOUT_S)`（默认 5s），不做重试，失败如实返回 `DeliveryResult(ok=False, detail=…)` | — 单次 · ✅ 5s · — | 合规 |
 | 7 | `src/data_dog/alerting/notifiers.py:213-214` | 邮件通道 `smtplib.SMTP(..., timeout=DD_SMTP_TIMEOUT_S)`（默认 5s）；无重试 | — 单次 · ✅ 5s（**独立配置项**，不再复用 HTTP 的） · — | **合规**（已解耦，§3.3-G） |
 | 8 | `src/data_dog/evidence/change_source.py:229-231,250-260` | CMDB 拉取：单次 `urlopen(timeout=self.timeout)`（默认 5s，可注入），**异常直接上抛**、不回空 | — 单次 · ✅ 5s · — | 合规 |
-| 9 | `src/data_dog/providers/client.py:98-121`（默认值 `:52-57`） | LLM 调用：显式 `timeout=DD_LLM_TIMEOUT_S`（默认 60s）+ **显式 `max_retries=0`**——一次 `chat()` = 一次 HTTP 往返，重试预算归调用方（`_DeadlineProvider`）所有 | ✅ 1 次（显式关掉 SDK 的隐式 2 次） · ✅ 60s（外层 90s） · — 无重试 | **合规**（已加固，§3.3-D） |
+| 9 | `src/data_dog/providers/client.py:98-133`（默认值 `:52-57`） | LLM 调用：显式 `timeout=DD_LLM_TIMEOUT_S`（默认 60s）+ **显式 `max_retries=0`**——一次 `chat()` = 一次 HTTP 往返，重试预算归**我们自己的**调用方所有：`_DeadlineProvider`（总预算）+ `_RetryProvider`（有界重试，见第 24 行） | ✅ 1 次 + 外层 `DD_LLM_RETRIES` · ✅ 60s（外层 90s） · ✅ 抖动退避（见 24） | **合规**（已加固，§3.3-D；重试在 24 行） |
 | 10 | `src/data_dog/service/app.py:1927-1939`（装配 `:1949-1968`） | `_DeadlineProvider` 给整次调查加 `DD_INVESTIGATE_TIMEOUT_S`（默认 90s）总预算，到点抛 `LLMCallError(TIMEOUT)` → Agent 失败关闭 | ✅（步数 `max_steps=8`）· ✅ 90s · — | 合规 |
-| 11 | `src/data_dog/agent/loop.py:66,136-156` | `AgentLoop` 最多 8 步；`LLMCallError`（超时/不可用）**立即失败关闭，不重试** | ✅ 8 步 · — 不重试 · — | 合规（有意不重试） |
+| 11 | `src/data_dog/agent/loop.py:66,136-156` | `AgentLoop` 最多 8 步；`LLMCallError` 在**这一层**不重试——重试已下移到 provider 包装器（第 24 行），避免两层各重试一遍把预算乘起来 | ✅ 8 步 · — 不重试 · — | 合规（重试职责单一化） |
 | 12 | `src/data_dog/mcp_context.py:46-78,190-215,258-320` | 看门狗由 `timeout_s` **派生**（`timeout_s + 0.5s`，保证 ≥ 调用超时）；两次尝试之间**抖动退避**；整次调用受总预算 30s 约束，每次尝试超时被夹到剩余预算内 | ✅ 2 次 · ✅ 30s 总预算 · ✅ 抖动退避 | **合规**（已加固，§3.3-E） |
 | 13 | `src/data_dog/knowledge.py:23,61,121-131` | chroma-mcp：单次请求看门狗 60s；进程死则重建一次；收尾 `proc.wait(timeout=1)` | ✅ 1 次 · ✅ 60s · — | 合规 |
 | 14 | `src/data_dog/operator_factory/sandbox.py:115,134,144-160` | 子进程 IPC 等待：ready 30s、求值 `wall_s+0.5`、`join(2.0)`；超时**杀进程并抛** `SandboxViolation` | ✅（杀+抛） · ✅ 30s / wall_s+0.5 / 2s · — | 合规 |
@@ -71,6 +71,7 @@
 | 21 | `src/data_dog/state/lease.py`（`Lease.acquire/renew`） | 单持有者租约 TTL（file 源默认 30s、升级 sweeper 默认 60s）+ 每轮 `renew()`；接管判据是**过期**（时间上限），无重试环。**已移到 `state/`**：它是 `StateStore` 之上的通用原语，file 源与告警 sweeper 共用 | ✅（TTL 过期即抢） · ✅ TTL · — | 合规 |
 | 22 | `src/data_dog/paths.py:27`、`src/data_dog/operator_factory/verification.py:61`、`src/data_dog/mujoco_sim/simulate.py:211`、`src/data_dog/operator_factory/dsl.py:182,246,555,562` | `for _ in range(...)` / `while True` 是**目录上溯 / 数值迭代 / 采样 / DSL 解析循环**，不是重试 | — | 无需 |
 | 23 | `src/data_dog/cli.py:151`、`src/data_dog/operator_factory/sandbox_exec.py:143`、`src/data_dog/knowledge.py:105`、`src/data_dog/mcp_context.py:176`、`src/data_dog/state/redis.py:158` | `while True` 是**交互 REPL / worker 主循环 / stdout 读循环 / SCAN 游标**，不是重试 | — | 无需 |
+| 24 | `src/data_dog/service/runtime.py`（`_RetryProvider`，装配在 `_DeadlineProvider` 内） | 单次 `chat()` 的**有界重试**：次数 = `1 + DD_LLM_RETRIES`（默认 1）；只重试 `LLMCallError.retryable`（超时/不可用/被限流），**鉴权与入参不重试**；退避 `base*2^n × U(0.5,1.5)`；总预算耗尽（`retryable=False`）**一次都不重试**；重试耗尽后可用 `DD_LLM_FALLBACK_MODEL` 再试一次 | ✅（默认 2 次尝试） · ✅ 受外层 90s 夹住 · ✅ 指数+抖动 | **合规**（新增，§3.3-D 的补全） |
 
 ---
 

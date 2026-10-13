@@ -6,12 +6,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
 
 from ... import settings
 from ...storage import models as M
 from ...storage import repository as repo
 from ...storage.db import session_scope
+from .. import idempotency
 from ..deps import require_tenant
 from ..runtime import (
     _DEFAULT_PAGE_SIZE,
@@ -152,19 +153,25 @@ def create_investigation(
     response: Response,
     tenant: str = Depends(require_tenant),
     sync: bool = Query(default=False, alias="sync"),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ) -> dict[str, Any]:
     """对一个候选跑一次 Agent 调查。
 
     **两种模式**（同一段执行逻辑，见 `_execute_investigation`）：
-      - **异步**（默认当 `DD_INVESTIGATE_ASYNC=1`）：落一条 pending job、入共享
-        队列，**立即**返回 `202 {job_id, status}`；worker 池后台执行。前端轮询
+      - **异步**（`DD_INVESTIGATE_ASYNC=1`）：落一条 pending job、入共享队列，
+        **立即**返回 `202 {job_id, status}`；worker 池后台执行。前端轮询
         `GET /v1/investigations/jobs/{job_id}` 取状态/结果。这是端到端水平扩展
         的关键——HTTP worker 不再被长 LLM 调用占满。
-      - **同步**（默认，或 `?sync=1`）：同请求内跑完再返回（旧行为，兼容既有
-        前端与测试）。真实 LLM 时 10–60s，故前端须按"长任务"处理。
+      - **同步**（默认，或 `?sync=1`）：同请求内跑完再返回（真实 LLM 时 10–60s，
+        前端按长任务处理）。
 
-    `DD_INVESTIGATE_TIMEOUT_S` 为**整次调查**的总墙钟预算（默认 90s），两种模式
-    都适用，到点失败关闭。本端点**绝不被 /v1/telemetry 调用**：热路径保持无 LLM。
+    **幂等**：带 `Idempotency-Key` 头时，窗口内（`DD_INVESTIGATE_IDEMPOTENCY_TTL_S`，
+    默认 30 分钟）同一 (租户, key) 只会真跑一次——第二次返回同一份结果并带
+    `idempotent_replay: true`；首次仍在跑则 409 + Retry-After。不带该头 = 旧行为。
+
+    **三道闸门**（都在花钱之前）：队列满 → 429；租户额度耗尽 → 429；
+    整次调查墙钟预算 `DD_INVESTIGATE_TIMEOUT_S`（默认 90s）到点失败关闭。
+    本端点**绝不被 /v1/telemetry 调用**：热路径保持无 LLM。
     """
     candidate_id = (payload or {}).get("candidate_id")
     if not candidate_id:
@@ -172,10 +179,33 @@ def create_investigation(
 
     use_async = settings.investigate_async() and not sync
     if use_async:
-        return _submit_async_investigation(tenant, candidate_id, response)
+        return _submit_async_investigation(tenant, candidate_id, response,
+                                           idempotency_key=idempotency_key)
+
+    ttl = settings.investigate_idempotency_ttl_s()
+    decision = idempotency.reserve(tenant, idempotency_key, ttl_s=ttl, kind="sync")
+    if decision.state == "done":
+        replay_id = str(decision.ref.get("investigation_id", ""))
+        if replay_id:
+            with session_scope() as s:
+                report = repo.get_report(s, replay_id, tenant_id=tenant)
+            if report is not None:
+                return {"ok": True, "investigation_id": replay_id, "report": report,
+                        "idempotent_replay": True}
+        idempotency.release(tenant, idempotency_key)
+        idempotency.reserve(tenant, idempotency_key, ttl_s=ttl, kind="sync")
+    elif decision.state == "inflight":
+        raise HTTPException(status_code=409,
+                            detail="同一 Idempotency-Key 的调查正在进行中",
+                            headers={"Retry-After": "5"})
 
     outcome = _execute_investigation(tenant, candidate_id)
     if not outcome.get("ok"):
+        # 失败就**释放占位**：否则调用方连"改正后重试"的机会都没有。
+        idempotency.release(tenant, idempotency_key)
         raise HTTPException(status_code=outcome["http_status"],
                             detail=outcome["detail"])
+    idempotency.complete(
+        tenant, idempotency_key,
+        {"investigation_id": outcome["response"]["investigation_id"]}, ttl_s=ttl)
     return outcome["response"]

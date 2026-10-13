@@ -9,7 +9,7 @@ from typing import Any
 
 from fastapi import HTTPException, Response
 
-from .. import settings
+from .. import budget, settings
 from ..agent.loop import AgentLoop
 from ..alerting.saas import SaaSTestAdapter
 from ..core import metrics
@@ -30,6 +30,7 @@ from ..storage import repository as repo
 from ..storage.db import database_url as _database_url
 from ..storage.db import get_engine, session_scope
 from ..tools.investigation import InvestigationTools
+from . import idempotency
 from .alerting import notify_alert, report_alert
 from .evidence import RepoEvidenceBridge
 
@@ -332,11 +333,15 @@ def _run_log_public(row: dict[str, Any], *, with_steps: bool = True) -> dict[str
         out["steps"] = row.get("steps") or []
     return out
 def _submit_async_investigation(tenant: str, candidate_id: str,
-                                response: Response) -> dict[str, Any]:
-    """提交异步调查：校验候选存在 → 落 pending job → 入共享队列 → 202 返回句柄。
+                                response: Response,
+                                idempotency_key: str | None = None) -> dict[str, Any]:
+    """提交异步调查：校验候选 → **幂等占位** → **队列准入** → **额度闸门** → 落 job → 202。
 
     **立即返回**（不跑 LLM）：这是把 worker 从长调用里解放出来的关键。
     候选不存在 → 404（与同步路径一致的失败语义）。
+
+    三道闸门刻意都放在"落 job 之前"：收下再拒等于**假的受理**——调用方以为在排队，
+    其实只是在等一个注定失败的活。
     """
     with session_scope() as s:
         row = repo.get_candidate(s, candidate_id, tenant_id=tenant)
@@ -350,12 +355,52 @@ def _submit_async_investigation(tenant: str, candidate_id: str,
         raise HTTPException(status_code=503,
                             detail="异步调查 worker 池未运行（检查启动日志）")
 
+    ttl = settings.investigate_idempotency_ttl_s()
+    decision = idempotency.reserve(tenant, idempotency_key, ttl_s=ttl, kind="async")
+    if decision.state == "done":
+        replay_id = str(decision.ref.get("job_id", ""))
+        if replay_id:
+            with session_scope() as s:
+                job = repo.get_job(s, replay_id, tenant_id=tenant)
+            if job is not None:
+                response.status_code = 202
+                return {"ok": True, "job_id": replay_id, "status": job["status"],
+                        "candidate_id": candidate_id,
+                        "poll": f"/v1/investigations/jobs/{replay_id}",
+                        "idempotent_replay": True}
+        # 记录在、job 查不到（多半被保留策略清了）→ 当新请求处理，重新占位。
+        idempotency.release(tenant, idempotency_key)
+        idempotency.reserve(tenant, idempotency_key, ttl_s=ttl, kind="async")
+    elif decision.state == "inflight":
+        raise HTTPException(status_code=409,
+                            detail="同一 Idempotency-Key 的调查正在进行中",
+                            headers={"Retry-After": "5"})
+
+    limit = settings.investigate_queue_max()
+    depth = runner.queue_depth()
+    if limit and depth >= limit:
+        idempotency.release(tenant, idempotency_key)
+        metrics.investigations_total.labels(result="queue_full").inc()
+        raise HTTPException(
+            status_code=429,
+            detail=f"调查队列已满（{depth}/{limit}），稍后重试",
+            headers={"Retry-After": "10"})
+
+    try:
+        budget.ensure(tenant, stage="precheck")
+    except budget.BudgetExceeded as e:
+        idempotency.release(tenant, idempotency_key)
+        metrics.investigations_total.labels(result="budget_exceeded").inc()
+        raise HTTPException(status_code=429, detail=e.detail,
+                            headers={"Retry-After": "60"}) from e
+
     job_id = _make_job_id(tenant, candidate_id)
     with session_scope() as s:
         repo.create_job(s, tenant_id=tenant, job_id=job_id,
                         candidate_id=candidate_id)
     runner.submit(tenant_id=tenant, candidate_id=candidate_id, job_id=job_id)
     metrics.investigation_jobs_total.labels(status="pending").inc()
+    idempotency.complete(tenant, idempotency_key, {"job_id": job_id}, ttl_s=ttl)
 
     response.status_code = 202
     return {"ok": True, "job_id": job_id, "status": "pending",
@@ -521,8 +566,21 @@ def _execute_investigation(tenant: str, candidate_id: str, *,
 
     cand = _row_to_candidate(row)
 
+    # ---- 额度闸门（接活前）：白花钱之前先问一句"这个租户今天还能花吗" ----
+    # 放在候选校验**之后**：不存在的候选仍旧 404，不因为额度问题变成 429（语义别串）。
     try:
-        provider = _build_investigation_provider(should_cancel=should_cancel)
+        budget.ensure(tenant, stage="precheck")
+    except budget.BudgetExceeded as e:
+        metrics.investigations_total.labels(result="budget_exceeded").inc()
+        return _with_log({"ok": False, "http_status": 429, "detail": e.detail,
+                          "status": "failed", "error_code": "budget_exceeded"},
+                         status="failed", error_code="budget_exceeded",
+                         error_detail=e.detail)
+
+    budget_provider: _BudgetProvider | None = None
+    try:
+        provider, budget_provider = _build_investigation_provider(
+            should_cancel=should_cancel, tenant=tenant)
     except HTTPException as e:
         metrics.investigations_total.labels(result="failed").inc()
         return _with_log({"ok": False, "http_status": e.status_code, "detail": e.detail,
@@ -547,12 +605,22 @@ def _execute_investigation(tenant: str, candidate_id: str, *,
                           max_steps=settings.investigate_max_steps(),
                           trace_cb=trace.append)
         report = agent.investigate(cand)
+        if budget_provider is not None:
+            # 收尾对账：逐次扣费负责"最多超一次调用"，这里保证"总量一分不漏"。
+            budget_provider.settle(report.model_provenance.get("usage", {}) or {})
     except _InvestigationCancelled:
         # 协作式取消：不产出报告（要的就是"停，且不留半成品结论"）
         metrics.investigations_total.labels(result="cancelled").inc()
         return _with_log({"ok": False, "http_status": 409, "detail": "调查已被取消",
                           "status": "cancelled", "error_code": "cancelled"},
                          status="cancelled", error_code="cancelled")
+    except budget.BudgetExceeded as e:
+        # 跑一半额度耗尽：与"入口就没额度"同一个错误码，但阶段不同（指标可区分）。
+        metrics.investigations_total.labels(result="budget_exceeded").inc()
+        return _with_log({"ok": False, "http_status": 429, "detail": e.detail,
+                          "status": "failed", "error_code": "budget_exceeded"},
+                         status="failed", error_code="budget_exceeded",
+                         error_detail=e.detail)
     except LLMCallError as e:
         # 超时/不可用 → 统一错误码（504/503），失败关闭，不假装查过证据
         metrics.investigations_total.labels(result="timeout").inc()
@@ -663,6 +731,64 @@ def _make_job_id(tenant_id: str, candidate_id: str) -> str:
     return make_job_id(tenant_id, candidate_id)
 class _InvestigationCancelled(Exception):
     """协作式取消信号：worker 在 provider 调用边界发现 job 已被取消。"""
+class _ChargingTracker:
+    """UsageTracker 代理：provider 记一笔 → 原样转记给上游（观测）+ **立刻扣租户额度**。
+
+    为什么在 provider 这一层而不是等调查结束再结账：一次调查可能有 8 次模型调用，
+    只在入口/出口各查一次，"跑一半就把额度刷穿"是拦不住的。真正的花钱点就在这里。
+    """
+
+    def __init__(self, inner: Any, tenant: str, owner: _BudgetProvider):
+        self._inner = inner
+        self._tenant = tenant
+        self._owner = owner
+
+    def record(self, stat: Any) -> None:
+        if self._inner is not None:
+            self._inner.record(stat)
+        tokens = int(getattr(stat, "prompt_tokens", 0)) + \
+            int(getattr(stat, "completion_tokens", 0))
+        try:
+            usd = float(stat.cost_usd())
+        except Exception:                                 # noqa: BLE001
+            usd = 0.0
+        self._owner.charged_tokens += tokens
+        self._owner.charged_usd += usd
+        budget.charge(self._tenant, tokens=tokens, usd=usd, calls=1)
+
+
+class _BudgetProvider:
+    """把每次模型调用变成"调用前问一次额度、调用后按真实用量扣一次"。"""
+
+    def __init__(self, inner: Any, tenant: str):
+        self._inner = inner
+        self._tenant = tenant
+        self.charged_tokens = 0
+        self.charged_usd = 0.0
+
+    def chat(self, messages, **kw):
+        budget.ensure(self._tenant, stage="midrun")
+        tracker = kw.get("usage_tracker")
+        if tracker is not None:
+            kw["usage_tracker"] = _ChargingTracker(tracker, self._tenant, self)
+        return self._inner.chat(messages, **kw)
+
+    def settle(self, usage: dict[str, Any] | None) -> None:
+        """收尾对账：把这次调查**还没扣过**的用量补上（只补差额，绝不重复扣）。
+
+        为什么需要它：有的 provider（离线确定性档）不接受 usage_tracker，逐次扣费就落空了。
+        逐次扣费负责"最多超一次调用"，这里负责"总量一分不漏"。
+        """
+        total_t = int((usage or {}).get("total_tokens", 0) or 0)
+        total_u = float((usage or {}).get("cost_usd", 0.0) or 0.0)
+        dt = max(0, total_t - self.charged_tokens)
+        du = max(0.0, total_u - self.charged_usd)
+        if dt or du:
+            budget.charge(self._tenant, tokens=dt, usd=du, calls=0)
+            self.charged_tokens += dt
+            self.charged_usd += du
+
+
 class _DeadlineProvider:
     """给 provider 加一个**整次调查的总墙钟预算**（可选叠加协作式取消）。
 
@@ -687,34 +813,91 @@ class _DeadlineProvider:
         if self._should_cancel is not None and self._should_cancel():
             raise _InvestigationCancelled()
         if time.monotonic() >= self._deadline:
+            # retryable=False：这是"没时间了"，不是"上游抖了一下"——不能被重试层放大。
             raise LLMCallError(ToolErrorCode.TIMEOUT,
-                               f"调查总预算 {self._budget_s:.0f}s 已耗尽")
+                               f"调查总预算 {self._budget_s:.0f}s 已耗尽",
+                               retryable=False)
         return self._inner.chat(messages, **kw)
-def _build_investigation_provider(should_cancel=None) -> Any:
+class _RetryProvider:
+    """单次 `chat()` 的**有界重试**（+ 可选备用模型降级一次）。
+
+    为什么需要它：`providers/client.py` 刻意设了 SDK 的 `max_retries=0`——把重试预算收回
+    **我们自己的** deadline 里，那是对的一半；错的一半是"我们自己的重试一直没写"：上游
+    504/超时/连接重置一次，整次调查就直接失败关闭（还多堆一条人工工单）。
+
+    边界：只重试**可重试**的错（`LLMCallError.retryable`：超时 / 不可用 / 被限流），
+    鉴权与入参错误不重试；每次尝试都要再过一遍外层 deadline（"没时间了"不会被重试放大）；
+    退避带抖动，避免多副本同步重试一起打上游。
+    """
+
+    def __init__(self, inner: Any, *, attempts: int = 1, base_delay_s: float = 0.3,
+                 fallback_model: str = "", sleep: Any = time.sleep):
+        self._inner = inner
+        self._attempts = max(1, int(attempts))
+        self._base = max(0.0, float(base_delay_s))
+        self._fallback = fallback_model or ""
+        self._sleep = sleep
+
+    def _delay(self, attempt: int) -> float:
+        import random
+        return self._base * (2 ** attempt) * (0.5 + random.random())
+
+    def chat(self, messages, **kw):
+        last: LLMCallError | None = None
+        for i in range(self._attempts):
+            try:
+                return self._inner.chat(messages, **kw)
+            except LLMCallError as e:
+                last = e
+                if not e.retryable or i == self._attempts - 1:
+                    break
+                self._sleep(self._delay(i))
+        if last is None:                              # pragma: no cover - 循环必然赋值
+            raise LLMCallError(ToolErrorCode.EXECUTION_FAILED, "重试层异常")
+        if (self._fallback and last.retryable
+                and kw.get("model") not in (None, self._fallback)):
+            try:
+                return self._inner.chat(messages, **{**kw, "model": self._fallback})
+            except LLMCallError as e2:
+                last = e2
+        raise last
+
+
+def _build_investigation_provider(should_cancel=None, tenant: str | None = None
+                                  ) -> tuple[Any, _BudgetProvider | None]:
     """按配置构造调查用的 provider（每次调用新建，保证状态隔离）。
+
+    包装顺序（外 → 内）：**Deadline → Retry → Budget → 真 provider**。
+    - Deadline 在最外：每次尝试都要过一遍"整次调查还有没有时间"；
+    - Retry 在 Budget 外：重试的每一次都会重新问额度、重新扣费（不白花）；
+    - Budget 贴着真 provider：那才是花钱的那一行。
 
     - `DD_INVESTIGATE_OFFLINE=1` → 离线确定性 provider（CI/测试不调真实模型，
       结论仍由证据推导，非写死剧本）。
     - 否则用已配置的供应商 + key；未配置 → 503（不静默降级成假结论）。
+    返回 `(provider, budget_provider)`；没有租户上下文（如 CLI 直接调）时第二个为 None。
     """
     if settings.investigate_offline():
-        return _DeadlineProvider(DeterministicEvidenceProvider(),
-                                 settings.investigate_timeout_s(),
-                                 should_cancel=should_cancel)
+        inner: Any = DeterministicEvidenceProvider()
+    else:
+        cfg = load_config()
+        key = (cfg.get("api_key") or "").strip()
+        if not key:
+            raise HTTPException(
+                status_code=503,
+                detail="未配置 LLM 凭据（先 data-dog init 设 key，"
+                       "或设 DD_INVESTIGATE_OFFLINE=1 用离线确定性 provider）")
+        from ..providers.client import Provider
 
-    cfg = load_config()
-    key = (cfg.get("api_key") or "").strip()
-    if not key:
-        raise HTTPException(
-            status_code=503,
-            detail="未配置 LLM 凭据（先 data-dog init 设 key，"
-                   "或设 DD_INVESTIGATE_OFFLINE=1 用离线确定性 provider）")
-    from ..providers.client import Provider
+        inner = Provider.from_config(
+            cfg.get("vendor_id") or settings.llm_vendor(), key,
+            timeout=settings.investigate_timeout_s(),
+            base_url=cfg.get("base_url") or settings.llm_base_url(),
+        )
 
-    provider = Provider.from_config(
-        cfg.get("vendor_id") or settings.llm_vendor(), key,
-        timeout=settings.investigate_timeout_s(),
-        base_url=cfg.get("base_url") or settings.llm_base_url(),
-    )
-    return _DeadlineProvider(provider, settings.investigate_timeout_s(),
-                             should_cancel=should_cancel)
+    bp = _BudgetProvider(inner, tenant) if tenant else None
+    retry = _RetryProvider(bp or inner, attempts=1 + settings.llm_retries(),
+                           base_delay_s=settings.llm_retry_base_ms() / 1000.0,
+                           fallback_model=settings.llm_fallback_model())
+    return (_DeadlineProvider(retry, settings.investigate_timeout_s(),
+                              should_cancel=should_cancel), bp)
