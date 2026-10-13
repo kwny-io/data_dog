@@ -103,3 +103,24 @@ def test_agent_attaches_usage_to_report():
     assert usage["duration_ms"] > 0
     print(f"PASS test_agent_attaches_usage_to_report (tokens={usage['total_tokens']}, "
           f"cost=${usage['cost_usd']})")
+
+
+def test_http_request_histogram_reaches_llm_timescales():
+    """HTTP 耗时直方图必须覆盖**慢路径**：同步调查要等一次真 LLM（10–60s）。
+
+    顶格只到 2.5s 时，那些请求全落进 +Inf——那条路的 P95/P99 **实际不可观测**
+    （异步路径另有 investigation_job_duration_seconds，别混为一谈）。
+    """
+    from data_dog.core import metrics as M
+
+    # 先记一次观测：Histogram 在没有标签实例时 collect() 不出 bucket 样本
+    M.http_request_duration_seconds.labels(method="GET", path="/healthz").observe(0.001)
+    les: list[float] = []
+    for metric in M.http_request_duration_seconds.collect():
+        for sample in metric.samples:
+            if sample.name.endswith("_bucket") and "le" in sample.labels:
+                les.append(float(sample.labels["le"]))
+    finite = [x for x in les if x != float("inf")]
+    assert finite, "histogram 没有可用的 bucket"
+    assert max(finite) >= 60, f"顶格 bucket 只有 {max(finite)}s，长请求会全落 +Inf"
+    print("PASS test_http_request_histogram_reaches_llm_timescales")

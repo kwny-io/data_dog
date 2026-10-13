@@ -150,3 +150,68 @@ def test_python_version_consistent_across_manifests():
     for v in versions:
         assert v >= floor, f"CI 用的 Python {v} 低于 requires-python {requires}"
     print("PASS test_python_version_consistent_across_manifests")
+
+
+def _load_migration(name_part: str):
+    """按文件名片段加载一个 alembic 迁移模块（只读常量，不执行 upgrade）。"""
+    paths = sorted((ROOT / "alembic" / "versions").glob(f"*{name_part}*"))
+    assert paths, f"找不到迁移文件：*{name_part}*"
+    spec = importlib.util.spec_from_file_location("_dd_mig", paths[0])
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_json_columns_are_jsonb_on_postgres():
+    """models.py 说 PostgreSQL 上是 JSONB，那就**必须真的是** JSONB（声明 == 事实）。
+
+    这条曾经真的错过：baseline 迁移用 sa.JSON()，在 PG 上落成 json——不能建 GIN 索引、
+    不去重、每次取值都要重新解析，而 docstring 一直写着 JSONB。
+    """
+    from sqlalchemy.dialects import postgresql
+    from sqlalchemy.types import JSON as SA_JSON
+
+    from data_dog.storage.models import Base
+
+    bad = []
+    for table in Base.metadata.tables.values():
+        for col in table.c:
+            if isinstance(col.type, SA_JSON):
+                impl = col.type.dialect_impl(postgresql.dialect())
+                if not isinstance(impl, postgresql.JSONB):
+                    bad.append(f"{table.name}.{col.name} -> {type(impl).__name__}")
+    assert not bad, "这些 JSON 列在 PostgreSQL 上不是 JSONB：" + ", ".join(bad)
+    print("PASS test_json_columns_are_jsonb_on_postgres")
+
+
+def test_jsonb_migration_covers_every_json_column():
+    """迁移的 JSON 列清单必须与模型元数据**逐条一致**。
+
+    为什么值得一条测试：清单写死然后与模型漂移，正是本仓反复吃过的亏——新增一个 JSON 列
+    会悄悄是 json（而不是 jsonb），而且没人会注意到。
+    """
+    from sqlalchemy.types import JSON as SA_JSON
+
+    from data_dog.storage.models import Base
+
+    mig = _load_migration("jsonb_and_indexes")
+    have = {(t.name, c.name) for t in Base.metadata.tables.values()
+            for c in t.c if isinstance(c.type, SA_JSON)}
+    listed = set(mig._JSON_COLUMNS)
+    assert have == listed, (
+        f"迁移漏了：{sorted(have - listed)}；迁移多了：{sorted(listed - have)}"
+        + chr(10) + "修法：改 alembic/versions/20261013_0900_jsonb_and_indexes.py 的 _JSON_COLUMNS")
+    print("PASS test_jsonb_migration_covers_every_json_column")
+
+
+def test_composite_indexes_declared_in_models_and_migration():
+    """租户维度的复合索引：模型声明与迁移**同名同表**（否则 ORM 与库会各说各话）。"""
+    from data_dog.storage.models import Base
+
+    mig = _load_migration("jsonb_and_indexes")
+    have = {ix.name for t in Base.metadata.tables.values() for ix in t.indexes}
+    listed = {name for name, _table, _cols in mig._COMPOSITE}
+    assert listed <= have, f"这些复合索引只在迁移里、没在模型里：{sorted(listed - have)}"
+    assert len(listed) >= 4, "租户复合索引少得可疑（至少要覆盖日志/候选/报告/告警）"
+    print("PASS test_composite_indexes_declared_in_models_and_migration")

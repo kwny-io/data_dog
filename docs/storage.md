@@ -65,7 +65,11 @@ USING (tenant_id = current_setting('app.tenant_id', true)
 
 三条纪律：① 只有后台扫描传 `system=True`（全仓仅 2 处调用，可 grep；请求路径绝不传）；② 扫描只负责"找出哪条要处理"，逐条处理仍走 `session_scope(tenant_id=...)` 并照旧带该行的 `tenant_id`；③ **未设上下文依旧零行**——失败关闭不放松（事务作用域，不泄漏到下个事务）。真库回归见 `tests/test_storage_postgres.py::test_rls_system_scan_is_explicit_and_scoped` 与 `..._finds_due_escalations`。
 
-**设计取舍**：多态字段（metrics / evidence / hypotheses / history）用 **JSON**（PostgreSQL 为 JSONB，SQLite 存 JSON 文本），关键字段单独建列 + 索引，避免过早拆表。
+**设计取舍**：多态字段（metrics / evidence / hypotheses / history …）用 **JSON**——**PostgreSQL 上落成 JSONB**（SQLite 存 JSON 文本），关键字段单独建列 + 索引，避免过早拆表。
+
+> ⚠️ 这句话曾经是**假的**：baseline 迁移用 `sa.JSON()`，在 PG 上落的是 `json`（不是 jsonb）——不能建 GIN 索引、不去重、每次取值都要重新解析，而文档一直写着 JSONB。现由迁移 `f2a3b4c5d6e7` 把既有库 ALTER 成 jsonb，并由两条 meta 测试把关：`test_json_columns_are_jsonb_on_postgres`（逐列按 PG 方言编译检查**真的是 JSONB**）+
+> `test_jsonb_migration_covers_every_json_column`（迁移的列清单必须与模型元数据逐条一致——新增 JSON 列忘了改迁移会红灯）。
+> 同一条迁移还补了**租户维度复合索引**（`(tenant_id, created_at[, tiebreaker])` 覆盖 telemetry/candidates/reports/alerts/jobs）：这些列表都是"租户过滤 + 时间排序"，而单列索引 PG 只能二选一。
 
 ---
 

@@ -37,8 +37,11 @@ http_request_duration_seconds = Histogram(
     "data_dog_http_request_duration_seconds",
     "HTTP 请求耗时（秒）",
     labelnames=("method", "path"),
-    # 覆盖 5ms ~ 2.5s，适配本服务"单请求几十毫秒"的量级
-    buckets=(0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5),
+    # 覆盖 5ms ~ 120s。**长尾是必需的**：绝大多数端点几十毫秒，但 POST /v1/investigations
+    # 的同步路径要等一次真 LLM（10–60s）；顶格只到 2.5s 时它们全落进 +Inf，
+    # **那条路的 P95/P99 实际不可观测**（异步路径另有 investigation_job_duration_seconds）。
+    buckets=(0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5,
+             5.0, 10.0, 30.0, 60.0, 120.0),
     registry=registry,
 )
 

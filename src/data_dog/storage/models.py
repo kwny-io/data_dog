@@ -23,6 +23,7 @@ import time
 from typing import Any
 
 from sqlalchemy import Float, Index, Integer, String, Text
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.types import JSON
 
@@ -31,6 +32,14 @@ from .db import Base
 
 def _now() -> float:
     return time.time()
+
+
+# 复杂/多态字段的列类型：**PostgreSQL 上必须是 JSONB**（与模块 docstring 的声明一致，
+# 并由 tests/test_project_meta.py 的 `test_json_columns_are_jsonb_on_postgres` 钉住）。
+# SQLAlchemy 的通用 JSON 在 PG 上落成 `json`（不是 jsonb）：不能建 GIN 索引、不去重、取值更慢。
+# "文档说 JSONB、实际是 json" 正是本仓最忌讳的**声明 ≠ 事实**——所以这里用带方言变体的类型，
+# 既有库由迁移 f2a3b4c5d6e7 负责 ALTER。
+JsonType = JSON().with_variant(JSONB(), "postgresql")
 
 
 class TelemetryEventRow(Base):
@@ -43,14 +52,20 @@ class TelemetryEventRow(Base):
     device_sn: Mapped[str] = mapped_column(String(80), index=True)
     occurred_at: Mapped[str] = mapped_column(String(40))
     component_ref: Mapped[str] = mapped_column(String(120), index=True)
-    metrics: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
-    status_codes: Mapped[list[str]] = mapped_column(JSON, default=list)
+    metrics: Mapped[dict[str, Any]] = mapped_column(JsonType, default=dict)
+    status_codes: Mapped[list[str]] = mapped_column(JsonType, default=list)
     operating_condition: Mapped[str] = mapped_column(String(40), default="")
     operator_id: Mapped[str] = mapped_column(String(120), default="")
     operator_version: Mapped[str] = mapped_column(String(40), default="")
     binding_revision: Mapped[str] = mapped_column(String(120), default="")
     raw_log_ref: Mapped[str] = mapped_column(String(200), default="")
     created_at: Mapped[float] = mapped_column(Float, index=True, default=_now)
+
+    # 租户维度的分页/保留查询走"按 created_at 排序"，单列索引在 PG 上用不上排序：
+    # (tenant_id, created_at) 才能既过滤又排序（保留清理的 DELETE ... WHERE tenant < cutoff 同理）。
+    __table_args__ = (
+        Index("ix_telemetry_tenant_created", "tenant_id", "created_at"),
+    )
 
 
 class CandidateRow(Base):
@@ -67,15 +82,17 @@ class CandidateRow(Base):
     window_start: Mapped[str] = mapped_column(String(40))
     window_end: Mapped[str] = mapped_column(String(40))
     sample_count: Mapped[int] = mapped_column(Integer, default=0)
-    rule_matches: Mapped[list[str]] = mapped_column(JSON, default=list)
+    rule_matches: Mapped[list[str]] = mapped_column(JsonType, default=list)
     anomaly_score: Mapped[float] = mapped_column(Float, default=0.0)
-    evidence: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
-    evidence_refs: Mapped[list[str]] = mapped_column(JSON, default=list)
+    evidence: Mapped[list[dict[str, Any]]] = mapped_column(JsonType, default=list)
+    evidence_refs: Mapped[list[str]] = mapped_column(JsonType, default=list)
     detector_provenance: Mapped[str] = mapped_column(String(160), default="")
     created_at: Mapped[float] = mapped_column(Float, index=True, default=_now)
 
     __table_args__ = (
         Index("ix_cand_dev_comp", "device_sn", "component_ref"),
+        # 控制台/保留清理的常用路径：tenant 过滤 + created_at 排序（列尾带上 tiebreaker）
+        Index("ix_cand_tenant_created", "tenant_id", "created_at", "candidate_id"),
     )
 
 
@@ -90,16 +107,20 @@ class ReportRow(Base):
     confidence: Mapped[float] = mapped_column(Float, default=0.0)
     event_type: Mapped[str | None] = mapped_column(String(120), nullable=True)
     summary: Mapped[str] = mapped_column(Text, default="")
-    candidate_refs: Mapped[list[str]] = mapped_column(JSON, default=list)
-    hypotheses: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
-    counter_evidence_refs: Mapped[list[str]] = mapped_column(JSON, default=list)
-    missing_evidence: Mapped[list[str]] = mapped_column(JSON, default=list)
+    candidate_refs: Mapped[list[str]] = mapped_column(JsonType, default=list)
+    hypotheses: Mapped[list[dict[str, Any]]] = mapped_column(JsonType, default=list)
+    counter_evidence_refs: Mapped[list[str]] = mapped_column(JsonType, default=list)
+    missing_evidence: Mapped[list[str]] = mapped_column(JsonType, default=list)
     risk_window: Mapped[str | None] = mapped_column(String(120), nullable=True)
-    recommended_actions: Mapped[list[str]] = mapped_column(JSON, default=list)
+    recommended_actions: Mapped[list[str]] = mapped_column(JsonType, default=list)
     correlation_group_id: Mapped[str | None] = mapped_column(String(80), nullable=True)
-    linked_candidate_refs: Mapped[list[str]] = mapped_column(JSON, default=list)
-    model_provenance: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    linked_candidate_refs: Mapped[list[str]] = mapped_column(JsonType, default=list)
+    model_provenance: Mapped[dict[str, Any]] = mapped_column(JsonType, default=dict)
     created_at: Mapped[float] = mapped_column(Float, index=True, default=_now)
+
+    __table_args__ = (
+        Index("ix_reports_tenant_created", "tenant_id", "created_at", "investigation_id"),
+    )
 
 
 class AlertRow(Base):
@@ -119,12 +140,16 @@ class AlertRow(Base):
     detected_at: Mapped[str] = mapped_column(String(40), default="")
     event_revision: Mapped[int] = mapped_column(Integer, default=1)
     summary: Mapped[str] = mapped_column(Text, default="")
-    recommended_actions: Mapped[list[str]] = mapped_column(JSON, default=list)
+    recommended_actions: Mapped[list[str]] = mapped_column(JsonType, default=list)
     investigation_id: Mapped[str] = mapped_column(String(120), default="")
     policy_version: Mapped[str] = mapped_column(String(40), default="")
-    history: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    history: Mapped[list[dict[str, Any]]] = mapped_column(JsonType, default=list)
     created_at: Mapped[float] = mapped_column(Float, index=True, default=_now)
     updated_at: Mapped[float] = mapped_column(Float, default=_now, onupdate=_now)
+
+    __table_args__ = (
+        Index("ix_alerts_tenant_created", "tenant_id", "created_at", "event_id"),
+    )
 
 
 class AlertOutboxRow(Base):
@@ -135,7 +160,7 @@ class AlertOutboxRow(Base):
     tenant_id: Mapped[str] = mapped_column(String(80), primary_key=True, index=True)
     idempotency_key: Mapped[str] = mapped_column(String(200), primary_key=True)
     revision: Mapped[int] = mapped_column(Integer, primary_key=True)
-    payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    payload: Mapped[dict[str, Any]] = mapped_column(JsonType, default=dict)
     status: Mapped[str] = mapped_column(String(20), default="pending", index=True)
     attempts: Mapped[int] = mapped_column(Integer, default=0)
     receipt: Mapped[str] = mapped_column(String(120), default="")
@@ -195,7 +220,7 @@ class ChangeRecordRow(Base):
     to_version: Mapped[str] = mapped_column(String(80), default="")
     actor: Mapped[str] = mapped_column(String(120), default="")
     source: Mapped[str] = mapped_column(String(80), default="")
-    raw: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    raw: Mapped[dict[str, Any]] = mapped_column(JsonType, default=dict)
     created_at: Mapped[float] = mapped_column(Float, default=_now)
 
 
@@ -211,7 +236,7 @@ class StateKvRow(Base):
     __tablename__ = "state_kv"
 
     key: Mapped[str] = mapped_column(String(300), primary_key=True)
-    value: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    value: Mapped[dict[str, Any]] = mapped_column(JsonType, default=dict)
     updated_at: Mapped[float] = mapped_column(Float, default=_now)
 
 
@@ -232,7 +257,7 @@ class StateCheckpointRow(Base):
     checkpoint_id: Mapped[str] = mapped_column(String(80), primary_key=True)
     prefix: Mapped[str] = mapped_column(String(300), default="")
     n_keys: Mapped[int] = mapped_column(Integer, default=0)
-    payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    payload: Mapped[dict[str, Any]] = mapped_column(JsonType, default=dict)
     created_at: Mapped[float] = mapped_column(Float, default=_now, index=True)
 
 
@@ -274,6 +299,11 @@ class InvestigationJobRow(Base):
     started_at: Mapped[float | None] = mapped_column(Float, nullable=True)
     finished_at: Mapped[float | None] = mapped_column(Float, index=True, nullable=True)
 
+    # /v1/investigations/jobs 是前端轮询最频繁的列表：tenant 过滤 + submitted_at 排序。
+    __table_args__ = (
+        Index("ix_job_tenant_submitted", "tenant_id", "submitted_at", "job_id"),
+    )
+
 
 class InvestigationRunLogRow(Base):
     """一次调查的**运行日志**（ReAct 轨迹 + 失败上下文）——给"事后调出来排查"用。
@@ -305,8 +335,8 @@ class InvestigationRunLogRow(Base):
     model: Mapped[str] = mapped_column(String(120), default="")
     step_count: Mapped[int] = mapped_column(Integer, default=0)
     duration_ms: Mapped[float] = mapped_column(Float, default=0.0)
-    steps: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
-    usage: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    steps: Mapped[list[dict[str, Any]]] = mapped_column(JsonType, default=list)
+    usage: Mapped[dict[str, Any]] = mapped_column(JsonType, default=dict)
     created_at: Mapped[float] = mapped_column(Float, index=True, default=_now)
 
 
@@ -331,9 +361,9 @@ class OperatorRegistryRow(Base):
     state: Mapped[str] = mapped_column(String(30), index=True, default="Registered")
     dsl_source: Mapped[str] = mapped_column(Text, default="")
     dsl_hash: Mapped[str] = mapped_column(String(64), index=True, default="")
-    signature: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
-    rollout: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
-    metrics_snapshot: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    signature: Mapped[dict[str, Any]] = mapped_column(JsonType, default=dict)
+    rollout: Mapped[dict[str, Any]] = mapped_column(JsonType, default=dict)
+    metrics_snapshot: Mapped[dict[str, Any]] = mapped_column(JsonType, default=dict)
     created_at: Mapped[float] = mapped_column(Float, default=_now)
     updated_at: Mapped[float] = mapped_column(Float, default=_now, onupdate=_now)
 
@@ -446,4 +476,4 @@ class AuditLogRow(Base):
     trace_id: Mapped[str] = mapped_column(String(80), default="")
     key_id: Mapped[str] = mapped_column(String(40), default="")
     source_ip: Mapped[str] = mapped_column(String(64), default="")
-    detail: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    detail: Mapped[dict[str, Any]] = mapped_column(JsonType, default=dict)
