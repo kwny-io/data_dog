@@ -73,3 +73,43 @@ def test_load_windows_does_not_duplicate_op1_op2_normal():
     fs = {w[1]: w[3] for w in wins if w[0] == "normal"}
     assert fs == {0: 48000.0, 1: 48000.0, 2: 48000.0, 3: 48000.0}, fs
     print("PASS test_load_windows_does_not_duplicate_op1_op2_normal")
+
+
+
+def test_fit_margin_rule_zero_fp_on_calibration():
+    """margin-or 规则：阈值必须压在标定集正常上界之上，且正常样本一个都不能被判异常。"""
+    m = _load_script("cwru_recalibrate")
+    calib = [
+        {"__label__": "normal", "env_bpfo": 0.02, "env_bpfi": 0.03, "env_bsf": 0.01,
+         "env_max": 0.03, "kurtosis": 2.90},
+        {"__label__": "normal", "env_bpfo": 0.04, "env_bpfi": 0.02, "env_bsf": 0.02,
+         "env_max": 0.04, "kurtosis": 3.00},
+        {"__label__": "inner", "env_bpfo": 0.05, "env_bpfi": 0.40, "env_bsf": 0.01,
+         "env_max": 0.40, "kurtosis": 5.00},
+    ]
+    band, thr1, thr2 = m.fit_margin_rule(calib, margin=0.10)
+    assert band in m.ENV_BANDS, band
+    normals = [r for r in calib if r["__label__"] == "normal"]
+    assert thr1 > max(r[band] for r in normals)          # 报警线在正常上界之上
+    assert thr2 > max(r["kurtosis"] for r in normals)
+    flagged = m.eval_margin_rule(calib, (band, thr1, thr2))
+    assert all(h["hit"] for h in flagged), flagged       # 正常全不报、故障全报
+    print("PASS test_fit_margin_rule_zero_fp_on_calibration")
+
+
+def test_seconds_mode_windows_have_equal_physical_duration():
+    """按秒切窗 → 每个窗口的**物理时长**一致（"同一积分时长"，量纲才可比）。
+
+    旧口径按固定点数切：同一个 24000 点在正常文件（48 kHz）是 0.5 s、在故障文件（12 kHz）
+    是 2 s，kurtosis 这类统计量因此不可比。
+    """
+    m = _load_script("cwru_eval")
+    data = ROOT / "data" / "cwru"
+    if not (data / "op_1" / "normal" / "98.mat").exists():   # pragma: no cover
+        print("SKIP test_seconds_mode_windows_have_equal_physical_duration（无 data/cwru）")
+        return
+    wins = m.load_windows(data, per_file=1, window_sec=2.0)
+    assert wins
+    for lb, ld, x, fs in wins:
+        assert abs(len(x) / fs - 2.0) < 0.01, (lb, ld, len(x), fs)
+    print("PASS test_seconds_mode_windows_have_equal_physical_duration")

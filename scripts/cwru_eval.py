@@ -125,13 +125,18 @@ def load_index(rel: str) -> int:
     return int(m.group(1)) if m else 0
 
 
-def load_windows(data_dir: Path, per_file: int, wlen: int, stride: int,
-                 normal_fs: float = NORMAL_FS
+def load_windows(data_dir: Path, per_file: int | None = None,
+                 wlen: int | None = None, stride: int | None = None,
+                 normal_fs: float = NORMAL_FS, *,
+                 window_sec: float = 2.0, stride_sec: float | None = None
                  ) -> list[tuple[str, int, np.ndarray, float]]:
     """读每个文件的 DE 信号并切窗；返回 [(label, load, window, fs), ...]。
 
-    fs 按 CWRU 官方分组**逐文件**给（见 file_sample_rate），不再全库假死 12 kHz——
-    正常基线是 48 kHz，用 12 kHz 算包络会把缺陷频率的带落在 4× 偏的位置。
+    ⚠️ **窗长必须按"秒"给，不能按"点数"给**。各文件采样率不同（正常 48 kHz、12k 故障 12 kHz），
+    同一个"24000 点"在正常文件是 **0.5 s**、在故障文件是 **2 s**——积分时长不同，kurtosis /
+    波峰因子这类统计量就不可比，包络谱的分辨率也随窗长变。实测：按点数切时 op_2 / op_3 各冒
+    1~2 个 normal 误报；按同一物理时长切之后，四折 normal 误报**全为 0**（见 docs §9）。
+    传 wlen / stride（点数）即回到旧口径，**仅用于复现历史结果**。
     """
     out: list[tuple[str, int, np.ndarray, float]] = []
     for rel, label in FILES.items():
@@ -149,22 +154,27 @@ def load_windows(data_dir: Path, per_file: int, wlen: int, stride: int,
             continue
         x = vars_[key]
         fs = file_sample_rate(rel, normal_fs)
+        if wlen:                                       # 旧口径：固定点数
+            w, st = int(wlen), int(stride) if stride else int(wlen)
+        else:                                          # 推荐：固定物理时长
+            w = max(8, int(round(window_sec * fs)))
+            st = max(1, int(round((stride_sec or window_sec) * fs)))
         load = load_index(rel)
         n = 0
-        for start in range(0, max(0, len(x) - wlen), stride):
-            if n >= per_file:
+        for start in range(0, max(0, len(x) - w), st):
+            if per_file is not None and n >= per_file:
                 break
-            out.append((label, load, x[start:start + wlen], fs))
+            out.append((label, load, x[start:start + w], fs))
             n += 1
     return out
 
 
-def _cand(i: int) -> CandidateEvent:
-    # candidate_id 中性：不许把标签写进 id（评测污染）。
+def _cand(i: int, sample_count: int = 24000) -> CandidateEvent:
+    # candidate_id 中性：不许把标签写进 id（评测污染）。sample_count 用**真实**窗长，别写死。
     return CandidateEvent(candidate_id=f"cand_cwru_{i:03d}", device_sn="device-cwru",
                           component_ref=BEARING_COMPONENT, signal="vibration_anomaly",
                           severity_hint="warning", window_start="w0", window_end="w0",
-                          sample_count=24000, rule_matches=["CWRU_VIB"],
+                          sample_count=int(sample_count), rule_matches=["CWRU_VIB"],
                           anomaly_score=0.5, detector_provenance="cwru")
 
 
@@ -194,8 +204,13 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="CWRU 跨数据集评估")
     ap.add_argument("--data-dir", default=str(_ROOT / "data" / "cwru"))
     ap.add_argument("--windows-per-file", type=int, default=4)
-    ap.add_argument("--window-len", type=int, default=24000)
-    ap.add_argument("--stride", type=int, default=12000)
+    ap.add_argument("--window-sec", type=float, default=2.0,
+                    help="窗长（秒，推荐）——各文件按各自 fs 折点数，保证物理时长一致")
+    ap.add_argument("--stride-sec", type=float, default=None,
+                    help="步长（秒）；默认 = 窗长（不重叠窗口）")
+    ap.add_argument("--window-len", type=int, default=None,
+                    help="旧口径：固定**点数**窗长（跨采样率不可比，仅复现历史结果）")
+    ap.add_argument("--stride", type=int, default=None, help="旧口径：固定**点数**步长")
     ap.add_argument("--loads", default="", help="只看某载荷，如 op_0 或 op_0,op_1")
     ap.add_argument("--normal-fs", type=float, default=NORMAL_FS,
                     help="正常基线采样率（默认 48000，见文件头证据；设 12000 做敏感性对照）")
@@ -206,7 +221,8 @@ if __name__ == "__main__":
     ensure_utf8_console()
 
     wins = load_windows(Path(args.data_dir), args.windows_per_file, args.window_len,
-                        args.stride, args.normal_fs)
+                        args.stride, args.normal_fs,
+                        window_sec=args.window_sec, stride_sec=args.stride_sec)
     if args.loads:
         want = {int(x) for x in re.findall(r"\d+", args.loads)}
         wins = [w for w in wins if w[1] in want]
@@ -239,7 +255,7 @@ if __name__ == "__main__":
             label, load, x, fs = wins[i]
             tools = InvestigationTools(
                 CWRUEvidenceSource(x, rpm=LOAD_RPM.get(load, 1797.0), fs=fs), ctx=ctx)
-            rep = AgentLoop(provider, tools, model=model).investigate(_cand(i))
+            rep = AgentLoop(provider, tools, model=model).investigate(_cand(i, len(x)))
             return {"label": label, "hit": hit(label, rep.disposition),
                     "disposition": rep.disposition}
 

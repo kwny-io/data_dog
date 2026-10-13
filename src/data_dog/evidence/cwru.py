@@ -154,6 +154,10 @@ def envelope_features(x: np.ndarray, *, fs: float = 12000.0, fr: float | None = 
 
     fr 缺省取 1797 rpm（0 HP 标称）。比值 = 缺陷频率及其 2~`harmonics` 次谐波 ±`band`
     带内能量 / 10 Hz~2 kHz 总能量；因为是**比值**，不受量纲/增益影响。
+
+    除三个单带外还给 **env_max** = 三者最大值："**任一个**缺陷频率被抬升"才是轴承异常的物理
+    定义。实测只看 BPFI 会漏外圈故障：op_0 的外圈 21 mil 窗口 env_bpfi 只有 0.016~0.019，
+    env_bpfo 却到 0.25（见 docs/cross_dataset_cwru.md §9.3）。
     """
     x = np.asarray(x, dtype=float)
     x = x[np.isfinite(x)]
@@ -177,6 +181,9 @@ def envelope_features(x: np.ndarray, *, fs: float = 12000.0, fr: float | None = 
                 break
             energy += float(spec[(freqs >= fk * (1 - band)) & (freqs <= fk * (1 + band))].sum())
         out[f"env_{name}"] = round(energy / total, 4)
+    bands = [out[k] for k in ("env_bpfo", "env_bpfi", "env_bsf") if k in out]
+    if bands:
+        out["env_max"] = round(max(bands), 4)
     if inband.any():
         idx = int(np.argmax(spec[inband]))
         out["env_peak_hz"] = round(float(freqs[inband][idx]), 1)
@@ -221,19 +228,31 @@ class CWRUEvidenceSource:
                 "packet_loss_rate": 0.0}
 
     def query_vendor_knowledge(self, component_type, question=None):
+        """轴承振动的**参考报警线**。
+
+        ⚠️ 这批数字**不是厂商原文**，而是在 CWRU 4 个载荷上（2 s 窗、逐文件按真实采样率）
+        按"**正常样本上界 × 1.1**"定的零误报参考线（见 docs/cross_dataset_cwru.md §9）。
+        旧版写的 0.08 是**正常基线被当成 12 kHz**（频带 4× 偏）时留下的，比真实报警线高约
+        2 倍——照它判，Agent 会把真故障判成正常（系统性漏报）。
+        """
         return [{"id": "BEARING_VIB", "component_type": "bearing",
-                 "source": "CWRU 公开数据集（case.edu）",
-                 "thresholds": {"kurtosis_alert": 4.0, "crest_factor_alert": 5.0,
-                                "rms_alert": 0.6},
-                 "envelope_thresholds": {"env_bpfo_alert": 0.08, "env_bpfi_alert": 0.08,
-                                         "env_bsf_alert": 0.08},
+                 "source": "CWRU 公开数据集（case.edu；官方文件与第三方镜像逐字节一致）",
+                 "thresholds": {"kurtosis_alert": 3.3, "crest_factor_alert": 6.15,
+                                "rms_alert": 0.082},
+                 "envelope_thresholds": {"env_bpfo_alert": 0.054, "env_bpfi_alert": 0.040,
+                                         "env_bsf_alert": 0.054},
                  "defect_frequency_note": (
                      "包络谱在**缺陷频率**处的能量占比比峭度灵敏得多：env_bpfo 抬升 → 外圈、"
-                     "env_bpfi → 内圈、env_bsf → 滚珠。占比是相对量，不受增益影响。"),
+                     "env_bpfi → 内圈、env_bsf → 滚珠。占比是相对量，不受增益影响。"
+                     "**但单一频带会漏**：op_0（0 HP）的外圈 21 mil 窗口 env_bpfi 只有 0.016~0.019"
+                     "（低于任何合理阈值），env_bpfo 却到 0.25——判据要「任一缺陷频带 或 峭度」，"
+                     "不要只看一个带。"),
                  "defect_frequencies_hz": {"BPFO": 3.5848, "BPFI": 5.4152,
                                            "BSF": 4.7135, "FTF": 0.3983},
                  "note": "轴承早期缺陷常先表现为峭度/波峰因子抬升、RMS 后知后觉；"
-                         "但**峭度对早期微弱缺陷不敏感**，包络谱缺陷频率才是主判据。"}]
+                         "但**峭度对早期微弱缺陷不敏感**（本数据集里 0.007 mil 的滚珠/外圈"
+                         "窗口峭度只有 3 上下），包络谱缺陷频率更灵敏；两者是**互补**的。"
+                         "rms 是**带量纲**量，换录音增益就会漂，跨设备别照搬这个数。"}]
 
     def query_neighbor_events(self, device_sn, component, window_start, window_end):
         return []
