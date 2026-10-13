@@ -464,8 +464,10 @@ _RUN_LOG_MAX_DETAIL = 1000       # 失败上下文上限
 
 def _safe_step(ev: dict[str, Any]) -> dict[str, Any]:
     """把一步轨迹脱敏 + 裁剪成可落库的 JSON；超长**如实标注**截断，不假装完整。"""
-    blob = json.dumps({"step": ev.get("step"), "name": ev.get("name"),
-                       "args": ev.get("args"), "result": ev.get("result")},
+    blob = json.dumps({"type": ev.get("type"), "step": ev.get("step"),
+                       "name": ev.get("name"), "args": ev.get("args"),
+                       "result": ev.get("result"),
+                       "injection_hits": ev.get("injection_hits")},
                       ensure_ascii=False, default=str)
     blob = redact(blob, max_len=_RUN_LOG_MAX_STEP_CHARS)
     try:

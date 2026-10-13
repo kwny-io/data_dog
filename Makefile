@@ -93,6 +93,9 @@ bench:           ## P4-8 软实时基准（一键：起服务→loadgen→报告
 retention:       ## 数据保留清理（④）：默认 dry-run 只统计，FORCE=1 才真删
 	$(PY) -m data_dog.retention $(if $(FORCE),,--dry-run)
 
+redteam:         ## 提示注入红队（A3）：默认打真模型（需 key）；OFFLINE=1 只自检管道
+	$(PY) scripts/redteam_injection.py $(if $(OFFLINE),--offline) --runs $(or $(RUNS),3)
+
 perf-probe:      ## 写路径进程内性能探针（不压测；--only 单跑才有可比绝对值）
 	$(PY) tools/perf_probe.py --only http --n $(or $(N),300)
 

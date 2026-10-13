@@ -71,6 +71,9 @@ export interface TraceStep {
   name: InvestigationToolName;
   args: Record<string, unknown>;
   result: Record<string, unknown>;
+  /** 非空 = 这条工具返回里命中了提示注入特征（A3，core/injection.py）。
+   *  后端已带（进 trace 与运行日志）；控制台的徽标渲染尚未做，见 docs/prompt_injection.md。 */
+  injection_hits?: string[];
 }
 
 export type InvestigationToolName =
