@@ -136,6 +136,7 @@ loadgen 客户端实测能推 **997 req/s**，故客户端也不是瓶颈）。
 | 原始日志保留 | 默认 7 天（可配置，按租户合同） | §15；**不设"永久保存"默认**。**已落地**：`data_dog.retention`（`make retention`）按 `DD_RETENTION_RAW_DAYS` 有界分批清理 |
 | 规范化指标保留 | 90 天 | 时间序列。**已落地**：`DD_RETENTION_CANDIDATE_DAYS`（对派生候选表） |
 | 证据包保留 | 与对应告警同生命周期 | Evidence Store。告警台账与报告**默认不删**（`DD_RETENTION_ALERT_DAYS` 默认 0），要清须显式开启 |
+| 调查运行日志保留 | 默认 90 天 | 派生执行记录（ReAct 轨迹/失败上下文）。**已落地**：`DD_RETENTION_RUN_LOG_DAYS`（设 0 = 永久）。删了**不能复原**（重跑得到的轨迹与当时不同），但不跟 job 的 7 天——要够事故复盘。见 [run_log.md](run_log.md) |
 | 审计记录保留 | ≥ 1 年 | §17；**已落地**：`audit_log` 表 + `GET /v1/audit`（A1）。写入只发生在动作发生处；**清理默认关闭**（`DD_RETENTION_AUDIT_DAYS` 默认 0）——销毁审计记录本身是合规风险，要删必须由人显式开启；一旦删除，动作本身写 `retention.purge` 审计留痕 |
 
 > **保留策略的执行口径（④）**：清理是**破坏性**动作，所以默认值按"删了能不能复原"分档——

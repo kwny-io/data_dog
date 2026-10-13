@@ -23,7 +23,7 @@
 | 📊 | **带 ground truth 的规模化评估（双栏）** | **忠实 MuJoCo 数据集 10 万条**，分层抽跑真实 Agent：**确定性 provider** n=2000 → **准确率 0.818**（Wilson 95% CI 0.801–0.834）、normal 误报率 **0.064**；**真 LLM** n=500 → **0.708**（0.667–0.746）、normal 误报率 **0.72**（故障召回反而更高）。逐类召回一并如实报（**F4 偏置 0.43 为当前最低**）；误报根因（裁决口径把"证据不足"与"证据充分但正常"混为一谈）**已定位并改口径，效果标注为未实测**（本机 key 余额为零）；另有 7 个评估 case（含 2 个对抗性：提示注入 / 身份伪装） |
 | 🚚 | **能交付：服务 + 容器 + HTTPS** | FastAPI（liveness / readiness 分离）+ Dockerfile + compose（含 Caddy 自动申请 HTTPS）+ Makefile |
 
-**规模**：源码 149 个 Python 文件 / 26185 行，测试 91 个文件 / 20941 行；前端 `web/` 为 Next.js 15 控制台（60 个 TS/TSX 文件）；5 份正式事件 JSON Schema；29 个 `make` 命令（另有 `help`）。
+**规模**：源码 149 个 Python 文件 / 26504 行，测试 91 个文件 / 20944 行；前端 `web/` 为 Next.js 15 控制台（60 个 TS/TSX 文件）；5 份正式事件 JSON Schema；29 个 `make` 命令（另有 `help`）。
 
 ---
 
@@ -35,6 +35,16 @@
 - **保留策略真的在删（④）**。`docs/slo.md` §6 一直写着"原始日志 7 天 / 规范化指标 90 天 / 审计记录 ≥ 1 年"，但此前**没有任何清理路径**——声明只活在文档里（"保留 7 天"实际是"保留到磁盘满"）。现由 `data_dog.retention`（`make retention`，默认 dry-run）执行，**默认值按"删了能不能复原"分档**：可重灌的（原始日志 7 天、派生候选 90 天、**已终态**调查 job 7 天）默认执行；**告警台账与安全审计默认 0 = 不删**——销毁审计记录本身就是合规风险，要删必须由人显式开启。执行上有四条硬约束：**有界分批**（每批短事务，批数用满即停并如实标记 `capped`，剩下的下一轮继续，而不是"为了清完把库锁死"）；跨租户走 `session_scope(system=True)`（PG 上 RLS 会让不带系统标志的会话**静默删 0 行**）；保留判据用 **ingestion 时间**（`created_at`/`ts`/`finished_at`）不用事件时间（否则补传的历史时间戳会让该行永远"年轻"）；删除动作本身写 `retention.purge` 审计。**边界**：保留期是**全局配置**（不是每租户一份合同）、是**删除**而非**转冷归档**、**调度交给外部**（cron / K8s CronJob，未内置调度器）。
 - **合规要的两件事成对给了（⑥）**：**数据可携** `GET /v1/tenant/export`（本租户快照，每表有上限并**显式**回 `truncated`，绝不静默截断）与**被遗忘权** `POST /v1/tenant/purge`（**仅运维面**，且必须在 `X-Confirm-Tenant` 里**原样复述**租户 id，否则**一行都不删**——删除不可逆，"手滑删错租户"没有回滚）。两条硬细节：表清单**按元数据动态发现**（新增带 `tenant_id` 的表**自动**进入导出/删除范围；写死清单漏一张就是合规事故）；**删除证据记在保留租户 `-` 名下**而不是该租户名下（记在该租户名下会随它的 `audit_log` 一起被删掉，等于**没有证据证明删除发生过**）。**边界**：导出是**有界快照**不是全量流式；删除是**按表删行**不是加密擦除，**备份/只读副本上的残留不在范围**；导出限租户视野（运维要导出某租户需该租户密钥——有意不把"能读走"与"能删"绑在同一个令牌上）。
 - **有状态后端显式声明 RESP2，Redis 服务端要求 ≥2 而非 ≥6**。redis-py 8.x 默认走 RESP3（连接先发 `HELLO 3`，**Redis 6 才有该命令**），对着 Redis 5.x 直接抛 `unknown command 'HELLO'`——依赖解析、CI（redis:7）全绿，只在真实老环境炸。本模块只用 `WATCH/MULTI/EXEC/GET/SET/TTL/SCAN`（RESP2/RESP3 语义一致），故固定 `protocol=2`，可运行区间放宽到 Redis ≥ 2。真服务契约测试（`tests/test_state_redis_real.py`）与生产共用同一处构造口径，本地 Redis 5.0.14 实测 4/4 通过。
+- **调查运行日志可回看（技术人员排查用）**。此前 ReAct 轨迹只在**同步响应**里返回、异步 worker 
+直接丢弃，job 失败只留一个 `error_code` 枚举——"事后调出运行日志"做不到。现落库到 
+`investigation_run_log`（新表，启用 RLS；迁移 `e1f2a3b4c5d6`）：**同步/异步、成功/失败/取消都写**，
+异步与 job 终态**同事务**（"job 有终态 ⇔ 有日志"）。端点：`GET /v1/investigations/{id}/log`
+（同步，run_id = 报告 id）、`GET /v1/investigations/jobs/{job_id}/log`（异步，run_id = job_id）、
+`GET /v1/investigations/runs?candidate_id=&status=`（列表，只回摘要）。**告警通知**也带上 
+`investigation_id` + `run_log_path`（配 `DD_PUBLIC_BASE_URL` 时给全链），值班人收到告警能一键
+回到诊断过程。边界：轨迹**脱敏并裁剪**（单步 4 KB / 最多 40 步），是过程记录不是证据包；
+保留默认 90 天（`DD_RETENTION_RUN_LOG_DAYS`，0 = 永久）；不是分布式追踪。见 [docs/run_log.md](docs/run_log.md)。
+
 - **Windows 控制台的 UTF-8 兜底**：演示脚本与 CLI 输出含 `▸`/`✅` 等符号，Windows 简体中文控制台按 GBK 编码 stdout → `UnicodeEncodeError` 直接崩、整链走不完（CI 只跑 Linux，单测全绿也抓不到）。现由 `core/console.py` 在各入口（含 console_script 回调，`__main__` 路径覆盖不到它）统一重配 stdout/stderr 为 UTF-8（`errors="replace"`），`PYTHONIOENCODING=gbk` 下的子进程回归测试守住。
 - **支持水平扩展**：有状态算子已**外置**到可插拔 `StateStore`
 （`mutate(key, fn)` 原子 RMW 原语）。后端：`memory`（默认，单副本正确）/ `postgres`（`state_kv` 表，行锁）/ `redis`（WATCH/MULTI/EXEC，需 `.[redis]`）。候选归并（`SharedCandidateBuilder`）与限流桶都在共享后端，故多副本归并/限流一致。**边界**：默认后端随数据库类型自动选（PG→postgres，否则 memory）；用 `DD_STATE_BACKEND` 显式指定；`DD_RATE_BACKEND` 可单独把限流切到 Redis（限流成热路径瓶颈时）。**流式源的多副本消费已按源协调**（各源自带 `coordination()`）：Kafka 用消费者组；MQTT 配 `DD_MQTT_SHARE_GROUP` 走共享订阅 `$share/<group>/<topic>`；file 用应用层**租约选主**（`DD_STREAM_SHARE_OFFSET` 默认开）。**告警升级 sweeper 用同一把租约**（`state/lease.py`）——否则多副本会各自扫到同一条到期投递，台账虽按 `delivery_id` 去重，但**通知已经发出去了**，值班人会被重复打扰；`/readyz` 的 `checks.escalation.lease_holder` 一眼看出谁在负责升级。**剩下两条边界**：MQTT 未配共享订阅、且未配 `DD_REPLICA_MEMBERS` 时，每个副本收全量（**会重复处理**）；file 源本质仍是单消费者（租约只"选一个"，要并行得转 Kafka/MQTT）。
@@ -395,6 +405,8 @@ docker compose ps
 | `/v1/knowledge/documents` | POST / GET | 导入 / 列出用户厂商文档（切片落库） |
 | `/v1/knowledge/search` | GET | 词法检索用户文档切片 |
 | `/v1/knowledge/documents/{id}` | DELETE | 删除文档及其切片 |
+| `/v1/investigations/runs` | GET | **调查运行日志**列表（按 `candidate_id` / `status` 过滤，新的在前；只回摘要） |
+| `/v1/investigations/{id}/log` · `/v1/investigations/jobs/{job_id}/log` | GET | 调出**某次调查的运行日志**：ReAct 每步工具/入参/结果 + 用量耗时 + 失败上下文（同步按报告 id、异步按 job id） |
 | `/v1/audit` | GET | **安全审计**（A1）：认证拒绝 / 运维面访问 / 审计读取；带 `X-Tenant-Id` 看本租户，带 `X-Ops-Token` 看跨租户（含保留租户 `-` 下的系统事件） |
 
 身份**只认请求头** `X-Tenant-Id` / `X-Device-Sn`，正文与查询串里的身份字段一律被忽略（与 P2 网关失败语义一致）；缺租户头 → 401，跨租户读 → 404（不泄露存在性）。

@@ -58,6 +58,8 @@ RULES: tuple[Rule, ...] = (
     Rule("candidates", "created_at", "candidates", "规范化候选（派生）"),
     Rule("investigation_job", "finished_at", "investigation_job", "已终态调查 job",
          _TERMINAL_WHERE),
+    Rule("investigation_run_log", "created_at", "investigation_run_log",
+         "调查运行日志（ReAct 轨迹 / 失败上下文）"),
     Rule("reports", "created_at", "alerts", "调查报告（与告警同生命周期）"),
     Rule("alert_outbox", "created_at", "alerts", "投递 outbox"),
     Rule("alert_delivery", "created_at", "alerts", "投递台账"),

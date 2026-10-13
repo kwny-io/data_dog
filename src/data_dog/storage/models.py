@@ -275,6 +275,41 @@ class InvestigationJobRow(Base):
     finished_at: Mapped[float | None] = mapped_column(Float, index=True, nullable=True)
 
 
+class InvestigationRunLogRow(Base):
+    """一次调查的**运行日志**（ReAct 轨迹 + 失败上下文）——给"事后调出来排查"用。
+
+    为什么单独一张表，而不是往 reports 加一列
+    ----------------------------------------
+    - **失败的调查没有 report**，而"为什么失败"恰恰是最需要排查的那一类——把日志挂在
+      报告上等于"越需要日志的情况越没有日志"。
+    - 同步 / 异步两条路径都要落：异步 worker 此前**直接丢弃** trace（只在同步 HTTP 响应里
+      返回给当时守着的人），"事后调出"因此做不到。
+
+    `run_id` 的语义：异步调查 = `job_id`；同步调查 = `investigation_id`（报告 id）。
+    两种 id 在各自路径内唯一、跨租户可能重名 → `tenant_id` 进主键（与其余租户表一致）。
+
+    `steps` / `error_detail` 落库前**已脱敏并按大小裁剪**（见 service/runtime.py 的
+    `_run_log_payload`）：运行日志要能给人看，但不能把密钥/明文设备号带出去。
+    保留策略见 `retention.py`（默认 90 天；`DD_RETENTION_RUN_LOG_DAYS=0` 即永久保留）。
+    """
+    __tablename__ = "investigation_run_log"
+
+    tenant_id: Mapped[str] = mapped_column(String(80), primary_key=True, index=True)
+    run_id: Mapped[str] = mapped_column(String(120), primary_key=True)
+    candidate_id: Mapped[str] = mapped_column(String(80), index=True, default="")
+    kind: Mapped[str] = mapped_column(String(16), default="sync")            # sync | async
+    status: Mapped[str] = mapped_column(String(20), index=True, default="")  # succeeded/failed/cancelled
+    report_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    error_detail: Mapped[str] = mapped_column(Text, default="")
+    model: Mapped[str] = mapped_column(String(120), default="")
+    step_count: Mapped[int] = mapped_column(Integer, default=0)
+    duration_ms: Mapped[float] = mapped_column(Float, default=0.0)
+    steps: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    usage: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[float] = mapped_column(Float, index=True, default=_now)
+
+
 class OperatorRegistryRow(Base):
     """算子注册表（P4-2 控制面）：每个 (operator_id, version) 一行。
 

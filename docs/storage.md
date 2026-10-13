@@ -50,6 +50,7 @@ pytest tests/test_storage.py -q     # 13 项
 | `knowledge_documents` | 用户导入的厂商文档元数据 | A7 | `(tenant_id, document_id)` |
 | `knowledge_chunks` | 文档切片文本 | A7 | `(tenant_id, chunk_id)` |
 | `audit_log` | **安全审计**：谁在何时对什么做了什么、结果如何（只增不改） | A1 | `(tenant_id, audit_id)` |
+| `investigation_run_log` | **调查运行日志**：ReAct 每步轨迹 + 用量耗时 + 失败上下文（技术员事后排查；见 [run_log.md](run_log.md)） | 调查执行 | `(tenant_id, run_id)` |
 
 **多租户**：`tenant_id` 进复合主键——确定性 ID（如 `cand_<hash(device_sn|...)>`）会让两个租户同 `device_sn` 撞同一 PK，`_upsert` 就会静默覆盖他人数据。把租户纳入主键是**正确性要求**，不是可选的过滤列。
 

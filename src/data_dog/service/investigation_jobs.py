@@ -250,6 +250,16 @@ class JobRunner:
 
         status = str(result.get("status", "failed"))
         report = result.get("report")
+        # 运行日志与 job 终态**同事务**：run_id 就用 job_id（技术员手上的句柄），
+        # 失败的 job 也写——"为什么失败"正是要事后调的。执行侧没带日志（比如它自己抛了
+        # 异常）时在这里补一条骨架，保证"job 有终态 ⇔ 有运行日志"不被静默破坏。
+        log = result.get("run_log")
+        if not isinstance(log, dict):
+            log = {"steps": [], "step_count": 0, "usage": {}, "duration_ms": 0.0,
+                   "model": "", "candidate_id": str(result.get("candidate_id", ""))}
+        log = {**log, "run_id": job_id, "kind": "async", "status": status,
+               "report_id": result.get("report_id"),
+               "error_code": result.get("error_code")}
         try:
             with session_scope(tenant_id=tenant_id) as s:
                 applied = repo.finish_job(
@@ -258,6 +268,8 @@ class JobRunner:
                     error_code=result.get("error_code"))
                 if applied and status == "succeeded" and report is not None:
                     repo.save_report(s, report, tenant_id=tenant_id)
+                if applied:
+                    repo.save_run_log(s, log, tenant_id=tenant_id)
         except Exception as e:                        # noqa: BLE001
             _log.error("job 终态与报告同事务落库失败（已回滚）",
                        extra={"job_id": job_id,

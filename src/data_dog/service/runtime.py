@@ -1,8 +1,10 @@
 """进程内共享运行时状态与助手（ServiceState / 流 / 作业 / 检查点 / 升级 / 调查执行）。端点模块从这里取共享状态，避免 routes→app 的循环依赖。"""
 from __future__ import annotations
 
+import json
 import threading
 import time
+import uuid
 from typing import Any
 
 from fastapi import HTTPException, Response
@@ -219,6 +221,7 @@ def _run_investigation_job(tenant_id: str, candidate_id: str,
     report_id: str | None = None
     error_code: str | None = "execution_failed"
     report: Any = None
+    run_log: Any = None
     try:
         # persist=False：报告不在这里落库（否则与 job 终态是两个事务），
         # 交给 JobRunner._finish 与终态同事务写。
@@ -230,6 +233,7 @@ def _run_investigation_job(tenant_id: str, candidate_id: str,
         report_id = outcome.get("report_id")
         error_code = outcome.get("error_code")
         report = outcome.get("report")
+        run_log = outcome.get("run_log")
     except Exception as e:                            # noqa: BLE001
         _log.error("异步调查执行异常", extra={
             "candidate_id": candidate_id,
@@ -239,7 +243,7 @@ def _run_investigation_job(tenant_id: str, candidate_id: str,
         metrics.investigation_job_duration_seconds.observe(time.monotonic() - started)
         metrics.investigation_jobs_total.labels(status=status).inc()
     return {"status": status, "report_id": report_id, "error_code": error_code,
-            "report": report}
+            "report": report, "candidate_id": candidate_id, "run_log": run_log}
 def _db_reachable() -> dict[str, Any]:
     """探测数据库连通性：直接建立一条连接（拿到即通，不做任何查询）。"""
     try:
@@ -307,6 +311,26 @@ def _job_public(job: dict[str, Any]) -> dict[str, Any]:
         "started_at": job.get("started_at"),
         "finished_at": job.get("finished_at"),
     }
+def _run_log_public(row: dict[str, Any], *, with_steps: bool = True) -> dict[str, Any]:
+    """运行日志的对外视图。**列表页不带 steps 正文**（一次 40 步轨迹不该塞进列表响应），
+    详情页带；两者共用同一份字段口径，避免"列表和详情说的不是一回事"。"""
+    out: dict[str, Any] = {
+        "run_id": row.get("run_id"),
+        "candidate_id": row.get("candidate_id"),
+        "kind": row.get("kind"),
+        "status": row.get("status"),
+        "report_id": row.get("report_id"),
+        "error_code": row.get("error_code"),
+        "error_detail": row.get("error_detail") or "",
+        "model": row.get("model") or "",
+        "step_count": row.get("step_count", 0),
+        "duration_ms": row.get("duration_ms", 0.0),
+        "usage": row.get("usage") or {},
+        "created_at": row.get("created_at"),
+    }
+    if with_steps:
+        out["steps"] = row.get("steps") or []
+    return out
 def _submit_async_investigation(tenant: str, candidate_id: str,
                                 response: Response) -> dict[str, Any]:
     """提交异步调查：校验候选存在 → 落 pending job → 入共享队列 → 202 返回句柄。
@@ -384,6 +408,65 @@ def _prior_report_items(session, tenant: str, *, device_sn: str,
     return out[:limit]
 
 
+# ---------------------------------------------------------------- 运行日志（回看用）
+# 目的：技术人员**事后**能调出"这次调查到底做了什么、为什么失败"。
+# 三条纪律：① 失败也要落（那才是最需要看的）；② 落库前脱敏 + 裁剪（日志不是证据搬运工）；
+# ③ 落库失败**绝不能**把调查结果一起毁掉（只告警）。
+_RUN_LOG_MAX_STEPS = 40          # 轨迹最多留多少步（AgentLoop 本身有 max_steps 上限）
+_RUN_LOG_MAX_STEP_CHARS = 4000   # 单步（入参 + 结果）序列化后的字符上限
+_RUN_LOG_MAX_DETAIL = 1000       # 失败上下文上限
+
+
+def _safe_step(ev: dict[str, Any]) -> dict[str, Any]:
+    """把一步轨迹脱敏 + 裁剪成可落库的 JSON；超长**如实标注**截断，不假装完整。"""
+    blob = json.dumps({"step": ev.get("step"), "name": ev.get("name"),
+                       "args": ev.get("args"), "result": ev.get("result")},
+                      ensure_ascii=False, default=str)
+    blob = redact(blob, max_len=_RUN_LOG_MAX_STEP_CHARS)
+    try:
+        out = json.loads(blob)
+    except Exception:                                 # noqa: BLE001
+        return {"step": ev.get("step"), "name": str(ev.get("name", "")), "_raw": blob}
+    if isinstance(out, dict) and len(json.dumps(out, ensure_ascii=False)) <= 20:
+        # redact 触发过截断（原 JSON 被砍成短串）→ 无从解析，退回原文
+        return {"step": ev.get("step"), "name": str(ev.get("name", "")), "_raw": blob}
+    return out
+
+
+def _run_log_payload(*, run_id: str, candidate_id: str, kind: str, status: str,
+                     trace: list[dict[str, Any]], report_id: str | None = None,
+                     error_code: str | None = None, error_detail: str = "",
+                     usage: dict[str, Any] | None = None, model: str = "",
+                     duration_ms: float = 0.0) -> dict[str, Any]:
+    """构造一条运行日志。落库与响应**共用同一份口径**，避免两处各写一遍而漂移。"""
+    steps = [_safe_step(ev) for ev in trace[:_RUN_LOG_MAX_STEPS]]
+    return {
+        "run_id": run_id,
+        "candidate_id": candidate_id,
+        "kind": kind,
+        "status": status,
+        "report_id": report_id,
+        "error_code": error_code,
+        "error_detail": redact(error_detail, max_len=_RUN_LOG_MAX_DETAIL) if error_detail else "",
+        "model": model,
+        "step_count": len(trace),
+        "duration_ms": round(float(duration_ms), 1),
+        "steps": steps,
+        "usage": usage or {},
+    }
+
+
+def _persist_run_log(tenant: str, log: dict[str, Any]) -> None:
+    """同步路径自己落库：**失败只告警不抛出**——日志写不进去不该毁掉调查结果。"""
+    try:
+        with session_scope(tenant_id=tenant) as s:
+            repo.save_run_log(s, log, tenant_id=tenant)
+    except Exception as e:                            # noqa: BLE001
+        _log.warning("运行日志落库失败",
+                     extra={"run_id": log.get("run_id"),
+                            "error": redact(f"{type(e).__name__}: {e}")})
+
+
 def _execute_investigation(tenant: str, candidate_id: str, *,
                            should_cancel=None, persist: bool = True) -> dict[str, Any]:
     """一次调查的**唯一实现**（同步端点与异步 worker 共用）。
@@ -397,13 +480,38 @@ def _execute_investigation(tenant: str, candidate_id: str, *,
 
     失败/取消**不抛异常**（除取消用哨兵外），全部收敛成返回值——这样 worker 不必
     区分异常种类，同步端点也能稳定映射 HTTP 状态。
+
+    **每一个出口都挂运行日志**（见 _run_log_payload）：成功挂着，失败/取消照样挂——
+    "为什么没查出结果"恰恰是最需要事后看的。同步路径当场落库；异步路径把日志塞进返回值，
+    由 JobRunner._finish 与 job 终态**同事务**写（"job 有终态 ⇔ 有运行日志"）。
     """
+    trace: list[dict[str, Any]] = []
+    started = time.monotonic()
+    attempt_run_id = f"run_{uuid.uuid4().hex[:16]}"
+
+    def _with_log(out: dict[str, Any], *, status: str, run_id: str | None = None,
+                  report_id: str | None = None, error_code: str | None = None,
+                  error_detail: str = "", usage: dict[str, Any] | None = None
+                  ) -> dict[str, Any]:
+        log = _run_log_payload(
+            run_id=run_id or attempt_run_id, candidate_id=candidate_id,
+            kind="sync" if persist else "async", status=status, trace=trace,
+            report_id=report_id, error_code=error_code, error_detail=error_detail,
+            usage=usage, model=str(settings.llm_model() or ""),
+            duration_ms=(time.monotonic() - started) * 1000.0)
+        out["run_id"] = log["run_id"]
+        out["run_log"] = log
+        if persist:
+            _persist_run_log(tenant, log)
+        return out
+
     with session_scope() as s:
         row = repo.get_candidate(s, candidate_id, tenant_id=tenant)
         if row is None:
             metrics.investigations_total.labels(result="not_found").inc()
-            return {"ok": False, "http_status": 404, "detail": "候选不存在",
-                    "status": "failed", "error_code": "not_found"}
+            return _with_log({"ok": False, "http_status": 404, "detail": "候选不存在",
+                              "status": "failed", "error_code": "not_found"},
+                             status="failed", error_code="not_found")
         tel_rows = repo.list_telemetry(s, tenant_id=tenant,
                                        device_sn=row["device_sn"])
         # 跨调查记忆（先验）：该设备/部件的既往报告（排除本次候选自己）
@@ -412,14 +520,15 @@ def _execute_investigation(tenant: str, candidate_id: str, *,
             component_ref=row["component_ref"], exclude_candidate=candidate_id)
 
     cand = _row_to_candidate(row)
-    trace: list[dict[str, Any]] = []
 
     try:
         provider = _build_investigation_provider(should_cancel=should_cancel)
     except HTTPException as e:
         metrics.investigations_total.labels(result="failed").inc()
-        return {"ok": False, "http_status": e.status_code, "detail": e.detail,
-                "status": "failed", "error_code": "unavailable"}
+        return _with_log({"ok": False, "http_status": e.status_code, "detail": e.detail,
+                          "status": "failed", "error_code": "unavailable"},
+                         status="failed", error_code="unavailable",
+                         error_detail=str(e.detail))
 
     try:
         bridge = RepoEvidenceBridge(tel_rows, device_sn=cand.device_sn,
@@ -441,18 +550,24 @@ def _execute_investigation(tenant: str, candidate_id: str, *,
     except _InvestigationCancelled:
         # 协作式取消：不产出报告（要的就是"停，且不留半成品结论"）
         metrics.investigations_total.labels(result="cancelled").inc()
-        return {"ok": False, "http_status": 409, "detail": "调查已被取消",
-                "status": "cancelled", "error_code": "cancelled"}
+        return _with_log({"ok": False, "http_status": 409, "detail": "调查已被取消",
+                          "status": "cancelled", "error_code": "cancelled"},
+                         status="cancelled", error_code="cancelled")
     except LLMCallError as e:
         # 超时/不可用 → 统一错误码（504/503），失败关闭，不假装查过证据
         metrics.investigations_total.labels(result="timeout").inc()
-        return {"ok": False, "http_status": http_status_for(e.code), "detail": e.detail,
-                "status": "failed", "error_code": e.code.value}
+        return _with_log({"ok": False, "http_status": http_status_for(e.code),
+                          "detail": e.detail, "status": "failed",
+                          "error_code": e.code.value},
+                         status="failed", error_code=e.code.value,
+                         error_detail=str(e.detail))
     except Exception as e:                          # noqa: BLE001
         metrics.investigations_total.labels(result="failed").inc()
-        return {"ok": False, "http_status": 500,
-                "detail": f"调查执行失败：{type(e).__name__}",
-                "status": "failed", "error_code": "execution_failed"}
+        return _with_log({"ok": False, "http_status": 500,
+                          "detail": f"调查执行失败：{type(e).__name__}",
+                          "status": "failed", "error_code": "execution_failed"},
+                         status="failed", error_code="execution_failed",
+                         error_detail=f"{type(e).__name__}: {e}")
 
     metrics.investigations_total.labels(result="ok").inc()
 
@@ -534,7 +649,15 @@ def _execute_investigation(tenant: str, candidate_id: str, *,
     if not persist:
         # 异步 worker：报告交给它，与 job 终态同事务落库（见 investigation_jobs._finish）
         out["report"] = report
-    return out
+    # 同步成功：run_id 直接用 investigation_id——技术员手上是报告 id，就能直接取日志。
+    # 同步失败没有报告，run_id 是本次尝试的 run_xxx，靠 GET /v1/investigations/runs 发现。
+    result = _with_log(out, status="succeeded",
+                       run_id=report.investigation_id if persist else None,
+                       report_id=report.investigation_id, usage=usage)
+    # 同步端点只回 response（out 是给 worker 看的），故把 run_id 也放进 response，
+    # 调用方拿到报告 id 的**同时**就知道运行日志去哪取。
+    response["run_id"] = result["run_id"]
+    return result
 def _make_job_id(tenant_id: str, candidate_id: str) -> str:
     from .investigation_jobs import make_job_id
     return make_job_id(tenant_id, candidate_id)

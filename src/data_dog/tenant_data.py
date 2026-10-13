@@ -40,6 +40,7 @@ _PURGE_ORDER: tuple[str, ...] = (
     "candidates",
     "telemetry_events",
     "investigation_job",
+    "investigation_run_log",
     "knowledge_chunks",
     "knowledge_documents",
     "change_records",

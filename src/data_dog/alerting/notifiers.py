@@ -71,12 +71,21 @@ def build_notification(alert: dict[str, Any]) -> Notification:
 
     **不外发** device_ref 之外的敏感项；正文是人话，不含沙箱路径/堆栈/密钥。
     """
+    from .. import settings
+
     event_id = str(alert.get("event_id", ""))
     severity = str(alert.get("severity", "warning"))
     summary = str(alert.get("summary", "")) or "(无摘要)"
     component = str(alert.get("component_ref", ""))
     device_ref = str(alert.get("device_ref", ""))
     actions = list(alert.get("recommended_actions", []) or [])
+    # 运行日志引用：值班人收到告警后要能**回到那次诊断**（它查了什么、凭什么这么判）。
+    # 没有 investigation_id（老台账/未走调查）→ 两个字段都留空，不编一个假链接。
+    investigation_id = str(alert.get("investigation_id", "") or "")
+    run_log_path = (f"/v1/investigations/{investigation_id}/log"
+                    if investigation_id else "")
+    base = settings.public_base_url()
+    run_log_url = f"{base}{run_log_path}" if (base and run_log_path) else ""
 
     subject = f"[{severity.upper()}] {component} 故障告警"
     lines = [
@@ -86,6 +95,12 @@ def build_notification(alert: dict[str, Any]) -> Notification:
         f"设备: {device_ref}",
         f"摘要: {summary}",
     ]
+    if investigation_id:
+        lines.append(f"调查: {investigation_id}")
+    if run_log_url:
+        lines.append(f"运行日志: {run_log_url}")
+    elif run_log_path:
+        lines.append(f"运行日志(接口路径): {run_log_path}")
     if actions:
         lines.append("建议动作:")
         lines += [f"  - {a}" for a in actions]
@@ -97,6 +112,9 @@ def build_notification(alert: dict[str, Any]) -> Notification:
         "device_ref": device_ref,
         "summary": summary,
         "recommended_actions": actions,
+        "investigation_id": investigation_id,
+        "run_log_path": run_log_path,
+        "run_log_url": run_log_url,
         "source": "data_dog",
     }
     return Notification(event_id=event_id, subject=subject, body=body,

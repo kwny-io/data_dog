@@ -393,9 +393,23 @@ def retention_days() -> dict[str, int]:
         "telemetry_events": max(0, _get_int("DD_RETENTION_RAW_DAYS", default=7)),
         "candidates": max(0, _get_int("DD_RETENTION_CANDIDATE_DAYS", default=90)),
         "investigation_job": max(0, _get_int("DD_RETENTION_JOB_DAYS", default=7)),
+        # 运行日志是**派生的执行记录**（不是业务台账），但删了**不能复原**——重跑一次
+        # 得到的轨迹不会与当时相同。故不跟 job 的 7 天，而与"派生候选"同档 90 天，
+        # 覆盖事故复盘的常见窗口；要永久保留就设 0（0 = 关闭该表的清理）。
+        "investigation_run_log": max(0, _get_int("DD_RETENTION_RUN_LOG_DAYS", default=90)),
         "alerts": max(0, _get_int("DD_RETENTION_ALERT_DAYS", default=0)),
         "audit_log": max(0, _get_int("DD_RETENTION_AUDIT_DAYS", default=0)),
     }
+
+
+def public_base_url() -> str:
+    """对外可访问的服务基址（`DD_PUBLIC_BASE_URL`，如 https://dog.example.com）。
+
+    唯一用途：把"这次调查的运行日志在哪"写进**告警通知**，让值班人收到告警就能回到
+    诊断过程（见 alerting/notifiers.build_notification）。留空则通知里只给**相对路径**
+    ——不猜部署，也不把内网地址写进外发消息。
+    """
+    return _get("DD_PUBLIC_BASE_URL").rstrip("/")
 
 
 def cors_origins() -> list[str]:

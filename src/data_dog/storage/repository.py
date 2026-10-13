@@ -739,6 +739,58 @@ def finish_job(session: Session, job_id: str, *, tenant_id: str,
     return bool(res)
 
 
+# ---------------------------------------------------------------- 调查运行日志
+
+def save_run_log(session: Session, log: dict[str, Any], *, tenant_id: str) -> None:
+    """落一次调查的运行日志（按 (tenant_id, run_id) 幂等 upsert）。
+
+    两条路径共用：同步端点自己写；异步 worker 在 **job 终态同事务**里写（见
+    service/investigation_jobs._finish）——"job 有终态 ⇔ 有日志"才成立。
+    """
+    rid = str(log["run_id"])
+    _upsert(session, M.InvestigationRunLogRow, (tenant_id, rid),
+            {"tenant_id": tenant_id, "run_id": rid},
+            lambda row: _apply_run_log(row, log))
+
+
+def _apply_run_log(row: Any, d: dict[str, Any]) -> None:
+    row.candidate_id = str(d.get("candidate_id", ""))
+    row.kind = str(d.get("kind", "sync"))
+    row.status = str(d.get("status", ""))
+    row.report_id = d.get("report_id")
+    row.error_code = d.get("error_code")
+    row.error_detail = str(d.get("error_detail", ""))
+    row.model = str(d.get("model", ""))
+    row.step_count = int(d.get("step_count", 0))
+    row.duration_ms = float(d.get("duration_ms", 0.0))
+    row.steps = list(d.get("steps", []) or [])
+    row.usage = dict(d.get("usage", {}) or {})
+
+
+def get_run_log(session: Session, run_id: str, *,
+                tenant_id: str) -> dict[str, Any] | None:
+    """取一条运行日志。跨租户（或不存在）→ None（路由返回 404，不泄露存在性）。"""
+    r = session.get(M.InvestigationRunLogRow, (tenant_id, run_id))
+    return _row_dict(r) if r else None
+
+
+def list_run_logs(session: Session, *, tenant_id: str,
+                  candidate_id: str | None = None,
+                  status: str | None = None,
+                  limit: int | None = None,
+                  offset: int = 0) -> list[dict[str, Any]]:
+    """按候选/状态翻运行日志，**新的在前**（排查时先看最近那次）。"""
+    q = session.query(M.InvestigationRunLogRow).filter(
+        M.InvestigationRunLogRow.tenant_id == tenant_id)
+    if candidate_id is not None:
+        q = q.filter(M.InvestigationRunLogRow.candidate_id == candidate_id)
+    if status is not None:
+        q = q.filter(M.InvestigationRunLogRow.status == status)
+    q = q.order_by(M.InvestigationRunLogRow.created_at.desc(),
+                   M.InvestigationRunLogRow.run_id)
+    return _page(q, limit, offset)
+
+
 def list_stale_jobs(session: Session, *, status: str, older_than_s: float,
                     now: float | None = None,
                     limit: int | None = None) -> list[dict[str, Any]]:
