@@ -42,6 +42,19 @@ def _join_lingering_workers(timeout_s: float = 5.0) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _sync_investigations_by_default(monkeypatch):
+    """测试默认走**同步**调查。
+
+    生产默认已翻成异步（B2）：每个应用实例都会拉起 worker 线程池 + 队列轮询线程。若测试也
+    跟着起，既慢（每个 TestClient 一批后台线程）又容易把时序问题藏进"碰巧成功"。所以测试
+    显式钉成同步；要测异步的用例自己 `setenv("DD_INVESTIGATE_ASYNC", "1")`（它的 fixture 在
+    本 autouse 夹具**之后**运行，会覆盖这里）。要测"未设变量时的**默认值**"的用例 `delenv`
+    ——那也是显式声明，不会被这条夹具掩盖。
+    """
+    monkeypatch.setenv("DD_INVESTIGATE_ASYNC", "0")
+
+
+@pytest.fixture(autouse=True)
 def _isolate_globals():
     """测试前后各清一次引擎与共享状态后端，并排干遗留 worker 线程。"""
     reset_engine()

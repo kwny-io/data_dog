@@ -124,9 +124,8 @@ GET  /v1/investigations/{id}       查报告（**保持现状**，id 既可是 r
 已实现，`361 passed` 全绿（新增 `tests/test_async_investigation.py` 13 项）。落地时相对
 本设计的三处调整，如实记录：
 
-- **默认仍是同步**（`DD_INVESTIGATE_ASYNC` 默认 0）。理由：既有前端按"同步长任务"
-  实现，无预警地翻成 202 会直接崩。异步是**开启项**，前端改用轮询后再打开。同步/异步
-  **共用同一段执行逻辑**（`_execute_investigation`），不是两套实现。
+- **默认已是异步**（`DD_INVESTIGATE_ASYNC` 2026-10-14 起默认 1，架构评审 B2）。同步/异步
+  **共用同一段执行逻辑**（`_execute_investigation`），不是两套实现；`?sync=1` 或置 0 退回同步。
   **2026-10-14 复核（架构评审 B2）**：
   ① **后端已补齐**：`GET /v1/investigations/jobs/{id}/result` 成功后就地给 `report` +
   `verdict`/`verdict_detail` + `trace` + `usage`（与同步响应同形）；`alerting` 刻意不回
@@ -134,8 +133,10 @@ GET  /v1/investigations/{id}       查报告（**保持现状**，id 既可是 r
   ② **控制台已改造**：`api.investigate` 现在**两种模式都认**——POST 回同步结果就直接用，
   回 `202 {job_id}` 就轮询 `.../jobs/{id}` 到终态再取 `.../result`；取消会停轮询并**顺带**
   请后端取消 job。所以"前端按同步长任务实现"不再是阻塞点。
-  ③ **仍未翻默认**：翻开会给**每个应用实例**加一个 worker 线程池 + 队列轮询线程
-  （`create_app` 按 `investigate_async()` 决定是否起），要在部署形态上先想清楚。
+  ③ **默认已翻**（本项完成）：代价是每个应用实例多一个 worker 线程池 + 队列轮询线程
+  （`create_app` 按 `investigate_async()` 决定是否起）；纯 API/单副本实例置 0 退回同步。
+  测试由 `tests/conftest.py` 的 autouse 夹具统一钉成同步（测异步的用例显式置 1，测默认值的
+  用例 delenv）——否则每个 TestClient 都会拉起一批后台线程。
   完整边界见 [`docs/architecture_review_ab.md`](../../architecture_review_ab.md)。
 - **多副本不重复靠两层**：① 共享待办队列（`state_kv` 全局 key，多副本 `mutate` 原子
   取件）；② 条件领取（`UPDATE ... WHERE status='pending'`，数据库保证只有一个 rowcount=1）。
@@ -154,7 +155,8 @@ GET  /v1/investigations/{id}       查报告（**保持现状**，id 既可是 r
   跑一次，默认 60s）——`pending` 过旧 → **重新入队**（幂等：条件领取保证只执行一次）；
   `running` 过旧 → 标 `failed(abandoned)`，**不自动重跑**（"慢但还活着"与"已死"
   无法区分，重跑有并发执行同一 job 的风险）。阈值见 `DD_INVESTIGATE_STALE_PENDING_S`
-  （默认 300s）/`DD_INVESTIGATE_STALE_RUNNING_S`（默认 900s，须远大于最坏单次耗时）。
+  （默认 300s，下限 1s）/`DD_INVESTIGATE_STALE_RUNNING_S`（默认 900s，**下限 10s**，调小无效——
+防"慢但还活着"被误判；须远大于最坏单次耗时）。
 - **跨租户扫描必须走 `session_scope(system=True)`**（迁移 `b7c8d9e0f1a2`）：
   否则 RLS 下**零行可见**——恢复扫描与升级扫描会一起静默失效（实测过，见 `docs/storage.md`）。
 

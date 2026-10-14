@@ -45,7 +45,7 @@ def _client(tmp_path, monkeypatch, *, async_mode: bool):
         monkeypatch.setenv("DD_INVESTIGATE_WORKERS", "1")
         monkeypatch.setenv("DD_INVESTIGATE_QUEUE_POLL_MS", "20")
     else:
-        monkeypatch.delenv("DD_INVESTIGATE_ASYNC", raising=False)
+        monkeypatch.setenv("DD_INVESTIGATE_ASYNC", "0")
     reset_engine()
     init_db(url)
     from data_dog.service.app import create_app

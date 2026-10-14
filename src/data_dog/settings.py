@@ -874,11 +874,16 @@ def investigate_idempotency_ttl_s() -> float:
 def investigate_async() -> bool:
     """`POST /v1/investigations` 默认是否异步（提交→202 job 句柄）。
 
-    默认 **False**：保持既有同步语义（前端按同步长任务处理）。置 1 后默认走异步，
-    调用方仍可用 `?sync=1` 单独退回同步。异步化是把 worker 从长 LLM 调用里解放出来
-    的关键；前端改用轮询后即可默认打开（见 docs/p4/gaps/01_async_investigation.md）。
+    默认 **True**（2026-10-14 架构评审 B2 翻转）：异步化是把 HTTP worker 从长 LLM 调用里
+    解放出来的关键，而控制台已改造成**两种模式都认**（同步结果直接用 / 202 就轮询 job 再取
+    `.../result`），所以默认异步不再破坏前端。调用方仍可用 `?sync=1` 单独退回同步。
+
+    **代价（如实说明）**：默认异步意味着**每个应用实例**启动时都会拉起一个 worker 线程池 +
+    队列轮询线程（`service/runtime.py`）。单副本或纯 API 实例不需要时，置
+    `DD_INVESTIGATE_ASYNC=0` 退回同步。多副本还必须配 `DD_STATE_BACKEND=postgres`——memory
+    后端的队列只活在进程内（`data-dog config check` 会对"异步 + memory"报警告）。
     """
-    return _get_bool("DD_INVESTIGATE_ASYNC", default=False)
+    return _get_bool("DD_INVESTIGATE_ASYNC", default=True)
 
 
 def run_log_full_steps() -> str:

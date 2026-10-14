@@ -180,14 +180,13 @@ eval_feedback.py  回灌：人工标签 vs Agent 处置 → 一致率 / 误报�
   **租约选主**（`DD_STREAM_SHARE_OFFSET` 默认开）——同一时刻只有一个副本读该文件，
   持有者崩溃后由共享偏移续读。**边界**：file 源本质仍是**单消费者**（租约只"选一个"，
   要并行须转 Kafka/MQTT）；租约依赖各副本时钟大致同步（须跑 NTP）；租约接管有 ≤TTL 窗口。
-- **调查端点已可异步，默认仍同步**。`DD_INVESTIGATE_ASYNC=1` 时 `POST /v1/investigations`
+- **调查端点默认异步（2026-10-14，架构评审 B2）**。`POST /v1/investigations`
   提交即返回 `202 {job_id}`，真实 LLM 调查交给进程内 worker 池（`DD_INVESTIGATE_WORKERS`），
   worker 立即释放；`GET /v1/investigations/jobs/{job_id}` 轮询、`.../cancel` 取消、
   `.../result` 在成功后就地取齐 report/verdict/trace/usage（与同步响应同形，B2 第一步）。
   多副本不重复执行靠**两层**：共享待办队列 + 数据库条件领取（`UPDATE ... WHERE status='pending'`）。
-  **默认关**（`=0`）：控制台已能两种模式都认（同步直接用 / 202 就轮询 `.../result`），
-  翻默认的顾虑转为**进程级代价**——每个应用实例都会起 worker 线程池 + 队列轮询线程；
-  `?sync=1` 强制走同步。
+  **默认开**（`=1`）：控制台两种模式都认（同步直接用 / 202 就轮询 `.../result`），`?sync=1` 走同步。
+  **代价**：每个应用实例都会起 worker 线程池 + 队列轮询线程，纯 API / 单副本实例可置 `=0` 退回同步。
   **边界**：进程内线程池**不是**分布式调度器；取消是协作式（等当前步返回）；job 表保留策略**已落地**（④：`DD_RETENTION_JOB_DAYS` 默认 7 天，只清已终态）。
 - **P4 大工程八项已落地**（2026-09-29 重估后）。沙箱算子运行时、控制面（Registry/Canary/回滚/签名）、K8s/Helm 编排、车队级分片、跨地域多活（应用层）、退化趋势预测、通知/值班/升级 SLA、软实时基准——均见 `docs/p4/`，各带诚实边界（硬实时 <1ms 仍为非目标；多活 RPO>0；沙箱 Windows 无 seccomp；分片再平衡双读未实现）。**当年标"不做"是因技术未到位，非真不该做**。
 

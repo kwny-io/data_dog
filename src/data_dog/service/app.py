@@ -86,7 +86,7 @@ async def _lifespan(app: FastAPI):
         _start_job_runner_if_needed()
     except Exception as e:                           # noqa: BLE001
         # 异步调查 worker 池起不来：不影响已启动的 HTTP 服务（同步路径仍可用），
-        # 但配了 DD_INVESTIGATE_ASYNC 的提交会 503——故记 error 级。
+        # 但异步提交（默认开；DD_INVESTIGATE_ASYNC=0 退回同步）会 503——故记 error 级。
         _log.error("异步调查 worker 池启动失败",
                    extra={"error": f"{type(e).__name__}: {e}"})
     try:

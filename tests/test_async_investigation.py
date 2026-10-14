@@ -2,7 +2,7 @@
 
 覆盖：提交即返回 202、状态流转 pending→running→succeeded、报告可读、
 失败落终态不 5xx、取消、多 worker 不重复执行（条件领取的原子性）、
-租户隔离、以及**同步路径零回归**（DD_INVESTIGATE_ASYNC 未开时行为不变）。
+租户隔离、**默认翻异步**、以及**同步路径零回归**（`DD_INVESTIGATE_ASYNC=0` 时行为不变）。
 
 用临时文件 SQLite，离线确定性 provider（不调真实 LLM）。
 """
@@ -304,7 +304,7 @@ def test_sync_path_unchanged_when_async_off(tmp_path, monkeypatch):
     url = f"sqlite:///{(tmp_path / 'sync.db').as_posix()}"
     monkeypatch.setenv("DD_DATABASE_URL", url)
     monkeypatch.setenv("DD_INVESTIGATE_OFFLINE", "1")
-    monkeypatch.delenv("DD_INVESTIGATE_ASYNC", raising=False)
+    monkeypatch.setenv("DD_INVESTIGATE_ASYNC", "0")
     reset_engine()
     init_db(url)
 
@@ -376,3 +376,38 @@ def test_async_result_payload_is_none_unless_succeeded():
             "status": status, "report_id": "r", "job_id": "j",
             "candidate_id": "c"}) is None
     print("PASS test_async_result_payload_is_none_unless_succeeded")
+
+
+# ---------------------------------------------------------------- 默认值（B2 第 3 步）
+
+def test_default_is_async_when_env_absent(tmp_path, monkeypatch):
+    """默认翻异步：**未设** `DD_INVESTIGATE_ASYNC` 时 POST 应回 202 + job 句柄。
+
+    这条**故意 delenv**：conftest 为了测试速度默认把调查钉成同步，所以"生产默认值"必须自己
+    把变量删掉才测得到。若默认被回退、或 conftest 的 autouse 钉法失效，这条会红。
+    """
+    from data_dog import settings
+
+    url = f"sqlite:///{(tmp_path / 'default_async.db').as_posix()}"
+    monkeypatch.setenv("DD_DATABASE_URL", url)
+    monkeypatch.setenv("DD_INVESTIGATE_OFFLINE", "1")
+    monkeypatch.setenv("DD_INVESTIGATE_WORKERS", "1")
+    monkeypatch.setenv("DD_INVESTIGATE_QUEUE_POLL_MS", "20")
+    # 先删，再断言：conftest 的 autouse 夹具此刻已把变量设成 "0"，删掉才看得到**生产默认值**
+    monkeypatch.delenv("DD_INVESTIGATE_ASYNC", raising=False)
+    assert settings.investigate_async() is True, "未设变量时默认应为异步（B2 第 3 步）"
+    reset_engine()
+    init_db(url)
+
+    from data_dog.service.app import create_app
+    with TestClient(create_app()) as c:
+        cid = _seed_candidate(c)
+        r = c.post("/v1/investigations", headers=_Q, json={"candidate_id": cid})
+        assert r.status_code == 202, r.text
+        job_id = r.json()["job_id"]
+        _wait_status(c, job_id, "succeeded")
+        res = c.get(f"/v1/investigations/jobs/{job_id}/result", headers=_Q)
+        assert res.status_code == 200, res.text
+        assert res.json()["verdict"], res.text
+    reset_engine()
+    print("PASS test_default_is_async_when_env_absent")

@@ -9,7 +9,7 @@
 | 分组 | 已落地 | 未落地（见下"边界"） |
 |---|---|---|
 | A（10 条缺口） | A1 A2 A3 A4 A5 A6 A7 A8 | **A9 A10** |
-| B（7 条优化） | B1 B3 B4 B5 B6 B7 | **B2**（第 1–2/3 步已落地，见下） |
+| B（7 条优化） | B1 B2 B3 B4 B5 B6 B7 | — |
 
 ## A. 缺口
 
@@ -40,7 +40,7 @@
 
 ## 未落地项：边界与原因
 
-### B2 同步默认翻异步（`DD_INVESTIGATE_ASYNC`）——🚧 第 1–2/3 步已落地
+### B2 同步默认翻异步（`DD_INVESTIGATE_ASYNC`）——✅ 三步全部落地
 
 **第 1 步（后端补载荷）已完成**：新增 `GET /v1/investigations/jobs/{id}/result`，成功后就地取齐
 `report` + `verdict`/`verdict_detail` + `trace` + `usage`，口径与同步响应**同源**
@@ -61,15 +61,20 @@
 请后端取消 job。前端测试 +4（轮询到成功、同步直通、失败 job → `ApiError(timeout)`、abort → 停轮询并
 触发 cancel）。
 
-**仍未做的第 3 步**：
+**第 3 步（翻默认）也已完成**：`settings.investigate_async()` 默认改为 **True**；测试由
+`tests/conftest.py` 的 autouse 夹具统一钉成同步（要测异步的用例显式置 1，要测"默认值"的用例
+`delenv`），新增回归测试 `test_default_is_async_when_env_absent` 钉住默认值。
+
+**剩下的是部署注意项，不再是代码阻塞**：
 
 1. ~~后端：异步完成态一次拿到 `verdict`/`trace`/`usage`~~ ✅（`_verdict_for` + `.../result`）；
 2. ~~前端：控制台"提交 → 轮询 job → `.../result`"~~ ✅（双模式兼容 + 4 条前端测试）；
-3. **再翻默认**（`DD_INVESTIGATE_ASYNC` 默认 1），同步退回显式 `?sync=1`。
+3. ~~再翻默认~~ ✅（默认 1；`?sync=1` 或 `=0` 退回同步；测试夹具钉同步 + 默认值回归测试）。
 
-第 3 步还有一个**进程级副作用**要先想清楚：`create_app` 按 `investigate_async()` 决定是否起
-worker 池（`service/runtime.py`）——默认翻开会给每个应用实例加一个线程池 + 队列轮询线程，
-所有测试进程也会跟着起。翻之前要确认这正是想要的（本轮可把测试都显式钉成同步，翻时只改一处）。
+- 默认异步意味着**每个应用实例**都会起 worker 线程池 + 队列轮询线程（纯 API / 单副本实例可置
+  `DD_INVESTIGATE_ASYNC=0`）；
+- 多副本必须配 `DD_STATE_BACKEND=postgres`（memory 后端的队列只在进程内）——`data-dog config check`
+  会对"异步 + memory"报警告。
 
 ### A9 `telemetry_events` 分区
 

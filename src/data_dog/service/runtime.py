@@ -121,9 +121,10 @@ def _set_job_runner(runner) -> None:
 def _start_job_runner_if_needed() -> None:
     """起异步调查 worker 池。
 
-    只在 `DD_INVESTIGATE_ASYNC=1` 时启动——否则 `POST /v1/investigations` 走同步
-    路径，无需 worker。worker 的 run_fn 注入 `_execute_investigation`（本模块内
-    唯一的调查实现），故同步/异步两条路径**共用同一段执行逻辑**。
+    默认启动（`DD_INVESTIGATE_ASYNC` 默认 1，B2 翻转）；置 0 退回同步路径则不起 worker。
+    代价如实说明：每个应用实例都会多一个线程池 + 队列轮询线程，单副本/纯 API 实例可置 0。
+    worker 的 run_fn 注入 `_execute_investigation`（本模块内唯一的调查实现），故同步/异步
+    两条路径**共用同一段执行逻辑**。
     """
     if not settings.investigate_async():
         return
