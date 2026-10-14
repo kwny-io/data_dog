@@ -560,6 +560,23 @@ def _persist_run_log(tenant: str, log: dict[str, Any]) -> None:
                             "error": redact(f"{type(e).__name__}: {e}")})
 
 
+def _make_run_id(candidate_id: str) -> str:
+    """本次尝试的运行 id：run_<候选缩写>_<UTC时间戳>_<4位hex>。
+
+    为什么改掉 run_<16位hex>：同步失败没有报告 id，技术员只能在
+    GET /v1/investigations/runs 的列表里翻。列表里一排随机串，得点进去才知道"这是哪个候选、
+    什么时候跑的"——而这两条信息本来就在手边，放进 id 里零成本。
+
+    为什么要留 4 位随机尾：同一候选同一秒可能重跑（重试 / 双提交 / 并发），而 run_id 是
+    (tenant_id, run_id) 主键——撞了会**覆盖**上一条运行日志（证据被顶掉）。时间戳秒级 +
+    4 位 hex 把碰撞面压到 1/65536 每秒；真撞了也只影响这条日志，不影响调查结果。
+    """
+    slug = "".join(ch for ch in str(candidate_id).lower()
+                   if ch.isascii() and (ch.isalnum() or ch == "_")).strip("_")[:12] or "cand"
+    stamp = time.strftime("%Y%m%dT%H%M%S", time.gmtime())
+    return f"run_{slug}_{stamp}_{uuid.uuid4().hex[:4]}"
+
+
 def _execute_investigation(tenant: str, candidate_id: str, *,
                            should_cancel=None, persist: bool = True) -> dict[str, Any]:
     """一次调查的**唯一实现**（同步端点与异步 worker 共用）。
@@ -580,7 +597,7 @@ def _execute_investigation(tenant: str, candidate_id: str, *,
     """
     trace: list[dict[str, Any]] = []
     started = time.monotonic()
-    attempt_run_id = f"run_{uuid.uuid4().hex[:16]}"
+    attempt_run_id = _make_run_id(candidate_id)
 
     def _with_log(out: dict[str, Any], *, status: str, run_id: str | None = None,
                   report_id: str | None = None, error_code: str | None = None,

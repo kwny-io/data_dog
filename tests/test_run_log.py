@@ -116,7 +116,10 @@ def test_failed_sync_investigation_still_writes_run_log(client, monkeypatch):
                       params={"candidate_id": cid, "status": "failed"}).json()
     assert runs["count"] == 1, runs
     item = runs["items"][0]
-    assert item["run_id"].startswith("run_")
+    # B6：run_id 必须**可读**——技术员在列表里要能一眼认出"哪个候选、什么时候"
+    slug = "".join(ch for ch in cid.lower()
+                   if ch.isascii() and (ch.isalnum() or ch == "_")).strip("_")[:12]
+    assert item["run_id"].startswith(f"run_{slug}_"), item["run_id"]
     assert item["error_code"] == "unavailable"
     assert "provider 暂时不可用" in item["error_detail"], item
     assert "steps" not in item, "列表页不该带 steps 正文（体积）"
@@ -194,6 +197,33 @@ def test_notification_without_investigation_does_not_fake_a_link(monkeypatch):
     assert note.payload["run_log_path"] == ""
     assert note.payload["run_log_url"] == ""
     assert "运行日志" not in note.body
+
+
+# ---------------------------------------------------------------- run_id 可读性（B6）
+
+def test_run_id_is_readable_and_collision_resistant():
+    """run_<候选缩写>_<UTC时间戳>_<4位hex>：可读，且同一秒重跑不撞主键。
+
+    为什么钉"不撞"：run_id 是 (tenant_id, run_id) 主键，撞了会**覆盖**上一条运行日志
+    （把证据顶掉）。只拼"标记 + 秒级时间戳"是不够的。
+    """
+    from data_dog.service.runtime import _make_run_id
+
+    rid = _make_run_id("cand_abc123")
+    assert rid.startswith("run_cand_abc123_"), rid
+    parts = rid.split("_")
+    assert len(parts) >= 4, rid
+    stamp = parts[-2]
+    assert "T" in stamp and len(stamp) == 15, stamp      # 20261014T095547
+    assert len(parts[-1]) == 4, rid                       # 随机尾
+    assert rid != _make_run_id("cand_abc123"), "同一秒两次调用撞了 id → 会覆盖上一条日志"
+    # 奇怪/空的候选 id 也要能生成**合法**、可读的 id（统一形状，不出现非法字符）
+    import re
+    shape = re.compile(r"run_[a-z0-9_]{1,12}_\d{8}T\d{6}_[0-9a-f]{4}")
+    for bad in ("", "候选/奇怪 id", "A B C", "x" * 40):
+        got = _make_run_id(bad)
+        assert shape.fullmatch(got), got
+    print("PASS test_run_id_is_readable_and_collision_resistant")
 
 
 # ---------------------------------------------------------------- 写放大（B3）

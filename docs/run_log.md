@@ -21,7 +21,7 @@
 | 路径 | `run_id` | 谁写 | 落库时机 |
 |---|---|---|---|
 | 同步调查成功 | `investigation_id`（报告 id） | `service/runtime._execute_investigation` | 报告落库后立刻 |
-| 同步调查失败 | `run_<hex16>`（本次尝试） | 同上 | 立刻（HTTP 仍是 4xx/5xx） |
+| 同步调查失败 | `run_<候选缩写>_<UTC时间戳>_<4位hex>`（本次尝试） | 同上 | 立刻（HTTP 仍是 4xx/5xx） |
 | 异步调查（成功/失败/取消） | `job_id` | `JobRunner._finish` | 与 **job 终态同事务** |
 
 两条硬约定：
@@ -29,7 +29,8 @@
 1. **异步路径"job 有终态 ⇔ 有运行日志"**：日志与 job 状态、报告在**同一个事务**里写。
    执行侧连日志都没带回来（例如它自己抛了异常），`_finish` 会补一条骨架——
    宁可日志少内容，不可"任务失败了但什么都没有"。
-2. **同步失败没有报告**，所以 `run_id` 是本次尝试的 `run_xxx`。它怎么被找到？
+2. **同步失败没有报告**，所以 `run_id` 是本次尝试的 `run_<候选缩写>_<UTC时间戳>_<4位hex>`
+   （可读：列表里一眼看出"哪个候选、什么时候"；4 位随机尾防同一秒重跑撞主键覆盖日志）。它怎么被找到？
    `GET /v1/investigations/runs?candidate_id=...&status=failed`——"这个候选老是失败"
    正是最典型的排查入口。
 
@@ -48,7 +49,7 @@ curl -H "X-Tenant-Id: tenant-a" \
 
 # 2) 取那一次的完整过程
 curl -H "X-Tenant-Id: tenant-a" \
-  "http://127.0.0.1:8000/v1/investigations/run_1a2b3c4d5e6f7788/log"
+  "http://127.0.0.1:8000/v1/investigations/run_cand_abc123_20261014T095547_4e52/log"
 ```
 
 返回体里有什么（`log` 字段）：
