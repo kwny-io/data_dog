@@ -177,6 +177,35 @@ def test_http_push_rejects_bad_json_and_wrong_path():
         src.close()
 
 
+def test_http_push_survives_client_disconnect():
+    """客户端半途断开不得在 handler 线程抛未捕获异常（曾经让全量测试随机红）。
+
+    复现：TCP 连上、声明 Content-Length=50 却只发几个字节就 close。服务端 read 读不满，
+    随后写响应时对端已关 → ConnectionAbortedError/BrokenPipeError。修前它会从 handler 线程
+    冒出来（pytest 的 thread-exception 警告被 filterwarnings=error 抓成失败），修后只留一条
+    debug 日志、队列不受影响。
+    """
+    import socket as _socket
+
+    from data_dog.stream.http import HttpPushSource
+
+    errors: list = []
+    old_hook = threading.excepthook
+    threading.excepthook = lambda args: errors.append(args)   # type: ignore[assignment]
+    src = HttpPushSource(tenant_id="t", host="127.0.0.1", port=0)
+    host, port = src.address
+    try:
+        s = _socket.create_connection((host, port), timeout=5)
+        s.sendall(b"POST /ingest HTTP/1.1\r\nHost: x\r\nContent-Length: 50\r\n\r\n{\"a\":")
+        s.close()
+        time.sleep(0.2)                       # 给 handler 线程跑完
+        assert src.poll(0.0) == []            # 半截正文不该产生消息
+        assert errors == [], [a.exc_value for a in errors]
+    finally:
+        threading.excepthook = old_hook
+        src.close()
+
+
 # ---------------------------------------------------------------- runner
 
 def _scripted_source(messages):

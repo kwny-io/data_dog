@@ -25,10 +25,13 @@ CORS + 租户头校验）。本源的价值在于"设备只会 POST"这一现实
 from __future__ import annotations
 
 import json
+import logging
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from .base import QueueSource, StreamMessage
+
+_log = logging.getLogger("data_dog.stream.http")
 
 
 class HttpPushSource(QueueSource):
@@ -52,6 +55,15 @@ class HttpPushSource(QueueSource):
                 pass
 
             def do_POST(self):                    # noqa: N802 - stdlib 约定
+                # 客户端半途断开（RST / 写响应时对端已关）是**正常现象**，不是服务端
+                # 错误。不在这里兜住的话，handler 线程会抛未捕获异常：生产日志刷噪声，
+                # 测试里被 pytest 的 thread-exception 警告（filterwarnings=error）抓成随机红。
+                try:
+                    self._handle_post()
+                except (ConnectionError, TimeoutError) as e:
+                    _log.debug("HTTP 推送客户端断开：%s", e)
+
+            def _handle_post(self):
                 if self.path.split("?", 1)[0] != src._path:
                     self.send_error(404)
                     return
