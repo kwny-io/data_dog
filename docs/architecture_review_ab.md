@@ -8,7 +8,7 @@
 
 | 分组 | 已落地 | 未落地（见下"边界"） |
 |---|---|---|
-| A（10 条缺口） | A1–A10 全部落地 | —（A10 的身份体系为人工边界，见下） |
+| A（10 条缺口） | A1–A8 ✅；A10 ✅（身份体系为边界） | **A9 🚧**（基础设施已真库验证，表转换被主键冲突阻塞） |
 | B（7 条优化） | B1 B2 B3 B4 B5 B6 B7 | — |
 
 ## A. 缺口
@@ -23,7 +23,7 @@
 | A6 | 多副本下 retention 无租约 | ✅ | `bf75343` | 真删前抢 `retention:purge` 单持有者租约；抢不到本轮**跳过**并如实标注（≠ 删了 0 行） |
 | A7 | 没有告警规则 / SLO 未落地 | ✅ | `574b384` | `PrometheusRule` 12 条规则（可用性/热路径 P99/治理积压/静默失败）+ `docs/slo.md` §9 映射表 + 不依赖 helm 的 meta 测试 |
 | A8 | LLM 无降级链 | ✅ | `b0142c8` | 有界重试（只重试可重试错、带抖动、每次重过 deadline）+ 备用模型；`DD_LLM_RETRIES` / `DD_LLM_FALLBACK_MODEL` |
-| A9 | `telemetry_events` 没有分区 | ✅ | 见下 | `storage/partitioning.py` + 维护 CLI（建/删分区）+ retention 自动分流到 `DROP PARTITION`；**首次转换是需停机窗口的人工 runbook**，真库往返由 CI 的 `-m postgres` 腿覆盖 |
+| A9 | `telemetry_events` 没有分区 | 🚧 | `46b344c` + 本轮 | 基础设施（分区模块/维护 CLI/retention 分流）已落地并在**真 PG** 验证；但 `telemetry_events` 的**转换被主键冲突阻塞**（PG 要求唯一约束含分区键，而主键是去重键）——**需数据模型决策**，见下 |
 | A10 | 控制台仍单租户 + 两套 UI | ✅ | 见下 | 收敛决定：**产品控制台 = `web/`，`ui/` 只作演示台**（README/交付文档写明）；多租户最小步：`DD_WEB_TENANTS` 服务端**允许清单** + `dd_web_tenant` cookie 做租户**选择**（清单外 403、未配置时行为不变）。**用户级身份/RBAC 仍是人工边界** |
 
 ## B. 存量可优化
@@ -76,18 +76,35 @@
 - 多副本必须配 `DD_STATE_BACKEND=postgres`（memory 后端的队列只在进程内）——`data-dog config check`
   会对"异步 + memory"报警告。
 
-### A9 `telemetry_events` 分区
+### A9 `telemetry_events` 分区 —— 🚧 基础设施已落地并在**真 PG** 验证；转换被主键冲突阻塞
 
-**没做，两个硬原因**：
+**已落地**（`46b344c`）：`storage/partitioning.py`（纯函数 + PG 探测 + 幂等建分区 + 只删整段过期
+的分区）+ `scripts/partition_telemetry.py`（`--check` / `--ensure-months` / `--drop-before`）+
+retention 自动分流到 `DROP PARTITION`。测试含 `-m postgres` 真库往返。
 
-1. **本机没有 PostgreSQL**（`127.0.0.1:5432` 实测 `ConnectionTimeout`）→ 分区 DDL 无法在本环境
-   验证。本仓的纪律是"没在真 PG 上验证过的不算落地"（A5 就是先在真 PG 16 上验完才写的）。
-2. **把既有表转成分区表在 PG 上不能原地做**：要新建分区父表 + 拷数据 + 建索引/外键 + 改名切换，
-   属于**需要停机窗口**的迁移。评审自己也把这条列为"大 / 要单独立项"。
+**本轮把 Docker 里的 PostgreSQL 起起来（`postgres:16-alpine`，端口 55432）后，两个测试在真库上
+跑通，同时实测出一个此前没发现的硬阻塞**：
 
-**可做的下一步**：`storage/partitioning.py`（`ensure_partitions` / `drop_partitions_before`）
-+ 新装路径直接建分区父表 + retention 在"已分区"时改走 `DROP PARTITION`（否则回退分批 DELETE）
-+ PG 测试腿上的 `-m postgres` 用例 + **既有表转换 runbook**（含回滚）。
+- PG 规则：**分区表的唯一约束必须包含全部分区键**。实测报错原文：
+  `FeatureNotSupported: unique constraint on partitioned table must include all partitioning columns`；
+- 而 `telemetry_events` 的主键是 `(tenant_id, event_id)`——它正是写入路径
+  `INSERT ... ON CONFLICT DO UPDATE` 的**去重键**（`repository.py`）。所以"按 `created_at` 做
+  范围分区 + 保留原主键"在 PG 上**不可能**；换 `PRIMARY KEY (tenant_id, event_id, created_at)`
+  会让重复上报（同一 `event_id` 不同 `created_at`）不再被去重——**数据完整性代价**；
+- 实测另一条路：`PARTITION BY HASH (tenant_id, event_id)` 可以保留该唯一约束，但**哈希分区
+  无法按时间删分区**（各分区都混着所有年代），A9 想省的那笔 DELETE 一分也省不下来；
+- 顺带修掉一个真错误：该表 `created_at` 是 `double precision`（epoch 秒），而上一版 DDL 生成的是
+  时间戳字面量，真库里会报 `invalid input syntax for type double precision`。现在边界是 epoch 数值，
+  并有真库用例钉住。
+
+**已交付的防护**：`partitioning.check_partitionable()` **前置检查**——非 PG / 表不存在 / 分区键类型
+不支持 / **唯一约束不含分区键** / 入向外键，逐条点名。`--check` 会打印阻塞项；`--convert` 类操作
+在阻塞项存在时直接拒绝。真库回归用例 `test_real_telemetry_shape_is_blocked_by_its_primary_key`
+用与 `telemetry_events` 同形的探针把"不行 + 被谁挡住"钉死。
+
+**因此 A9 的正确表述**：分区**基础设施**可用且已真库验证；`telemetry_events` 的**转换需要一个
+数据模型决策**（去重键怎么改、或接受哈希分区不省删除、或维持现状只靠 DELETE）——这不是工程
+实现问题，是"重复上报去重"与"按年龄删分区"二选一的产品决策，不该由实现者替用户选。
 
 ### A10 控制台收敛 + 多租户身份（部分落地：收敛 + 租户选择；身份/RBAC 为人工边界）
 

@@ -154,18 +154,44 @@ python scripts/partition_telemetry.py --drop-before 2026-08    # 删"整段早�
   （报告里 `mode=drop_partition` + `dropped_partitions`，`total` 只统计逐行删除，不混口径）。
   非 PG / 未分区 → 原分批 `DELETE`，行为完全不变。
 
-### 8.2 建表 / 转换 runbook（需要停机窗口）
+### 8.2 为什么 `telemetry_events` **现在转不了**（真 PG 实测）
 
-把**既有**普通表转成分区表在 PG 上不能原地做，必须：建新分区父表 → 按 `created_at` 回填数据 →
-重建索引/外键 → 在低峰期 `ALTER TABLE ... RENAME` 切换 → 校验行数与索引。步骤**不自动化**：
-一条写错的 DDL 就是生产数据事故，这属于"要有停机窗口、要有回滚脚本、要有人看着"的迁移。
-本仓库只提供**已分区之后**的维护与删除路径（上面的 CLI），首次建表/转换由 DBA 按本节执行。
+PG 有一条硬规则：**分区表的唯一约束必须包含全部分区键**。实测报错原文：
 
-### 8.3 诚实边界
+```
+FeatureNotSupported: unique constraint on partitioned table must include all partitioning columns
+```
+
+而 `telemetry_events` 的主键是 `(tenant_id, event_id)`——它正是写入路径
+`INSERT ... ON CONFLICT DO UPDATE` 的**去重键**（`repository.save_telemetry`）。于是：
+
+| 方案 | 能否保留去重键 | 能否按时间 `DROP PARTITION` | 结论 |
+|---|---|---|---|
+| `RANGE (created_at)` + 原主键 | — | — | **PG 直接拒绝**（唯一约束不含分区键） |
+| `RANGE (created_at)` + 主键加 `created_at` | ❌ 同 `event_id` 不同 `created_at` 会重复入库 | ✅ | 拿**数据完整性**换清理成本，需产品决定 |
+| `HASH (tenant_id, event_id)` | ✅ | ❌ 各分区混着所有年代 | 不解决 A9 要省的那笔 DELETE |
+
+所以这不是"实现没做完"，而是**"重复上报去重"与"按年龄删分区"二选一**的数据模型决策。
+
+**已有防护**：`partitioning.check_partitionable()` 会逐条点名阻塞项（非 PG / 表不存在 / 分区键
+类型不支持 / **唯一约束不含分区键** / 入向外键），`--check` 会打印，转换类操作在阻塞项存在时
+直接拒绝。真库回归用例 `test_real_telemetry_shape_is_blocked_by_its_primary_key` 用同形探针把
+"不行 + 被谁挡住"钉死。
+
+### 8.3 真要做转换时的 runbook（需要停机窗口）
+
+若上面的数据模型决策已拍板（例如接受去重键变更），转换仍是**停机窗口**操作：建新分区父表 →
+按 `created_at` 回填 → 重建索引 → 低峰期 `ALTER TABLE ... RENAME` 切换 → 校验行数/索引 → 回滚
+脚本就绪。步骤**不自动化**：一条写错的 DDL 就是生产数据事故，这属于"要有人看着"的迁移。
+本仓提供**已分区之后**的维护与删除路径（8.1 的 CLI），以及**转之前**的前置检查；转换本身由
+DBA 按本节执行。
+
+### 8.4 诚实边界
 
 - **只在 PostgreSQL 上有效**；SQLite（测试/单机演示）走原路径。非 PG 上执行维护 CLI 会明确
   拒绝（退出码 2），不会假装成功。
-- **本机没有 PG**：纯函数（分区名/月边界/DDL 文本）、非 PG 边界、retention 分流都能离线验证；
-  真库往返（建分区→插入→删过期分区）是 `-m postgres` 用例，**由 CI 的 postgres 腿实测**
-  （本地无 `DD_TEST_PG_URL` 时跳过）。
-- **转换未自动化、未在本仓实测**：见 8.2 的理由；这是本项最需要人工介入的部分。
+- **分区键边界是 epoch 秒数值**（`created_at` 是 `double precision`）。上一版生成的时间戳字面量
+  在真库上会报 `invalid input syntax for type double precision`——已修，并有真库用例钉住。
+- **真库验证已在本机完成**：起 `postgres:16-alpine`（端口 55432）后，`-m postgres` 用例
+  **24 passed**（含建分区→插入→删过期分区往返，以及"该表被主键阻塞"的回归）。
+- **`telemetry_events` 的转换未实现**：原因见 8.2（数据模型决策），不是排期问题。

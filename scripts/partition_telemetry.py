@@ -117,6 +117,10 @@ def main(argv: list[str] | None = None) -> int:
             if kind == "executed":
                 continue
             print(f"  {kind}: " + (", ".join(names) or "无"))
+    if out.get("blockers"):
+        print("  转换阻塞项（不解决就不能把这张表转成分区表）：")
+        for item in out["blockers"]:
+            print(f"    - {item}")
     if out["error"]:
         print(f"  [错误] {out['error']}")
     return exit_code

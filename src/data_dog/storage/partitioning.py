@@ -61,8 +61,14 @@ def _check_name(table: str) -> str:
 
 
 def _ts(dt: datetime) -> str:
-    """分区边界字面量：显式 UTC 偏移，避免 PG 按会话时区解释成别的时间点。"""
-    return dt.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S+00")
+    """分区边界字面量：**epoch 秒整数**。
+
+    为什么不是时间戳字面量：本仓的时间列是 **epoch 秒的 `double precision`**（`created_at` /
+    `ts` / `finished_at` 都是 `Float`）。在真 PG 上实测：`FOR VALUES FROM
+    ('2026-10-01 00:00:00+00')` 会被按 `double precision` 解析并报
+    `invalid input syntax for type double precision`。数值边界（`1780272000`）才对。
+    """
+    return str(int(dt.astimezone(timezone.utc).timestamp()))
 
 
 def month_bounds(when: datetime) -> tuple[datetime, datetime]:
@@ -179,10 +185,68 @@ def drop_partitions_before(session: Any, cutoff: float,
     return dropped
 
 
+def check_partitionable(session: Any, table: str = PARTITION_TABLE,
+                        key: str = PARTITION_KEY) -> list[str]:
+    """转换**前置检查**：返回阻塞项（空 = 可以转分区表）。
+
+    为什么要有它（真 PG 实测出来的硬规则）：PG 要求**分区表的唯一约束必须包含全部分区键**
+    （`unique constraint on partitioned table must include all partitioning columns`）。
+    而 `telemetry_events` 的主键是 `(tenant_id, event_id)`——它正是写入路径
+    `INSERT ... ON CONFLICT DO UPDATE` 的**去重键**。因此"按 created_at 范围分区 + 保留原主键"
+    在 PG 上**不可能**。这个检查把"能不能转"变成可执行的事实，而不是口口相传的注意事项。
+
+    另外也挡住"改名切换"策略的两个坑：**入向外键**（重建时会指向被改名/删除的旧表）与
+    分区键列不存在/类型不支持。
+    """
+    if not is_postgres(session):
+        return ["当前库不是 PostgreSQL：分区是 PG 能力，SQLite 走原分批 DELETE"]
+    if is_partitioned(session, table):
+        return []                                    # 已经是分区表：只剩日常维护
+    if session.execute(text("SELECT to_regclass(:t)"), {"t": _check_name(table)}).scalar() is None:
+        return [f"表不存在：{table}"]
+
+    blockers: list[str] = []
+    col = session.execute(text(
+        "SELECT format_type(atttypid, atttypmod) FROM pg_attribute "
+        "WHERE attrelid = to_regclass(:t) AND attname = :k AND attnum > 0"),
+        {"t": _check_name(table), "k": key}).first()
+    if col is None:
+        blockers.append(f"分区键列不存在：{table}.{key}")
+    else:
+        allowed = ("double precision", "real", "integer", "bigint", "smallint",
+                   "numeric", "timestamp with time zone", "timestamp without time zone",
+                   "date")
+        if str(col[0]) not in allowed:
+            blockers.append(f"分区键类型不支持范围分区：{table}.{key} 是 {col[0]}")
+
+    pk_rows = session.execute(text(
+        "SELECT con.conname, con.contype, "
+        "       (SELECT count(*) FROM unnest(con.conkey) AS k "
+        "          JOIN pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = k "
+        "         WHERE a.attname = :k) AS key_cols "
+        "FROM pg_constraint con "
+        "WHERE con.conrelid = to_regclass(:t) AND con.contype IN ('p', 'u')"),
+        {"t": _check_name(table), "k": key}).all()
+    for name, contype, key_cols in pk_rows:
+        if int(key_cols) == 0:
+            kind = "主键" if contype == "p" else "唯一约束"
+            blockers.append(
+                f"{kind} {name} 不含分区键 {key}——PG 要求分区表的唯一约束必须包含全部分区键；"
+                "转换前必须改这个键（会改变写入去重语义）")
+
+    fks = session.execute(text(
+        "SELECT conrelid::regclass::text, conname FROM pg_constraint "
+        "WHERE confrelid = to_regclass(:t)"), {"t": _check_name(table)}).all()
+    for from_table, conname in fks:
+        blockers.append(f"有入向外键引用它：{from_table}.{conname}（改名切换会让外键指向旧表）")
+    return blockers
+
+
 def describe(session: Any, table: str = PARTITION_TABLE) -> dict[str, Any]:
-    """体检用的只读快照：是否 PG / 是否分区 / 分区清单（`data-dog partition --check`）。"""
+    """只读快照：是否 PG / 是否分区 / 分区清单 / **转换阻塞项**（CLI `--check` 用）。"""
     pg = is_postgres(session)
     parts = list_partitions(session, table) if pg else []
     return {"dialect": _dialect(session), "postgres": pg,
             "table": table, "partitioned": is_partitioned(session, table),
-            "partitions": parts, "partition_count": len(parts)}
+            "partitions": parts, "partition_count": len(parts),
+            "blockers": check_partitionable(session, table)}

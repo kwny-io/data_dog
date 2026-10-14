@@ -65,14 +65,15 @@ def test_shift_months_wraps_year():
     assert partitioning.shift_months(base, 14) == datetime(2028, 1, 1, tzinfo=timezone.utc)
 
 
-def test_create_and_drop_sql_are_explicit_utc():
+def test_create_and_drop_sql_use_epoch_bounds():
+    """边界是 **epoch 秒整数**：本仓时间列是 double precision（真 PG 上时间戳字面量会报错）。"""
     start = datetime(2026, 10, 1, tzinfo=timezone.utc)
     _, end = partitioning.month_bounds(start)
     sql = partitioning.create_partition_sql("telemetry_events", start, end)
     assert sql == (
         "CREATE TABLE IF NOT EXISTS telemetry_events_202610 "
         "PARTITION OF telemetry_events "
-        "FOR VALUES FROM ('2026-10-01 00:00:00+00') TO ('2026-11-01 00:00:00+00')")
+        f"FOR VALUES FROM ({int(start.timestamp())}) TO ({int(end.timestamp())})")
     assert partitioning.drop_partition_sql("telemetry_events_202610") == (
         "DROP TABLE IF EXISTS telemetry_events_202610")
 
@@ -102,6 +103,7 @@ def test_sqlite_reports_not_partitioned_and_lists_nothing(url):
         assert partitioning.list_partitions(s) == []
         info = partitioning.describe(s)
     assert info["dialect"] == "sqlite" and info["partitioned"] is False
+    assert info["blockers"] and "不是 PostgreSQL" in info["blockers"][0]
 
 
 def test_ddl_operations_raise_on_non_postgres(url):
@@ -208,12 +210,15 @@ def test_retention_still_deletes_rows_when_not_partitioned(url):
     assert _count(url, "telemetry_events") == 0
 
 
-# ---------------------------------------------------------------- 真 PG（CI）
+# ---------------------------------------------------------------- 真 PG
 
 @pytest.mark.postgres
 @pytest.mark.skipif(not _PG_URL, reason="未设 DD_TEST_PG_URL，跳过 PG 分区集成测试")
 def test_partition_roundtrip_on_postgres():
-    """真 PG：建分区 → 插入落到分区 → 删过期分区 → 新数据仍可写。"""
+    """真 PG：前置检查通过 → 建分区 → 插入落到分区 → 删过期分区 → 新数据仍可写。
+
+    探针忠实还原本仓的两件事：时间列是 `double precision` epoch；唯一约束必须包含分区键。
+    """
     from sqlalchemy import create_engine, text
     from sqlalchemy.orm import Session
 
@@ -221,15 +226,20 @@ def test_partition_roundtrip_on_postgres():
     eng = create_engine(_PG_URL, future=True)
     with eng.begin() as c:
         c.execute(text(f"DROP TABLE IF EXISTS {table} CASCADE"))
-        c.execute(text(f"CREATE TABLE {table} (created_at timestamptz NOT NULL, v int) "
-                       "PARTITION BY RANGE (created_at)"))
+        c.execute(text(
+            f"CREATE TABLE {table} (tenant_id varchar(80) NOT NULL, "
+            "event_id varchar(80) NOT NULL, created_at double precision NOT NULL, v int, "
+            "PRIMARY KEY (tenant_id, event_id, created_at)) PARTITION BY RANGE (created_at)"))
     try:
         with Session(eng) as s:
             assert partitioning.is_partitioned(s, table) is True
+            assert partitioning.check_partitionable(s, table) == []
             now = datetime(2026, 10, 1, tzinfo=timezone.utc)
             names = partitioning.ensure_partitions(s, table, months=3, now=now)
             assert names == [f"{table}_202610", f"{table}_202611", f"{table}_202612"]
-            s.execute(text(f"INSERT INTO {table} VALUES ('2026-10-15T00:00:00+00', 1)"))
+            oct_ts = int(datetime(2026, 10, 15, tzinfo=timezone.utc).timestamp())
+            nov_ts = int(datetime(2026, 11, 15, tzinfo=timezone.utc).timestamp())
+            s.execute(text(f"INSERT INTO {table} VALUES ('t1','e1',{oct_ts},1)"))
             s.commit()
             cutoff = datetime(2026, 11, 1, tzinfo=timezone.utc).timestamp()
             dropped = partitioning.drop_partitions_before(s, cutoff, table)
@@ -237,9 +247,49 @@ def test_partition_roundtrip_on_postgres():
             s.commit()
             assert partitioning.list_partitions(s, table) == [
                 f"{table}_202611", f"{table}_202612"]
-            s.execute(text(f"INSERT INTO {table} VALUES ('2026-11-15T00:00:00+00', 2)"))
+            s.execute(text(f"INSERT INTO {table} VALUES ('t1','e2',{nov_ts},2)"))
             s.commit()
     finally:
         with eng.begin() as c:
             c.execute(text(f"DROP TABLE IF EXISTS {table} CASCADE"))
+        eng.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.skipif(not _PG_URL, reason="未设 DD_TEST_PG_URL，跳过 PG 分区集成测试")
+def test_real_telemetry_shape_is_blocked_by_its_primary_key():
+    """**真 PG 实测出来的硬结论**：`telemetry_events` 按 created_at 分区做不到。
+
+    PG 规则：分区表的唯一约束必须包含全部分区键（`unique constraint on partitioned table
+    must include all partitioning columns`）。该表主键是 `(tenant_id, event_id)`——正是写入
+    路径 `INSERT ... ON CONFLICT DO UPDATE` 的去重键。这条用真库把"不行"钉死，并验证前置
+    检查能**点名**是哪个约束挡住的（而不是一句"注意事项"）。
+    """
+    from sqlalchemy import create_engine, text
+    from sqlalchemy.exc import NotSupportedError
+    from sqlalchemy.orm import Session
+
+    table = "telemetry_like_probe"
+    eng = create_engine(_PG_URL, future=True)
+    with eng.begin() as c:
+        c.execute(text(f"DROP TABLE IF EXISTS {table} CASCADE"))
+        c.execute(text(
+            f"CREATE TABLE {table} (tenant_id varchar(80) NOT NULL, "
+            "event_id varchar(80) NOT NULL, created_at double precision NOT NULL, "
+            "PRIMARY KEY (tenant_id, event_id))"))
+    try:
+        with Session(eng) as s:
+            blockers = partitioning.check_partitionable(s, table)
+        assert any("不含分区键 created_at" in b for b in blockers), blockers
+        assert any("主键" in b for b in blockers), blockers
+        with pytest.raises(NotSupportedError) as e:
+            with eng.begin() as c:
+                c.execute(text(
+                    f"CREATE TABLE {table}_partitioned (LIKE {table} INCLUDING ALL) "
+                    "PARTITION BY RANGE (created_at)"))
+        assert "must include all partitioning columns" in str(e.value)
+    finally:
+        with eng.begin() as c:
+            c.execute(text(f"DROP TABLE IF EXISTS {table} CASCADE"))
+            c.execute(text(f"DROP TABLE IF EXISTS {table}_partitioned CASCADE"))
         eng.dispose()
