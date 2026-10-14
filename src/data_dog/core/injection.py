@@ -94,3 +94,33 @@ def wrap_untrusted(text: object, *, source: str = "untrusted") -> tuple[str, lis
     block = (f"{OPEN_TAG} source={safe_source} hits={len(hits) or 0}>>>\n"
              f"{body}\n{CLOSE_TAG}")
     return block, hits
+
+
+def unwrap(text: object) -> str:
+    """把 wrap_untrusted 生成的数据块**还原成块内原文**（进程内消费者用，不是给模型看）。
+
+    为什么需要它：工具返回与候选正文在进模型上下文前被包成数据块（防御所需），但
+    **进程内的确定性裁决器**——synth / mujoco / dataset / e2e 的假 provider，以及 CLI 的
+    离线基线——是靠 json.loads(工具返回) 读遥测来复现准确率的。若让它们各自写一遍剥壳
+    逻辑，就会出现「模型看得到、它们看不到」的**静默失效**：A3 落地时正是这样，10 条依赖
+    确定性裁决的测试集体变红（裁决退化成 needs_human_review），而不是报错。
+    故把剥壳放在分隔符的**同一处**：分隔符一改，消费者跟着对。
+
+    只剥最外层、**逐字不动正文**；不是数据块时原样返回。
+    """
+    s = text if isinstance(text, str) else str(text or "")
+    if not s.startswith(OPEN_TAG):
+        return s
+    nl = s.find("\n")
+    if nl < 0:
+        return s
+    body = s[nl + 1:]
+    if body.endswith(CLOSE_TAG):
+        body = body[: -len(CLOSE_TAG)]
+        if body.endswith("\n"):
+            body = body[:-1]
+    # annotate 命中的那行标注也是我们加的，不属于原文，一并去掉。
+    head, sep, rest = body.partition("\n")
+    if sep and head.startswith("[注入特征命中："):
+        return rest
+    return body

@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from ..core.injection import unwrap
 from ..evidence.store import RECENT_CHANGES
 
 
@@ -32,10 +33,16 @@ class DeterministicEvidenceProvider:
     def _grab(self, messages: list[Any]) -> None:
         for m in messages:
             content = m.get("content") if isinstance(m, dict) else getattr(m, "content", "")
-            if not content or "{" not in content:
+            if not content:
+                continue
+            # 消息里的 JSON 可能是「不可信数据块」内的原文（A3 之后候选正文会被包起来）：
+            # 先剥壳，再用 raw_decode 取**第一个** JSON 对象（块尾还有结束标签）。
+            body = unwrap(content)
+            idx = body.find("{")
+            if idx < 0:
                 continue
             try:
-                obj = json.loads(content[content.find("{"):])
+                obj = json.JSONDecoder().raw_decode(body[idx:])[0]
             except Exception:
                 continue
             if isinstance(obj, dict) and "component_ref" in obj:

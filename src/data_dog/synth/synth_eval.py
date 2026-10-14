@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from data_dog.agent.loop import AgentLoop
 from data_dog.core.console import ensure_utf8_console
+from data_dog.core.injection import unwrap
 from data_dog.providers.client import ChatProvider
 from data_dog.schemas.events import CandidateEvent
 from data_dog.synth import (
@@ -153,7 +154,10 @@ class DeterministicSynthProvider:
         for m in reversed(messages):
             if getattr(m, "role", None) == "tool":
                 try:
-                    data = json.loads(getattr(m, "content", "") or "{}")
+                    # 工具返回在进模型上下文前被包成「不可信数据块」(A3) → **必须剥壳**再解析。
+                    # 否则 json.loads 失败 → 裁决静默退化成「无法获取遥测，需人工复核」，
+                    # 评测准确率会毫无提示地崩掉（本仓真踩过：10 条确定性测试集体变红）。
+                    data = json.loads(unwrap(getattr(m, "content", "") or "") or "{}")
                     if data.get("ok") and "metrics" in data:
                         return data
                 except Exception:

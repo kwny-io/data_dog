@@ -13,6 +13,7 @@ from pathlib import Path
 import typer
 
 from .core.console import ensure_utf8_console
+from .core.injection import unwrap
 from .providers.config import load_config, save_config
 from .providers.registry import BUILTIN_VENDORS, vendor_ids
 from .schemas.events import CandidateEvent
@@ -356,10 +357,14 @@ class _FakeProvider:
                 role = getattr(m, "role", None)
                 content = getattr(m, "content", "") or ""
             if role == "user":
-                idx = content.find("{")
+                # 候选正文也被包成「不可信数据块」(A3) → 先剥壳，再取**第一个** JSON 对象：
+                # 块尾还有 <<<END_UNTRUSTED_DATA>>>，直接 json.loads 会因尾随内容失败，
+                # 于是候选退化成默认值、整条离线基线跑偏。
+                body = unwrap(content)
+                idx = body.find("{")
                 if idx >= 0:
                     try:
-                        return json.loads(content[idx:])
+                        return json.JSONDecoder().raw_decode(body[idx:])[0]
                     except Exception:
                         return {}
         return {}

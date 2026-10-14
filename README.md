@@ -23,7 +23,7 @@
 | 📊 | **带 ground truth 的规模化评估（双栏）** | **忠实 MuJoCo 数据集 10 万条**，分层抽跑真实 Agent：**确定性 provider** n=2000 → **准确率 0.818**（Wilson 95% CI 0.801–0.834）、normal 误报率 **0.064**；**真 LLM** n=500 → **0.708**（0.667–0.746）、normal 误报率 **0.72**（故障召回反而更高）。逐类召回一并如实报（**F4 偏置 0.43 为当前最低**）；误报根因（裁决口径把"证据不足"与"证据充分但正常"混为一谈）**已定位并改口径，效果标注为未实测**（本机 key 余额为零）；另有 7 个评估 case（含 2 个对抗性：提示注入 / 身份伪装） |
 | 🚚 | **能交付：服务 + 容器 + HTTPS** | FastAPI（liveness / readiness 分离）+ Dockerfile + compose（含 Caddy 自动申请 HTTPS）+ Makefile |
 
-**规模**：源码 152 个 Python 文件 / 27309 行，测试 95 个文件 / 21926 行；前端 `web/` 为 Next.js 15 控制台（60 个 TS/TSX 文件）；5 份正式事件 JSON Schema；30 个 `make` 命令（另有 `help`）。
+**规模**：源码 152 个 Python 文件 / 27355 行，测试 95 个文件 / 21987 行；前端 `web/` 为 Next.js 15 控制台（60 个 TS/TSX 文件）；5 份正式事件 JSON Schema；30 个 `make` 命令（另有 `help`）。
 
 ---
 
@@ -53,7 +53,7 @@
 `make redteam RUNS=5`（打真模型；`OFFLINE=1` 只自检管道）——注意 `tests/test_adversarial_evals.py`
 用的是 mock，只证明"评测器没漂"，**不代表真模型不脆**。**边界**（照实说）：正则可绕过、命中≠恶意；
 **多模态图像里的文字注入尚未覆盖**（视觉通道把设备原始帧直接交给模型，既扫不到也没分隔）；
-真模型脆弱性是抽样结论。见 [docs/prompt_injection.md](docs/prompt_injection.md)。
+真模型脆弱性是抽样结论。**另一处**：工具返回与候选正文被包成数据块后，**进程内的确定性消费者**（synth/mujoco/dataset/e2e 的评测 provider、CLI 离线基线）要用 `core/injection.unwrap` **剥壳**再解析 JSON——这一步漏了会让裁决静默退化成"无法获取遥测，需人工复核"（正常样本被判异常、评测数字崩掉而不报错；已有回归测试钉住）。见 [docs/prompt_injection.md](docs/prompt_injection.md)。
 - **LLM 治理：额度、准入、幂等、重试都落地了（2026-10-13）**。此前只有 `observability.py` 的**统计**，
 **没有任何地方拦得住**——一个租户刷候选就能把账单刷穿，而且是事后才发现。现补上三道**都排在花钱之前**的闸门：
 （a）`Idempotency-Key` **幂等**（窗口内同一 key 只真跑一次，进行中 409，失败释放占位）；
