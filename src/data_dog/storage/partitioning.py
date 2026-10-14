@@ -159,7 +159,8 @@ def list_partitions(session: Any, table: str = PARTITION_TABLE) -> list[str]:
 
 
 def ensure_partitions(session: Any, table: str = PARTITION_TABLE, *,
-                      months: int = 3, now: datetime | None = None) -> list[str]:
+                      months: int = 3, now: datetime | None = None,
+                      since: datetime | None = None) -> list[str]:
     """确保"本月起未来 `months` 个月"的分区都存在（幂等）。返回分区名列表。
 
     为什么是**未来** N 个月：分区表最大的坑是"忘了建下月分区 → 写入直接报错
@@ -172,8 +173,7 @@ def ensure_partitions(session: Any, table: str = PARTITION_TABLE, *,
             f"{table} 还不是分区表——先按 docs/storage.md 的 runbook 转换/初次建表")
     base = datetime.now(timezone.utc) if now is None else now
     out: list[str] = []
-    for i in range(max(1, int(months))):
-        start = shift_months(base, i)
+    for start in planned_partition_months(since, base, months):
         _, end = month_bounds(start)
         session.execute(text(create_partition_sql(table, start, end)))
         out.append(partition_name(table, start))
@@ -264,3 +264,224 @@ def describe(session: Any, table: str = PARTITION_TABLE) -> dict[str, Any]:
             "table": table, "partitioned": is_partitioned(session, table),
             "partitions": parts, "partition_count": len(parts),
             "blockers": check_partitionable(session, table)}
+
+
+# ---------------------------------------------------------------- 既有表转换
+
+class ConversionRefused(RuntimeError):
+    """前置检查未通过（或目标已是分区表 / 中间表已存在）——**拒绝转换**，附阻塞项。
+
+    拒绝而不是"尽力而为"：转换要在停机窗口里动生产表，任何没讲清楚的前提都必须挡住。
+    """
+
+
+def _q(ident: str) -> str:
+    """把来自系统目录的标识符（策略名/角色名）安全地双引号化。"""
+    return '"' + str(ident).replace('"', '""') + '"'
+
+
+def _months_between(a: datetime, b: datetime) -> int:
+    """`a` 到 `b` 相差几个自然月（同月 = 0）。"""
+    return (b.year - a.year) * 12 + (b.month - a.month)
+
+
+def planned_partition_months(since: datetime | None, now: datetime,
+                            months: int) -> list[datetime]:
+    """要建的分区所属月份：从 `since` 所在月到 `now + months - 1`（含端点）。
+
+    `since` 用于转换时覆盖**既有数据**所在的月份——漏了就会在 `INSERT ... SELECT` 时撞
+    `no partition of relation ... found for row`。
+    """
+    first = shift_months(now if since is None else since, 0)
+    span = _months_between(first, now) + max(1, int(months))
+    return [shift_months(first, i) for i in range(max(1, span))]
+
+
+def _index_signatures(session: Any, table: str) -> dict[tuple[bool, tuple[str, ...]], tuple[str, bool]]:
+    """索引签名 → (索引名, 是否主键)。签名 = (唯一性, 列名元组)。
+
+    为什么不用 `pg_indexes.indexdef` 文本配对：文本里混着表名/索引名/`ON ONLY` 等方言细节，
+    字符串处理容易在某个 PG 版本上悄悄失配；列 + 唯一性才是索引的**实质**。
+    表达式索引（`attnum = 0` → 列名为 None）明确报"不支持"，不猜。
+    """
+    rows = session.execute(text(
+        "SELECT c.relname, i.indisunique, i.indisprimary, "
+        "       (SELECT array_agg(a.attname ORDER BY k.ord) "
+        "          FROM unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord) "
+        "          JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.attnum) "
+        "FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid "
+        "WHERE i.indrelid = to_regclass(:t)"), {"t": _check_name(table)}).all()
+    out: dict[tuple[bool, tuple[str, ...]], tuple[str, bool]] = {}
+    for name, uniq, primary, cols in rows:
+        if not cols or any(c is None for c in cols):
+            raise ConversionRefused([f"索引 {name} 是表达式索引，转换脚本不支持（不猜）"])
+        out[(bool(uniq), tuple(str(c) for c in cols))] = (str(name), bool(primary))
+    return out
+
+
+def _copy_rls(session: Any, src: str, dst: str) -> list[str]:
+    """复制 RLS 开关与策略。**`LIKE ... INCLUDING ALL` 不复制它们**（真 PG 实测）。"""
+    row = session.execute(text(
+        "SELECT relrowsecurity, relforcerowsecurity FROM pg_class WHERE oid = to_regclass(:t)"),
+        {"t": _check_name(src)}).first()
+    notes: list[str] = []
+    if not row or not row[0]:
+        return notes
+    session.execute(text(f"ALTER TABLE {_check_name(dst)} ENABLE ROW LEVEL SECURITY"))
+    if row[1]:
+        session.execute(text(f"ALTER TABLE {_check_name(dst)} FORCE ROW LEVEL SECURITY"))
+    notes.append("RLS: ENABLE" + (" + FORCE" if row[1] else ""))
+    cmds = {"*": "ALL", "r": "SELECT", "a": "INSERT", "w": "UPDATE", "d": "DELETE"}
+    pols = session.execute(text(
+        "SELECT polname, polcmd, polpermissive, "
+        "       pg_get_expr(polqual, polrelid), pg_get_expr(polwithcheck, polrelid), "
+        "       (SELECT array_agg(rolname ORDER BY rolname) FROM pg_roles r "
+        "         WHERE r.oid = ANY(p.polroles)) "
+        "FROM pg_policy p WHERE polrelid = to_regclass(:t) ORDER BY polname"),
+        {"t": _check_name(src)}).all()
+    for polname, cmd, permissive, using, check, roles in pols:
+        parts = [f"CREATE POLICY {_q(polname)} ON {_check_name(dst)}",
+                 "AS PERMISSIVE" if permissive else "AS RESTRICTIVE",
+                 f"FOR {cmds.get(str(cmd), str(cmd))}"]
+        if roles:
+            parts.append("TO " + ", ".join(_q(r) for r in roles))
+        if using:
+            parts.append(f"USING ({using})")
+        if check:
+            parts.append(f"WITH CHECK ({check})")
+        session.execute(text(" ".join(parts)))
+        notes.append(f"policy {polname}")
+    return notes
+
+
+def _copy_grants(session: Any, src: str, dst: str) -> list[str]:
+    """复制非属主的表级授权（`LIKE` 也不复制授权）。"""
+    rows = session.execute(text(
+        "SELECT grantee, string_agg(privilege_type, ', ') "
+        "FROM information_schema.role_table_grants "
+        "WHERE table_name = :t AND grantee <> current_user GROUP BY grantee"),
+        {"t": _check_name(src)}).all()
+    notes: list[str] = []
+    for grantee, privs in rows:
+        session.execute(text(f"GRANT {privs} ON {_check_name(dst)} TO {_q(grantee)}"))
+        notes.append(f"grant {privs} -> {grantee}")
+    return notes
+
+
+def _data_horizon(session: Any, table: str, now: datetime | None) -> tuple[Any, Any, datetime, datetime | None]:
+    """（首日桶, 末日桶, 基准时刻, 起点月）——转换要覆盖既有数据的整个月份区间。"""
+    first, last = session.execute(text(
+        f"SELECT min(created_day), max(created_day) FROM {_check_name(table)}")).first()
+    base = datetime.now(timezone.utc) if now is None else now
+    since = (datetime.fromtimestamp(int(first) * 86400, tz=timezone.utc)
+             if first is not None else None)
+    horizon = base
+    if last is not None:
+        horizon = max(base, datetime.fromtimestamp(int(last) * 86400, tz=timezone.utc))
+    return first, last, horizon, since
+
+
+def plan_conversion(session: Any, table: str = PARTITION_TABLE, *,
+                    months: int = 3, now: datetime | None = None) -> dict[str, Any]:
+    """转换计划（**只读**）：能不能转、多少行、要建哪些分区（`--dry-run` 与人工审阅用）。"""
+    if not is_postgres(session):
+        raise PartitioningUnsupported("只有 PostgreSQL 支持分区")
+    blockers = list(check_partitionable(session, table))
+    if is_partitioned(session, table):
+        blockers.append(f"{table} 已经是分区表")
+    plan: dict[str, Any] = {"table": table, "new_table": f"{table}_new",
+                            "blockers": blockers, "rows": 0, "partitions": [], "actions": []}
+    if blockers:
+        return plan
+    _, _, horizon, since = _data_horizon(session, table, now)
+    plan["rows"] = int(session.execute(text(
+        f"SELECT count(*) FROM {_check_name(table)}")).scalar() or 0)
+    plan["partitions"] = [partition_name(table, m)
+                          for m in planned_partition_months(since, horizon, months)]
+    plan["actions"] = [
+        f"CREATE TABLE {table}_new (LIKE {table} INCLUDING ALL) PARTITION BY RANGE (created_day)",
+        f"建 {len(plan['partitions'])} 个分区（{plan['partitions'][0]} … {plan['partitions'][-1]}）",
+        f"INSERT INTO {table}_new SELECT * FROM {table}（{plan['rows']} 行）",
+        "复制 RLS 开关与策略、非属主授权",
+        f"核对行数后 RENAME 切换，删掉 {table}_old",
+    ]
+    return plan
+
+
+def convert_to_partitioned(session: Any, table: str = PARTITION_TABLE, *,
+                           months: int = 3, keep_old: bool = False,
+                           now: datetime | None = None) -> dict[str, Any]:
+    """把**既有普通表**就地转成按 `created_day` 的月分区表（**单事务**，失败全回滚）。
+
+    为什么敢自动化（此前只说"要人工 runbook"）：日桶进主键之后，
+    `CREATE TABLE new (LIKE old INCLUDING ALL) PARTITION BY RANGE (created_day)` 就能建出
+    **结构等价**的新表（真 PG 实测：主键/唯一索引/普通索引都会被复制成分区索引）。剩下的差异
+    是 `LIKE` **不复制**的三样——RLS 开关、策略、授权——脚本显式复制，并在提交前核对行数。
+
+    仍然是**停机窗口**操作：同一事务里 `INSERT ... SELECT` 拿的是旧表的读快照，期间的并发写入
+    不会进新表；`RENAME` 还要 ACCESS EXCLUSIVE。**执行前请停止接入**。
+
+    返回：`{converted, rows, partitions, notes, old_table}`。**不 commit**——由调用方决定事务边界。
+    """
+    plan = plan_conversion(session, table, months=months, now=now)
+    if plan["blockers"]:
+        raise ConversionRefused(plan["blockers"])
+    new = plan["new_table"]
+    if session.execute(text("SELECT to_regclass(:t)"), {"t": _check_name(new)}).scalar() is not None:
+        raise ConversionRefused([f"{new} 已存在——脚本不替你删表，请人工确认后再执行"])
+
+    notes: list[str] = [f"建分区父表 {new}（LIKE {table} INCLUDING ALL）"]
+    session.execute(text(f"CREATE TABLE {_check_name(new)} (LIKE {_check_name(table)} INCLUDING ALL) "
+                         "PARTITION BY RANGE (created_day)"))
+    _, _, horizon, since = _data_horizon(session, table, now)
+    names: list[str] = []
+    for start in planned_partition_months(since, horizon, months):
+        _, end = month_bounds(start)
+        session.execute(text(create_partition_sql(new, start, end)))
+        names.append(partition_name(new, start))
+    notes.append(f"建 {len(names)} 个分区：{names[0]} … {names[-1]}")
+
+    session.execute(text(f"INSERT INTO {_check_name(new)} SELECT * FROM {_check_name(table)}"))
+    notes += _copy_rls(session, table, new)
+    notes += _copy_grants(session, table, new)
+
+    old_rows = int(session.execute(text(f"SELECT count(*) FROM {_check_name(table)}")).scalar() or 0)
+    new_rows = int(session.execute(text(f"SELECT count(*) FROM {_check_name(new)}")).scalar() or 0)
+    if old_rows != new_rows:
+        raise ConversionRefused(
+            [f"行数核对失败（{table}={old_rows}, {new}={new_rows}），已回滚"])
+    notes.append(f"行数核对通过：{new_rows}")
+
+    old_sigs = _index_signatures(session, table)
+    new_sigs = _index_signatures(session, new)
+    old_table = f"{table}_old"
+    if keep_old:                       # 腾出规范索引名（索引名是 schema 级唯一；约束名不是）
+        for old_name, _primary in old_sigs.values():
+            session.execute(text(f"ALTER INDEX {_check_name(old_name)} "
+                                 f"RENAME TO {_check_name(old_name + '_old')}"))
+    session.execute(text(f"ALTER TABLE {_check_name(table)} RENAME TO {_check_name(old_table)}"))
+    session.execute(text(f"ALTER TABLE {_check_name(new)} RENAME TO {_check_name(table)}"))
+    for name in names:                 # 分区名去掉 _new 中缀，回到 <表>_<YYYYMM>
+        suffix = name[len(new):]
+        session.execute(text(f"ALTER TABLE {_check_name(name)} "
+                             f"RENAME TO {_check_name(table + suffix)}"))
+    if not keep_old:
+        # **必须先删旧表**：索引名是 schema 级唯一，旧表还占着 `pk_telemetry_events` 这类规范名，
+        # 不改名就撞 `relation ... already exists`（真 PG 实测）。
+        session.execute(text(f"DROP TABLE {_check_name(old_table)}"))
+        notes.append(f"删掉 {old_table}")
+    else:
+        notes.append(f"保留旧表 {old_table}（其索引名已加 _old 后缀以腾出规范名）")
+    for sig, (old_name, old_primary) in old_sigs.items():
+        entry = new_sigs.get(sig)
+        if entry is None or entry[0] == old_name:
+            continue
+        if old_primary:                # 主键：改**约束**名（否则像索引改名那样只改索引）
+            session.execute(text(f"ALTER TABLE {_check_name(table)} "
+                                 f"RENAME CONSTRAINT {_q(entry[0])} TO {_q(old_name)}"))
+        else:
+            session.execute(text(f"ALTER INDEX {_check_name(entry[0])} "
+                                 f"RENAME TO {_check_name(old_name)}"))
+    return {"converted": True, "rows": new_rows,
+            "partitions": [table + n[len(new):] for n in names],
+            "notes": notes, "old_table": old_table if keep_old else None}

@@ -8,7 +8,7 @@
 
 | 分组 | 已落地 | 未落地（见下"边界"） |
 |---|---|---|
-| A（10 条缺口） | A1–A8 ✅；A10 ✅（身份体系为边界） | **A9 🚧**（基础设施已真库验证，表转换被主键冲突阻塞） |
+| A（10 条缺口） | A1–A10 **全部落地** | A9 走「摄取日桶」（跨天重投递会多一行边界 + 检测）；A10 的身份体系为边界 |
 | B（7 条优化） | B1 B2 B3 B4 B5 B6 B7 | — |
 
 ## A. 缺口
@@ -23,7 +23,7 @@
 | A6 | 多副本下 retention 无租约 | ✅ | `bf75343` | 真删前抢 `retention:purge` 单持有者租约；抢不到本轮**跳过**并如实标注（≠ 删了 0 行） |
 | A7 | 没有告警规则 / SLO 未落地 | ✅ | `574b384` | `PrometheusRule` 12 条规则（可用性/热路径 P99/治理积压/静默失败）+ `docs/slo.md` §9 映射表 + 不依赖 helm 的 meta 测试 |
 | A8 | LLM 无降级链 | ✅ | `b0142c8` | 有界重试（只重试可重试错、带抖动、每次重过 deadline）+ 备用模型；`DD_LLM_RETRIES` / `DD_LLM_FALLBACK_MODEL` |
-| A9 | `telemetry_events` 没有分区 | 🚧 2/3 | `46b344c` + 本轮 | 决策已定：走「摄取日桶」（接受跨天重复）；**第 1/3 步（schema + 写路径 + 迁移）已落地**，分区模块日粒度与转换脚本待做，见下 |
+| A9 | `telemetry_events` 没有分区 | ✅ | `46b344c` + 本轮 | 走「摄取日桶」（代价：跨天重投递多一行，有检测函数）：schema/写路径/迁移 → 分区模块日粒度 → 转换脚本；三段均在**真 PG** 验证（含真表转换 + 写路径落分区 + 整段 DROP），见下 |
 | A10 | 控制台仍单租户 + 两套 UI | ✅ | 见下 | 收敛决定：**产品控制台 = `web/`，`ui/` 只作演示台**（README/交付文档写明）；多租户最小步：`DD_WEB_TENANTS` 服务端**允许清单** + `dd_web_tenant` cookie 做租户**选择**（清单外 403、未配置时行为不变）。**用户级身份/RBAC 仍是人工边界** |
 
 ## B. 存量可优化
@@ -76,7 +76,7 @@
 - 多副本必须配 `DD_STATE_BACKEND=postgres`（memory 后端的队列只在进程内）——`data-dog config check`
   会对"异步 + memory"报警告。
 
-### A9 `telemetry_events` 分区 —— 🚧 已决策走「摄取日桶」并开工（第 1/3 步落地）
+### A9 `telemetry_events` 分区 —— ✅ 走「摄取日桶」，三段全部落地并在**真 PG** 验证
 
 **决策（已确认）**：接受"**跨天重投递可能多一行**"这一代价，走「摄取日桶」（D）。真库已验证机制：
 应用维护的 `created_day` 普通列 + 主键 `(created_day, tenant_id, event_id)` + `PARTITION BY RANGE
@@ -90,7 +90,17 @@ PG 16 报 `Column "created_day" is a generated column.`（生成列做分区键�
 batch；回填用 `floor` 而非 PG 的 double→int 四舍五入）+ 测试（同日幂等 / 跨天两行 / 回填 floor）。
 **第 2 步已落地**：`partitioning.py` 改日粒度——分区键 `created_day`、DDL 边界为**日序号**、
 `partition_end()` 仍返回 epoch（retention 比较逻辑未改）、真 PG 往返用例改日桶形态并加"落进物理
-分区"断言。**第 3 步**：既有表转换脚本 + 停机窗口 runbook。
+分区"断言。
+
+**第 3 步已落地**：`convert_to_partitioned()` + `scripts/partition_telemetry.py --convert`
+（`--dry-run` / `--keep-old`）——单事务建新分区父表 → 按既有数据月份建分区 → 拷数据 → 复制
+`LIKE` **不复制**的 RLS/策略/授权 → 核对行数 → 改名切换 → 删旧表；失败整体回滚。真库踩到并修掉
+两个坑：索引名 schema 级唯一（**先删旧表**再改回规范名）、主键要改**约束**名。
+
+**真表端到端验证**（`data_dog_pytest` 的 `telemetry_events`，4 条 `-m postgres` 用例）：迁移（主键
+加日桶）→ `--convert`（3 个分区、索引名回到 `pk_telemetry_events`/`ix_telemetry_tenant_created`、
+RLS enable+force、策略 1 条、blockers 空）→ `save_telemetry` 的行**落进当月分区**（逐分区计数确认）
+→ `drop_partitions_before` 把过期分区**整段 DROP**。
 
 **此前的基础设施**（`46b344c`）：`storage/partitioning.py`（纯函数 + PG 探测 + 幂等建分区 + 只删整段过期
 的分区）+ `scripts/partition_telemetry.py`（`--check` / `--ensure-months` / `--drop-before`）+

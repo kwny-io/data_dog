@@ -5,9 +5,12 @@
     python scripts/partition_telemetry.py --check                 # 只读：是否分区 / 有哪些分区
     python scripts/partition_telemetry.py --ensure-months 3       # 建"本月起未来 3 个月"分区（幂等）
     python scripts/partition_telemetry.py --drop-before 2026-08   # 删"整段早于 2026-08"的分区
+    python scripts/partition_telemetry.py --convert --dry-run     # 存量普通表 → 分区表：先看计划
+    python scripts/partition_telemetry.py --convert               # 执行（**停机窗口**，见下）
 
-**不做**的事（边界）：不把既有普通表转成分区表。那在 PG 上要建新父表 + 拷数据 + 重建索引/
-外键 + 改名切换，是**需要停机窗口**的迁移，见 `docs/storage.md` 的 runbook（人工执行、可回滚）。
+`--convert` 是**停机窗口**操作：单事务里建新分区父表 → 拷数据 → 复制 RLS/策略/授权 → 核对行数 →
+改名切换 → 删旧表。失败整体回滚，旧表不动。**执行前停止接入**（事务里拷的是读快照，期间的
+并发写入不会进新表）。前置检查不通过（`--check` 会列阻塞项）时**拒绝执行**、退出码 2。
 
 为什么不塞进 `retention`：分区维护是**结构变更**（DDL），保留清理是**删数据**。把 DDL 和周期
 删除混进同一个定时任务，出问题时没法只暂停其中一个。
@@ -53,9 +56,15 @@ def main(argv: list[str] | None = None) -> int:
                    help="确保本月起未来 N 个月的分区存在（幂等）")
     p.add_argument("--drop-before", default="", metavar="YYYY-MM",
                    help="删除『整段早于该时间』的分区")
+    p.add_argument("--convert", action="store_true",
+                   help="把既有普通表就地转成分区表（停机窗口；失败整体回滚）")
+    p.add_argument("--keep-old", action="store_true",
+                   help="转换后保留旧表（<表>_old），便于人工复核后再删")
     p.add_argument("--dry-run", action="store_true", help="只打印将要做的事，不执行 DDL")
     p.add_argument("--json", action="store_true", help="输出 JSON（供调度器采集）")
     args = p.parse_args(argv)
+
+    from sqlalchemy import text
 
     from data_dog.storage import partitioning
     from data_dog.storage.db import session_scope
@@ -71,11 +80,34 @@ def main(argv: list[str] | None = None) -> int:
                             "（无需分区维护）")
             exit_code = 2
 
+        if args.convert:
+            if not info["postgres"]:
+                out["error"] = "当前库不是 PostgreSQL：分区是 PG 能力，无需转换"
+                exit_code = 2
+            else:
+                plan = partitioning.plan_conversion(s, partitioning.PARTITION_TABLE)
+                out["plan"] = plan
+                if plan["blockers"]:
+                    out["error"] = "前置检查未通过——转换被拒绝（见阻塞项）"
+                    exit_code = 2
+                elif args.dry_run:
+                    out["actions"].append({"convert": plan["actions"], "executed": False})
+                else:
+                    res = partitioning.convert_to_partitioned(
+                        s, partitioning.PARTITION_TABLE, keep_old=args.keep_old)
+                    s.commit()
+                    s.execute(text("ANALYZE " + partitioning.PARTITION_TABLE))
+                    s.commit()
+                    out["actions"].append({"convert": res["notes"], "executed": True})
+                    out["partitions"] = res["partitions"]
+                    out["partition_count"] = len(res["partitions"])
+                    out["partitioned"] = True
+
         if args.ensure_months:
             planned = planned_partitions(args.ensure_months)
             if info["postgres"] and not info["partitioned"]:
-                out["error"] = ("目标还不是分区表——先按 docs/storage.md 的 runbook 转换；"
-                                "本脚本不自动改表结构")
+                out["error"] = ("目标还不是分区表——先用 --convert 转换（--convert --dry-run 看计划；"
+                                "转换是停机窗口操作）")
                 exit_code = 2
             elif info["postgres"]:
                 if args.dry_run:

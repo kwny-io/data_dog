@@ -210,7 +210,13 @@ FeatureNotSupported: unique constraint on partitioned table must include all par
   `partition_end()` 仍返回 epoch 秒（20758 × 86400），因此 retention 的 `cutoff` 比较逻辑一行未改。
   真 PG 往返用例已改成日桶形态（`created_day bigint` 进主键），并新增"插入确实落进那个物理分区"
   的断言。
-- **待做**：第 3/3 步——既有表转换脚本 + 停机窗口 runbook。
+- **转换已脚本化并真库验证（第 3/3 步已落地）**：`partitioning.convert_to_partitioned()` +
+  `scripts/partition_telemetry.py --convert [--dry-run] [--keep-old]`。单事务里：
+  `CREATE TABLE new (LIKE old INCLUDING ALL) PARTITION BY RANGE (created_day)` → 按既有数据月份
+  建分区 → 拷数据 → **显式复制 `LIKE` 不复制的东西**（RLS 开关、策略、非属主授权）→ 核对行数 →
+  改名切换 → 删旧表。失败整体回滚。真库实测的两处坑已修：① 索引名是 schema 级唯一，**必须先删
+  旧表**再改回规范索引名，否则 `relation pk_... already exists`；② 主键要改**约束**名（改索引名
+  不动约束名）。
 
 **一个必须知道的限制**：`created_day` **不能是生成列**——PG 16 明确拒绝"生成列做分区键"（实测报错
 `Column "created_day" is a generated column.`），PG 17 才允许。所以 D 要有一个**普通列 + 写路径显式
@@ -227,13 +233,30 @@ DELETE 还不是问题**——所以先定触发线，而不是先动表结构�
 直接拒绝。真库回归用例 `test_real_telemetry_shape_is_blocked_by_its_primary_key` 用同形探针把
 "不行 + 被谁挡住"钉死。
 
-### 8.3 真要做转换时的 runbook（需要停机窗口）
+### 8.3 转换 runbook（已脚本化，但仍是停机窗口操作）
 
-若上面的数据模型决策已拍板（例如接受去重键变更），转换仍是**停机窗口**操作：建新分区父表 →
-按 `created_at` 回填 → 重建索引 → 低峰期 `ALTER TABLE ... RENAME` 切换 → 校验行数/索引 → 回滚
-脚本就绪。步骤**不自动化**：一条写错的 DDL 就是生产数据事故，这属于"要有人看着"的迁移。
-本仓提供**已分区之后**的维护与删除路径（8.1 的 CLI），以及**转之前**的前置检查；转换本身由
-DBA 按本节执行。
+```
+# 0. 先看能不能转（阻塞项会逐条列出；非 PG 直接拒绝）
+python scripts/partition_telemetry.py --check
+# 1. 看计划：多少行、建哪些分区、按什么顺序动
+python scripts/partition_telemetry.py --convert --dry-run
+# 2. 停止接入（见下），然后在低峰期执行
+python scripts/partition_telemetry.py --convert            # 加 --keep-old 可保留 <表>_old
+# 3. 验证
+python scripts/partition_telemetry.py --check              # 应为"分区表，共 N 个分区"
+```
+
+**为什么必须停机**：转换在**单事务**里完成，`INSERT INTO new SELECT * FROM old` 拿的是读快照——
+事务期间的并发写入不会进新表，会在切换时丢失；`RENAME` 还需要 `ACCESS EXCLUSIVE`。失败会整体
+回滚（旧表原样不动），所以"停一下 + 事务原子性"就足够，不需要手工备份表。
+
+**脚本替你做的事**（都在同一个事务里）：建结构等价的新分区父表（`LIKE ... INCLUDING ALL` 复制
+列/默认值/约束/索引）→ 按既有 `created_day` 的月份区间 + 未来 N 个月建分区 → 拷数据 → 复制
+**RLS 开关、策略、非属主授权**（`LIKE` 不复制这三样，真库实测）→ 核对新旧行数（不等就回滚）→
+`RENAME` 切换 → 分区与索引名改回规范名 → 删旧表（`--keep-old` 时保留为 `<表>_old`）。
+
+**回填历史数据注意**：新写路径把 `created_day` 记为**摄取日**。若你要灌历史事件并希望它们按
+事件时间分区，必须先手工建好对应月份的分区，否则会撞 `no partition of relation ... found for row`。
 
 ### 8.4 诚实边界
 
@@ -243,4 +266,6 @@ DBA 按本节执行。
   在真库上会报 `invalid input syntax for type double precision`——已修，并有真库用例钉住。
 - **真库验证已在本机完成**：起 `postgres:16-alpine`（端口 55432）后，`-m postgres` 用例
   **24 passed**（含建分区→插入→删过期分区往返，以及"该表被主键阻塞"的回归）。
-- **`telemetry_events` 的转换未实现**：原因见 8.2（数据模型决策），不是排期问题。
+- **`telemetry_events` 的转换已实现并真库验证**（探针表 + 真表都跑通）：`--convert` 转换真表后，
+  `save_telemetry` 的行确实落进**当月分区**，过期分区被整段 DROP。仍**未做**：多副本并发下跑
+  迁移的协调（`DD_AUTO_MIGRATE=0` 由部署流程负责）、亿级表的分批回填（当前回填是一条 `UPDATE`）。

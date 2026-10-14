@@ -293,6 +293,10 @@ def test_real_telemetry_shape_is_blocked_by_its_primary_key():
             blockers = partitioning.check_partitionable(s, table)
         assert any("不含分区键 created_day" in b for b in blockers), blockers
         assert any("主键" in b for b in blockers), blockers
+        # 转换计划与转换入口也必须**拒绝**（不能只在 check 里提示）
+        assert partitioning.plan_conversion(s, table)["blockers"], "计划里也应带阻塞项"
+        with pytest.raises(partitioning.ConversionRefused):
+            partitioning.convert_to_partitioned(s, table)
         with pytest.raises(NotSupportedError) as e:
             with eng.begin() as c:
                 c.execute(text(
@@ -304,3 +308,130 @@ def test_real_telemetry_shape_is_blocked_by_its_primary_key():
             c.execute(text(f"DROP TABLE IF EXISTS {table} CASCADE"))
             c.execute(text(f"DROP TABLE IF EXISTS {table}_partitioned CASCADE"))
         eng.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.skipif(not _PG_URL, reason="未设 DD_TEST_PG_URL，跳过 PG 分区集成测试")
+def test_convert_existing_table_to_day_bucket_partitions():
+    """真 PG：既有普通表**就地转换**成分区表——数据、索引、RLS、策略都要跟着走。
+
+    这是 A9 第 3/3 步的核心：`LIKE ... INCLUDING ALL` 复制列/约束/索引，但**不复制**
+    RLS 开关、策略、授权（真库实测），转换脚本必须显式补上；并在提交前核对行数。
+    """
+    from sqlalchemy import create_engine, text
+    from sqlalchemy.orm import Session
+
+    from data_dog.storage.models import day_of
+
+    table = "conv_probe"
+    now = datetime(2026, 12, 1, tzinfo=timezone.utc)
+    day_a = day_of(datetime(2026, 10, 15, tzinfo=timezone.utc).timestamp())
+    day_b = day_of(datetime(2026, 11, 15, tzinfo=timezone.utc).timestamp())
+    eng = create_engine(_PG_URL, future=True)
+    with eng.begin() as c:
+        for name in (table, f"{table}_old", f"{table}_new"):
+            c.execute(text(f"DROP TABLE IF EXISTS {name} CASCADE"))
+        c.execute(text(
+            f"CREATE TABLE {table} (tenant_id varchar(80) NOT NULL, event_id varchar(80) NOT NULL, "
+            "created_day bigint NOT NULL, created_at double precision NOT NULL, "
+            "PRIMARY KEY (tenant_id, event_id, created_day))"))
+        c.execute(text(f"CREATE INDEX ix_{table}_tenant_created ON {table} (tenant_id, created_at)"))
+        c.execute(text(f"INSERT INTO {table} VALUES "
+                       f"('t1','e1',{day_a},1.0), ('t1','e2',{day_b},2.0)"))
+        c.execute(text(f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY"))
+        c.execute(text(f"ALTER TABLE {table} FORCE ROW LEVEL SECURITY"))
+        c.execute(text(f"CREATE POLICY p_tenant ON {table} "
+                       "USING (tenant_id = current_setting('app.tenant_id', true))"))
+    try:
+        with Session(eng) as s:
+            plan = partitioning.plan_conversion(s, table, months=2, now=now)
+            assert plan["blockers"] == []
+            assert plan["rows"] == 2
+            assert plan["partitions"] == [f"{table}_202610", f"{table}_202611",
+                                          f"{table}_202612", f"{table}_202701"]
+            out = partitioning.convert_to_partitioned(s, table, months=2, now=now)
+            s.commit()
+            assert out["converted"] is True and out["rows"] == 2
+            assert partitioning.is_partitioned(s, table) is True
+            assert partitioning.list_partitions(s, table) == [
+                f"{table}_202610", f"{table}_202611", f"{table}_202612", f"{table}_202701"]
+            # 数据落进了正确的物理分区（只查父表看不出这点）
+            assert s.execute(text(f"SELECT count(*) FROM {table}_202610")).scalar() == 1
+            assert s.execute(text(f"SELECT count(*) FROM {table}_202611")).scalar() == 1
+            # RLS 开关与策略：LIKE 不复制，必须由脚本补
+            rls = s.execute(text(
+                "SELECT relrowsecurity, relforcerowsecurity FROM pg_class WHERE relname = :t"),
+                {"t": table}).first()
+            assert (rls[0], rls[1]) == (True, True)
+            assert s.execute(text(
+                "SELECT count(*) FROM pg_policy WHERE polrelid = to_regclass(:t)"),
+                {"t": table}).scalar() == 1
+            # 索引/约束名回到规范名（分区索引自动派生的是 <新表>_... ）
+            idx = [r[0] for r in s.execute(text(
+                "SELECT indexname FROM pg_indexes WHERE tablename = :t"), {"t": table})]
+            assert f"ix_{table}_tenant_created" in idx, idx
+            assert any(name.endswith("_pkey") and not name.endswith("_new_pkey") for name in idx), idx
+            # 旧表已删（keep_old=False）
+            assert s.execute(text("SELECT to_regclass(:t)"), {"t": f"{table}_old"}).scalar() is None
+    finally:
+        with eng.begin() as c:
+            for name in (table, f"{table}_old", f"{table}_new"):
+                c.execute(text(f"DROP TABLE IF EXISTS {name} CASCADE"))
+        eng.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.skipif(not _PG_URL, reason="未设 DD_TEST_PG_URL，跳过 PG 分区集成测试")
+def test_real_table_writes_land_in_partition_and_retention_drops(monkeypatch):
+    """真 PG + 真迁移 + 真写路径：`save_telemetry` 落进当月分区；过期分区被整段 DROP。
+
+    前面几条 PG 用例用的是探针表；这条走**真 `telemetry_events`**，把 A9 的三段接起来：
+    alembic 迁移（主键加日桶）→ 转换成分区表 → 应用写路径 → retention 删分区。
+    """
+    from sqlalchemy import text
+
+    from data_dog.storage import migrations
+    from data_dog.storage import repository as R
+    from data_dog.storage.db import init_db, reset_engine, session_scope
+    from data_dog.storage.models import day_of
+
+    monkeypatch.setenv("DD_DATABASE_URL", _PG_URL)
+    reset_engine()
+    init_db(_PG_URL)                       # alembic upgrade head（含日桶迁移）
+    assert migrations.current_revision(_PG_URL)
+
+    with session_scope(system=True) as s:
+        if not partitioning.is_partitioned(s, partitioning.PARTITION_TABLE):
+            partitioning.convert_to_partitioned(s, partitioning.PARTITION_TABLE)
+            s.commit()
+        assert partitioning.ensure_partitions(s, partitioning.PARTITION_TABLE, months=2)
+        s.commit()
+
+    ev = {"event_id": "pg-e2e-1", "device_sn": "SN1", "occurred_at": "2026-10-14T00:00:00Z",
+          "component_type": "joint_motor", "component_instance": "hip",
+          "metrics": {"temperature_c": 61.0}}
+    with session_scope() as s:
+        R.save_telemetry(s, [ev], tenant_id="t1")
+
+    now = datetime.now(timezone.utc)
+    current = partitioning.partition_name(partitioning.PARTITION_TABLE, now)
+    with session_scope(system=True) as s:
+        # 写路径落进**当月分区**（只查父表看不出这点）
+        assert s.execute(text(f"SELECT count(*) FROM {current}")).scalar() >= 1
+
+    # 过期分区：整段早于 cutoff 的分区被 DROP（而不是逐行 DELETE）
+    lo = day_of(datetime(2020, 6, 1, tzinfo=timezone.utc).timestamp())
+    hi = day_of(datetime(2020, 7, 1, tzinfo=timezone.utc).timestamp())
+    expired = f"{partitioning.PARTITION_TABLE}_202006"
+    with session_scope(system=True) as s:
+        s.execute(text(f"DROP TABLE IF EXISTS {expired} CASCADE"))
+        s.execute(text(f"CREATE TABLE {expired} PARTITION OF {partitioning.PARTITION_TABLE} "
+                       f"FOR VALUES FROM ({lo}) TO ({hi})"))
+        s.commit()
+        assert expired in partitioning.list_partitions(s, partitioning.PARTITION_TABLE)
+        dropped = partitioning.drop_partitions_before(
+            s, datetime(2020, 8, 1, tzinfo=timezone.utc).timestamp(),
+            partitioning.PARTITION_TABLE)
+        s.commit()
+        assert expired in dropped
+        assert expired not in partitioning.list_partitions(s, partitioning.PARTITION_TABLE)
