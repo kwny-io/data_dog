@@ -158,3 +158,17 @@ serviceMonitor:
   interval: 30s
   path: /metrics
   labels: {}
+
+# ---- Prometheus Operator 告警规则（可选）----
+# 把 docs/slo.md §9 的目标变成"会响的"规则。与 ServiceMonitor 同一前提：
+# 集群需装 Prometheus Operator（提供 PrometheusRule CRD）。
+# 阈值与 docs/slo.md §9 的表一一对应——改这里请同步改文档（反之亦然）。
+prometheusRule:
+  enabled: false
+  # 供 Prometheus Operator 选中本规则对象的标签（如 release: kube-prometheus-stack），
+  # 不是告警路由标签；severity 等路由标签写在规则里。
+  labels: {}
+  # 异步调查待办深度阈值（持续 15 分钟超过才告警）
+  queueDepthThreshold: 50
+  # 30 分钟内失败调查数阈值
+  failureCountThreshold: 5

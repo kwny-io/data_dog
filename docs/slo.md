@@ -180,8 +180,47 @@ loadgen 客户端实测能推 **997 req/s**，故客户端也不是瓶颈）。
 
 ---
 
-## 9. 版本记录
+## 9. 告警规则（把目标变成"会响的"）
+
+> **为什么有这一节**：`servicemonitor.yaml` 只解决"抓得到"。指标再全，没有一条规则把目标
+> 变成"会响的"，SLO 就只活在文档里——`data_dog_audit_write_failed_total` 这类注释写着
+> "必须告警"的计数器，此前也只是空头承诺。规则本体在
+> [`helm/data-dog/templates/prometheusrule.yaml`](../helm/data-dog/templates/prometheusrule.yaml)
+> （`prometheusRule.enabled=true` 才渲染；前提同 ServiceMonitor：集群装了 Prometheus Operator）。
+> **本表与规则文件是同一件事的两面——改一边必须改另一边。**
+
+| 规则 | 指标 / 口径 | 触发 | 级别 | 依据 |
+|---|---|---|---|---|
+| `DataDogApiErrorRateHigh` | `data_dog_http_requests_total{status=~"5.."}` / 全部请求 | > 1% 持续 10m | critical | **工程阈值**：本仓**没有**可用性百分比目标（§7 首期不承诺），1% 是"抢在用户感知前"的线 |
+| `DataDogIngestLatencyP99High` | `data_dog_http_request_duration_seconds_bucket{path="/v1/telemetry"}` 的 P99 | > 500ms 持续 15m | warning | **本文件 §3**：候选产出端到端 P99 ≤ 500ms。只算热路径——同步调查等真 LLM（10–60s），混进来会把 P99 带偏 |
+| `DataDogTargetDown` | `up{job=~".*data-dog.*"}` | = 0 持续 5m | critical | 抓取链路可用性（Prometheus 侧） |
+| `DataDogAuthDisabled` | `data_dog_auth_enabled` | = 0 持续 5m | critical | README 诚实边界："端口开放 = 任何人可读写" |
+| `DataDogInvestigationQueueBacklog` | `data_dog_investigation_queue_depth` | > `prometheusRule.queueDepthThreshold`（默认 50）持续 15m | warning | **工程阈值**：队列**无长度上限**是有意的失败开放，积压只能靠它被发现 |
+| `DataDogInvestigationFailures` | `data_dog_investigation_jobs_total{status="failed"}` 的 30m 增量 | > `prometheusRule.failureCountThreshold`（默认 5） | warning | 失败**会 fail-closed 到人工**（不是静默），但仍需要量级可见性 |
+| `DataDogLlmBudgetExceeded` | `data_dog_llm_budget_exceeded_total` 的 15m 增量 | > 0 | warning | A1 额度硬熔断。指标**故意不带租户标签**（基数）：知道"有人撞线"，不知道是谁 |
+| `DataDogAuditWriteFailed` | `data_dog_audit_write_failed_total` 的 10m 增量 | > 0 | critical | §6/§17：审计只增；**写失败不会让业务请求失败**，这是唯一可见窗口 |
+| `DataDogWriteBehindDataLoss` | `data_dog_write_behind_total{result=~"failed\|rejected_full"}` 的 10m 增量 | > 0 | critical | 开了 write-behind 时"响应已 200 但没落库"的证据（静默丢数据） |
+| `DataDogStreamDown` | `max(data_dog_stream_up)` | = 0 持续 5m | critical | 仅当 `stream.enabled=true` 才渲染（否则 API 的 `stream_up=0` 会永久误报） |
+| `DataDogStreamDropped` | `data_dog_stream_dropped_total` 的 10m 增量 | > 0 | warning | 背压证据：丢的是**消息**，不是延迟 |
+| `DataDogReplicationLagHigh` | `max by (from,to) (data_dog_replication_lag_seconds)` | > 60s 持续 10m | warning | §7：跨地域多活定位 **RPO>0**；单区域没有该 series，规则自然不触发 |
+
+**诚实边界**：
+
+- **阈值不等于 SLO**：上表"依据"列把两者分开——只有接入 P99 直接来自本文件 §3 的预算，其余是
+  **工程阈值**（防"文档没写、但线上确实会出事"的那类）。**没有任何一条规则能替代容量规划。**
+- **规则不带租户标签**：所有表达式都是全局聚合（避免标签基数爆炸）。要定位"是哪个租户"，
+  得查安全审计与调查运行日志（`GET /v1/audit`、`GET /v1/investigations/runs`），不在指标里。
+- **渲染校验需要 `helm`**：本仓不内置 helm 二进制，`make helm-lint` / `make verify-chart`
+  需要本机或 CI 安装（CI 由 `azure/setup-helm` 提供）。另有一条**不依赖 helm** 的 meta 测试
+  [`tests/test_helm_alerts.py`](../tests/test_helm_alerts.py)：规则里出现的每个 `data_dog_*`
+  指标必须在 `src/data_dog/core/metrics.py` 里真实注册——引用不存在的指标就是**永不触发的
+  死规则**，这条测试专门钉它。
+
+---
+
+## 10. 版本记录
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
 | v0.1 | 2026-09-13 | 首版；全部为设计预算值，待真实数据校准 |
+| v0.1.1 | 2026-10-14 | 新增 §9 告警规则：把 §3 的 P99 与两类"静默失败"（审计写入、write-behind 丢数）落成 PrometheusRule；版本记录顺延为 §10 |

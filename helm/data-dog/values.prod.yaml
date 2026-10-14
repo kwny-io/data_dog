@@ -56,3 +56,8 @@ podDisruptionBudget:
 serviceMonitor:
   enabled: true
   interval: 30s
+
+prometheusRule:
+  enabled: true
+  # 按集群里 Prometheus Operator 的选择器打标签（kube-prometheus-stack 常见为 release）
+  labels: {}

@@ -172,6 +172,41 @@ def main() -> int:
     check("不支持" in (err + out) or "不支持" in err,
           "拒绝原因提到多副本不受支持")
 
+    # ---- PrometheusRule（告警规则）----
+    # 规则文件本身"引用的指标是否存在"由 tests/test_helm_alerts.py 钉（不需要 helm）；
+    # 这里只钉**渲染行为**：默认不出、开启时恰好一个、且 stream 开关与 StreamDown 规则一致。
+    print("== PrometheusRule（默认关，开启后生效）==")
+    check(not _by_kind(ds, "PrometheusRule"),
+          "默认 values **不**渲染 PrometheusRule（不是每个集群都装了 Operator）")
+
+    rc, out, err = render(helm, ["--set", "prometheusRule.enabled=true"])
+    check(rc == 0, f"prometheusRule.enabled=true 渲染成功（rc={rc}）")
+    if rc == 0:
+        rules = _by_kind(docs(out), "PrometheusRule")
+        check(len(rules) == 1, "恰好 1 个 PrometheusRule")
+        if rules:
+            groups = rules[0].get("spec", {}).get("groups", [])
+            alerts = {r.get("alert") for g in groups for r in g.get("rules", [])}
+            # 两条"静默失败唯一可见窗口"必须真的在渲染结果里。
+            must = {"DataDogAuditWriteFailed", "DataDogWriteBehindDataLoss",
+                    "DataDogIngestLatencyP99High"}
+            check(must <= alerts, f"关键告警齐全（缺：{sorted(must - alerts)}）")
+            check("DataDogStreamDown" not in alerts,
+                  "stream 关闭时**不**渲染 DataDogStreamDown（否则 API 的 stream_up=0 会永久误报）")
+
+    rc, out, err = render(helm, ["-f", f"{CHART}/values.prod.yaml",
+                                 "--set", "prometheusRule.enabled=true"])
+    check(rc == 0, f"生产覆盖值 + 规则开启渲染成功（rc={rc}）")
+    if rc == 0:
+        dsp = docs(out)
+        rules = _by_kind(dsp, "PrometheusRule")
+        if rules:
+            alerts = {r.get("alert")
+                      for g in rules[0].get("spec", {}).get("groups", [])
+                      for r in g.get("rules", [])}
+            check("DataDogStreamDown" in alerts,
+                  "stream 开启时渲染 DataDogStreamDown（消费者必须被看着）")
+
     print()
     if _FAILS:
         print(f"[verify_chart] {len(_FAILS)} 项不变量被破坏")

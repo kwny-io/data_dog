@@ -1,0 +1,168 @@
+{{- if .Values.prometheusRule.enabled }}
+# 把 docs/slo.md §9 的目标变成**会响的**规则。
+#
+# 为什么需要这一层：ServiceMonitor 只解决"抓得到"，不解决"有人被叫醒"。指标齐全但一条
+# 规则都没有，SLO 就只活在文档里；`audit_write_failed` 这类注释写着"必须告警"的计数器
+# 也只是空头承诺。本文件是那句话的兑现。
+#
+# 前提：集群装了 Prometheus Operator（提供 PrometheusRule CRD）——与 ServiceMonitor 同一前提。
+# 阈值口径与 docs/slo.md §9 的表一一对应；**改这里必须同步改那张表**（反之亦然）。
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "data-dog.fullname" . }}
+  labels:
+    {{- include "data-dog.labels" . | nindent 4 }}
+    {{- with .Values.prometheusRule.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  groups:
+    # ---- 可用性：目标"服务在、且没在报错" ----
+    - name: data-dog.availability
+      rules:
+        - alert: DataDogApiErrorRateHigh
+          # clamp_min 防分母为 0：完全没有流量时不该判成"错误率 100%"。
+          expr: |
+            (
+              sum(rate(data_dog_http_requests_total{status=~"5.."}[5m]))
+              /
+              clamp_min(sum(rate(data_dog_http_requests_total[5m])), 0.001)
+            ) > 0.01
+          for: 10m
+          labels:
+            severity: critical
+          annotations:
+            summary: "data_dog API 5xx 比例 > 1%（持续 10 分钟）"
+            description: >-
+              5xx / 全部请求。**本仓没有可用性百分比目标**（docs/slo.md §7 明确不承诺），
+              1% 是工程阈值：抢在"用户感知明显"之前。先看 /readyz 与 DB/StateStore 依赖，
+              定位用 GET /v1/investigations/runs 与安全审计，规则表见 docs/slo.md §9。
+        - alert: DataDogIngestLatencyP99High
+          # 只算接入热路径（候选产出端到端预算 P99 ≤ 500ms）。**不要**把
+          # /v1/investigations 混进来：同步调查要等一次真 LLM（10-60s），会把热路径的
+          # P99 直接带偏——那正是 histogram 补长桶要分开看的两条路。
+          expr: |
+            histogram_quantile(
+              0.99,
+              sum by (le) (
+                rate(data_dog_http_request_duration_seconds_bucket{path="/v1/telemetry"}[10m])
+              )
+            ) > 0.5
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "接入热路径 P99 > 500ms（SLO §3 预算上限）"
+            description: >-
+              仅 POST /v1/telemetry。P99 超标通常意味着**落库排队**而不是算子慢，
+              根因分析见 docs/write_path_batching.md。
+        - alert: DataDogTargetDown
+          expr: up{job=~".*data-dog.*"} == 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "data_dog 抓取目标掉线（up=0）"
+            description: >-
+              Prometheus 抓不到 /metrics。先确认 Pod Ready、ServiceMonitor 选中的端口与
+              Service 的 targetPort 一致。
+        - alert: DataDogAuthDisabled
+          # 未启用鉴权 = 端口开放即任何人可读写（README「诚实边界」明说）。
+          expr: data_dog_auth_enabled == 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "API 鉴权未启用（DD_API_KEY 为空）"
+            description: "演示环境以外必须失败关闭：不含鉴权的服务不该对外可达。"
+    # ---- 慢路径：异步调查（治理与积压）----
+    - name: data-dog.investigation
+      rules:
+        - alert: DataDogInvestigationQueueBacklog
+          # 待办深度持续高于阈值 = 提交快于消费（假受理的可见窗口）。
+          expr: data_dog_investigation_queue_depth > {{ .Values.prometheusRule.queueDepthThreshold }}
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "异步调查待办积压超过阈值（持续 15 分钟）"
+            description: >-
+              队列在 StateStore 里**无长度上限**（有意的失败开放），所以积压只能靠这条规则
+              被发现。先看 worker 是否活着、再考虑扩副本；现在是"已受理但要等"。
+        - alert: DataDogInvestigationFailures
+          expr: increase(data_dog_investigation_jobs_total{status="failed"}[30m]) > {{ .Values.prometheusRule.failureCountThreshold }}
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "30 分钟内调查失败次数超过阈值"
+            description: >-
+              失败会 fail-closed 到人工（不是静默）。逐条失败上下文在调查运行日志里：
+              GET /v1/investigations/runs 与 /v1/investigations/jobs/{job_id}/log。
+        - alert: DataDogLlmBudgetExceeded
+          # 额度硬熔断被触发。**故意不带租户标签**（避免基数爆炸）：能知道"有人撞线"，
+          # 不能从指标里知道是谁——要知道是谁得查审计/运行日志，这是有意的边界。
+          expr: increase(data_dog_llm_budget_exceeded_total[15m]) > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "有租户的 LLM 额度/花费被熔断（15 分钟内）"
+            description: >-
+              额度按"接活前 / 跑一半"分阶段（stage 标签）。撞线属预期治理行为，
+              短时间多次说明上限设得太紧或有人在刷候选。
+    # ---- 数据完整性：静默失败的唯一可见窗口 ----
+    - name: data-dog.integrity
+      rules:
+        - alert: DataDogAuditWriteFailed
+          # 审计写不进去**不会**让业务请求失败——只能靠这个计数器发现。审计缺失=合规缺口。
+          expr: increase(data_dog_audit_write_failed_total[10m]) > 0
+          for: 0m
+          labels:
+            severity: critical
+          annotations:
+            summary: "安全审计写入失败（10 分钟内 > 0 次）"
+            description: "审计是只增证据，写不进去等于合规缺口。查 DB 写权限/磁盘/RLS 通道。"
+        - alert: DataDogWriteBehindDataLoss
+          # 开了 write-behind 后，failed / rejected_full 都意味着"响应已 200 但数据没落库"。
+          expr: increase(data_dog_write_behind_total{result=~"failed|rejected_full"}[10m]) > 0
+          for: 0m
+          labels:
+            severity: critical
+          annotations:
+            summary: "write-behind 丢数据（响应已 200 但未落库）"
+            description: >-
+              仅 DD_WRITE_BEHIND=1 时有意义。failed=写失败，rejected_full=队列满拒收；
+              两者都是静默丢数据的证据，必须当事故处理。
+        {{- if .Values.stream.enabled }}
+        - alert: DataDogStreamDown
+          # 只在**本 chart 开了消费者**的部署里断言：否则 API Pod 的 stream_up=0
+          # （未启用）会把 max 拉到 0，形成永久误报。
+          expr: max(data_dog_stream_up) == 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "流式消费者未存活（stream_up=0）"
+            description: "stream 工作负载开了但没有副本在消费：日志会停在上游不落库。"
+        {{- end }}
+        - alert: DataDogStreamDropped
+          # 队列满丢弃 = 背压证据（推式源）。丢的是消息，不是延迟。
+          expr: increase(data_dog_stream_dropped_total[10m]) > 0
+          for: 0m
+          labels:
+            severity: warning
+          annotations:
+            summary: "流式队列满导致丢弃消息（10 分钟内）"
+            description: "消费跟不上或下游阻塞。先扩消费者副本，再看消费延迟直方图。"
+        - alert: DataDogReplicationLagHigh
+          # 单区域部署没有这个 series，规则自然不触发（inert），不需要按 region 开开关。
+          expr: max by (from, to) (data_dog_replication_lag_seconds) > 60
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "跨区域复制延迟 > 60s（from/to 见标签）"
+            description: "RPO > 0 是应用层近似的已知边界；持续落后说明链路或上游写入压力异常。"
+{{- end }}

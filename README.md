@@ -13,7 +13,7 @@
 | | 亮点 | 证据 |
 |---|---|---|
 | 🔗 | **全链闭环，一条命令跑通** | 厂商文档 →[P1]→ 算子 →[P2]→ 候选 →[Agent]→ 报告 →[P3]→ 策略门 → SaaS 反馈，`python -m data_dog.e2e.replay_demo` |
-| 🧪 | **1199 项测试，全离线确定性** | `pytest -q` → `1187 passed, 12 skipped`（94 个测试文件，fake provider，无需 API Key、不联网；12 skipped = 未设 `DD_TEST_PG_URL` 的真 PostgreSQL 用例 **×8**（含 RLS 系统扫描 2 条、审计表 RLS 1 条）+ 未设 `DD_TEST_REDIS_URL` 的真 Redis 契约用例 ×4，两者由 CI 的 `postgres` / `redis` 集成腿实测；Redis 后端的行为测试另由 `.[dev]` 里的 `fakeredis` 离线跑） |
+| 🧪 | **1199 项测试，全离线确定性** | `pytest -q` → `1187 passed, 12 skipped`（95 个测试文件，fake provider，无需 API Key、不联网；12 skipped = 未设 `DD_TEST_PG_URL` 的真 PostgreSQL 用例 **×8**（含 RLS 系统扫描 2 条、审计表 RLS 1 条）+ 未设 `DD_TEST_REDIS_URL` 的真 Redis 契约用例 ×4，两者由 CI 的 `postgres` / `redis` 集成腿实测；Redis 后端的行为测试另由 `.[dev]` 里的 `fakeredis` 离线跑） |
 | 🔒 | **热路径确定性：上报不交给模型判断** | 上不上报由**确定性策略门**（四条件决策表 + 冲突消解）决定，同输入永远同结论；模型只出现在"调查报告"那一步 |
 | 🧱 | **不拿 `eval` 执行厂商字符串** | 自建**受限 DSL**：词法 → AST 解释器，无动态执行原语、函数闭集白名单、编译期类型检查 |
 | 🔍 | **诚实抽取，区分"能证实 / 待确认"** | 官方 SDK 头文件明写电机 **90°C 触发保护** → `verified`；无出处的 75°C → `unconfirmed`，**不冒充厂商事实** |
@@ -23,7 +23,7 @@
 | 📊 | **带 ground truth 的规模化评估（双栏）** | **忠实 MuJoCo 数据集 10 万条**，分层抽跑真实 Agent：**确定性 provider** n=2000 → **准确率 0.818**（Wilson 95% CI 0.801–0.834）、normal 误报率 **0.064**；**真 LLM** n=500 → **0.708**（0.667–0.746）、normal 误报率 **0.72**（故障召回反而更高）。逐类召回一并如实报（**F4 偏置 0.43 为当前最低**）；误报根因（裁决口径把"证据不足"与"证据充分但正常"混为一谈）**已定位并改口径，效果标注为未实测**（本机 key 余额为零）；另有 7 个评估 case（含 2 个对抗性：提示注入 / 身份伪装） |
 | 🚚 | **能交付：服务 + 容器 + HTTPS** | FastAPI（liveness / readiness 分离）+ Dockerfile + compose（含 Caddy 自动申请 HTTPS）+ Makefile |
 
-**规模**：源码 152 个 Python 文件 / 27309 行，测试 94 个文件 / 21782 行；前端 `web/` 为 Next.js 15 控制台（60 个 TS/TSX 文件）；5 份正式事件 JSON Schema；30 个 `make` 命令（另有 `help`）。
+**规模**：源码 152 个 Python 文件 / 27309 行，测试 95 个文件 / 21906 行；前端 `web/` 为 Next.js 15 控制台（60 个 TS/TSX 文件）；5 份正式事件 JSON Schema；30 个 `make` 命令（另有 `help`）。
 
 ---
 
@@ -43,6 +43,7 @@
 （b）列表查询是"租户过滤 + created_at 排序"，而索引只有单列：补 `(tenant_id, created_at[, tiebreaker])`
 （telemetry/candidates/reports/alerts/jobs）。（c）`http_request_duration_seconds` 顶格只有 2.5s，而**同步**调查要等
 一次真 LLM（10–60s）→ 那条路的 P95/P99 全落 `+Inf`、**实际不可观测**；补到 120s（异步路另有 job 直方图）。
+- **SLO 从"写在文档里"变成"会响的"（2026-10-14）**。此前 helm 只有 ServiceMonitor——指标抓得到，但**没有一条告警规则**，`audit_write_failed` 这类注释写着"必须告警"的计数器也只是空头承诺。现随 chart 出 `PrometheusRule`（`prometheusRule.enabled=true`，前提同 ServiceMonitor：集群装了 Prometheus Operator），规则覆盖四类：**可用性**（5xx 比例、抓取目标掉线、**鉴权未启用**）、**热路径 P99 > 500ms**（直接来自 SLO §3 的预算）、**慢路径治理**（队列积压、调查失败数、**LLM 额度熔断**）、以及三条"**静默失败唯一可见窗口**"（**审计写入失败**、write-behind 丢数、流式队列满丢弃）。**边界照实说**：只有接入 P99 那一条阈值来自 `docs/slo.md` §3，其余是**工程阈值**（§9 的"依据"列逐条区分）；表达式全是全局聚合、**不带租户标签**（防基数爆炸），要定位到具体租户得查审计 / 运行日志；渲染校验需要 `helm`（CI 的 `make helm-lint` / `verify-chart`），本仓另有一条**不依赖 helm** 的 meta 测试（`tests/test_helm_alerts.py`）：规则里每个指标必须在 `core/metrics.py` 里真实声明——引用不存在的指标就是**永不触发的死规则**。
 - **提示注入有结构性防御 + 红队入口（2026-10-13）**。模型分不清"数据"和"指令"，而候选正文、遥测、
 **用户上传的厂商文档**、工具返回都会进上下文。三层处置：**能力边界**（模型**不能直接产生副作用**——
 上报与否由确定性策略门决定、工具只读 + 部件白名单、热路径无 LLM；这是唯一"防住"意义上的那一层）；
