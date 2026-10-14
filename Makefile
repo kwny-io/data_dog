@@ -6,7 +6,7 @@ PY ?= $(shell if [ -x .venv/bin/python ]; then echo .venv/bin/python; \
               else echo python; fi)
 PORT ?= 8000
 
-.PHONY: help gates hooks numbers requirements format install test lint typecheck cov serve probe ingest e2e ui bench up up-prod down down-prod logs ps health clean helm-lint verify-chart k8s-e2e retention perf-probe
+.PHONY: help gates hooks numbers requirements format install test lint typecheck cov serve probe ingest e2e ui bench up up-prod down down-prod logs ps health clean helm-lint verify-chart k8s-e2e retention perf-probe config-check
 
 help:            ## 显示所有命令
 	@echo "make install  安装依赖(含服务)"
@@ -16,6 +16,7 @@ help:            ## 显示所有命令
 	@echo "make gates    提交前必过(ruff + mypy + 全量测试)"
 	@echo "make hooks    装 git 钩子(pre-commit: ruff / pre-push: make gates)"
 	@echo "make numbers  重算并回填 README 的规模数字"
+	@echo "make config-check 配置体检(未知键/非法取值/危险组合; STRICT=1 警告也算失败)"
 	@echo "make requirements  由 pyproject.toml 重新生成 requirements.txt"
 	@echo "make format   可选: ruff format(会重排大量文件, 慎用)"
 	@echo "make cov      带覆盖率跑测试"
@@ -57,6 +58,9 @@ hooks:           ## 装 git 钩子（pre-commit: ruff 变更文件；pre-push: m
 
 numbers:         ## 重算并回填 README 的规模数字（由 tests/test_project_meta.py 把关）
 	$(PY) scripts/readme_counts.py
+
+config-check:    ## 配置体检：未知键/非法取值/危险组合（STRICT=1 时警告也算失败）
+	$(PY) -m data_dog.config_check $(if $(STRICT),--strict,)
 
 requirements:    ## 由 pyproject.toml 重新生成 requirements.txt（单一事实源）
 	$(PY) scripts/gen_requirements.py

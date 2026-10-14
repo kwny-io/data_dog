@@ -31,6 +31,31 @@ def _console_setup() -> None:
     ensure_utf8_console()
 
 
+config_app = typer.Typer(add_completion=False, help="配置体检与诊断")
+
+
+@config_app.command("check")
+def config_check(
+    json_out: bool = typer.Option(False, "--json", help="输出 JSON（供流水线采集）"),
+    strict: bool = typer.Option(False, "--strict", help="警告也算失败（非零退出）"),
+) -> None:
+    """体检环境变量配置：未知键 / 非法取值 / 危险组合（不连库、不验密钥真假）。"""
+    import json as _json
+
+    from .config_check import check, render
+
+    report = check()
+    if json_out:
+        print(_json.dumps(report, ensure_ascii=False))
+    else:
+        print(render(report))
+    if report["errors"] or (strict and report["warnings"]):
+        raise typer.Exit(1)
+
+
+app.add_typer(config_app, name="config")
+
+
 @app.command()
 def init(
     vendor: str = typer.Option(None, help="供应商 id，如 deepseek / openai / zhipu"),
