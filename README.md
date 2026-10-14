@@ -23,7 +23,7 @@
 | 📊 | **带 ground truth 的规模化评估（双栏）** | **忠实 MuJoCo 数据集 10 万条**，分层抽跑真实 Agent：**确定性 provider** n=2000 → **准确率 0.818**（Wilson 95% CI 0.801–0.834）、normal 误报率 **0.064**；**真 LLM** n=500 → **0.708**（0.667–0.746）、normal 误报率 **0.72**（故障召回反而更高）。逐类召回一并如实报（**F4 偏置 0.43 为当前最低**）；误报根因（裁决口径把"证据不足"与"证据充分但正常"混为一谈）**已定位并改口径，效果标注为未实测**（本机 key 余额为零）；另有 7 个评估 case（含 2 个对抗性：提示注入 / 身份伪装） |
 | 🚚 | **能交付：服务 + 容器 + HTTPS** | FastAPI（liveness / readiness 分离）+ Dockerfile + compose（含 Caddy 自动申请 HTTPS）+ Makefile |
 
-**规模**：源码 153 个 Python 文件 / 27784 行，测试 96 个文件 / 22243 行；前端 `web/` 为 Next.js 15 控制台（60 个 TS/TSX 文件）；5 份正式事件 JSON Schema；31 个 `make` 命令（另有 `help`）。
+**规模**：源码 153 个 Python 文件 / 27790 行，测试 96 个文件 / 22299 行；前端 `web/` 为 Next.js 15 控制台（60 个 TS/TSX 文件）；5 份正式事件 JSON Schema；31 个 `make` 命令（另有 `help`）。
 
 ---
 
@@ -438,7 +438,7 @@ docker compose ps
 | `/v1/candidates/{id}` | GET | 候选项详情 |
 | `/v1/candidates/{id}/evidence` | GET | Agent 所见证据（指标 / 参考窗口 / 厂商知识） |
 | `/v1/candidates/{id}/refs` | GET | 证据引用（挂到结论的出处） |
-| `/v1/investigations` | POST | 对候选跑 Agent 受控调查 → 持久化报告。可带 `Idempotency-Key` 做提交幂等；**队列满 / 额度耗尽 → 429 + `Retry-After`**（都不落 job） |
+| `/v1/investigations` | POST | 对候选跑 Agent 受控调查 → 持久化报告。**默认异步**：回 `202 {job_id}`，轮询 `.../jobs/{id}` 到终态后取 `.../result`（`?sync=1` 退回同步 200）；可带 `Idempotency-Key` 做提交幂等；**队列满 / 额度耗尽 → 429 + `Retry-After`**（都不落 job） |
 | `/v1/investigations/{id}` | GET | 读持久化报告 |
 | `/v1/feedback` | POST | 人工反馈（误报 / 已修复 / 无需动作）→ 驱动告警状态机 |
 | `/v1/alerts/{id}/feedback` | GET | 读某告警的反馈历史 |

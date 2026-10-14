@@ -29,6 +29,10 @@ from data_dog.state.memory import InMemoryStateStore
 def db(tmp_path, monkeypatch):
     url = f"sqlite:///{(tmp_path / 'jobs.db').as_posix()}"
     monkeypatch.setenv("DD_DATABASE_URL", url)
+    # pending 阈值下限 1s，所以 "1" 真的生效；
+    # **running 阈值下限是 10s**（`settings.investigate_stale_running_s` 里的 `max(10.0, ...)`，
+    # 防"慢但还活着"被误判），所以这里写 1 实际是 10——种 running 必须用 age_s=30，
+    # 用 10 会正好卡在 `started_at < now-10` 的边界上（Windows 时钟粒度 ~15.6ms → 约 20% 概率红）。
     monkeypatch.setenv("DD_INVESTIGATE_STALE_PENDING_S", "1")
     monkeypatch.setenv("DD_INVESTIGATE_STALE_RUNNING_S", "1")
     from data_dog.storage.db import init_db, reset_engine
@@ -204,7 +208,7 @@ def test_stale_pending_job_is_requeued_and_executed_once(db):
 
 def test_stale_running_job_is_abandoned_and_not_rerun(db):
     """`running` 过旧（完成写回前被杀）→ 标 failed(abandoned)，**不入队重跑**。"""
-    _seed_job(status="running", age_s=10)
+    _seed_job(status="running", age_s=30)
     r = _runner(lambda *a: {"status": "succeeded"})
 
     stats = r.recover_stale()
@@ -226,10 +230,27 @@ def test_recover_ignores_fresh_jobs(db):
     assert _job("t1", "job_running")["status"] == "running"
 
 
+def test_running_stale_threshold_has_a_10s_floor(monkeypatch):
+    """`running` 阈值有 **10s 下限**：env 设成 1 实际仍是 10（防误判"慢但还活着"的 worker）。
+
+    这条钉死一个真实踩过的坑：测试把 env 设成 `1` 就以为阈值是 1，于是用 `age_s=10` 种 running，
+    结果正好落在 `started_at < now - 10` 的边界上——Windows `time.time()` 粒度 ~15.6ms，
+    全量跑约 20% 概率红（单独跑常过）。要么种更老（30s），要么别依赖下限之下的值。
+    """
+    from data_dog import settings
+
+    monkeypatch.setenv("DD_INVESTIGATE_STALE_RUNNING_S", "1")
+    assert settings.investigate_stale_running_s() == 10.0
+    monkeypatch.setenv("DD_INVESTIGATE_STALE_RUNNING_S", "30")
+    assert settings.investigate_stale_running_s() == 30.0
+    monkeypatch.setenv("DD_INVESTIGATE_STALE_PENDING_S", "1")
+    assert settings.investigate_stale_pending_s() == 1.0, "pending 没有 10s 下限"
+
+
 def test_recover_is_multi_replica_safe(db):
     """两个副本同时扫：入队幂等、终态是条件更新（第二次不再改）。"""
     _seed_job("t1", "job_p", status="pending", age_s=10)
-    _seed_job("t1", "job_r", status="running", age_s=10)
+    _seed_job("t1", "job_r", status="running", age_s=30)
 
     r1 = _runner(lambda *a: {"status": "succeeded"})
     r2 = _runner(lambda *a: {"status": "succeeded"})
@@ -259,7 +280,7 @@ def test_recover_scan_uses_explicit_system_scope(db, monkeypatch):
 
     monkeypatch.setattr(dbmod, "session_scope", _spy)
     _seed_job("t1", "job_p", status="pending", age_s=10)
-    _seed_job("t1", "job_r", status="running", age_s=10)
+    _seed_job("t1", "job_r", status="running", age_s=30)
     seen.clear()                      # 只看扫描期间
 
     _runner(lambda *a: {"status": "succeeded"}).recover_stale()
