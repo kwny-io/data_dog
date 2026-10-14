@@ -73,7 +73,7 @@ def test_create_and_drop_sql_use_epoch_bounds():
     assert sql == (
         "CREATE TABLE IF NOT EXISTS telemetry_events_202610 "
         "PARTITION OF telemetry_events "
-        f"FOR VALUES FROM ({int(start.timestamp())}) TO ({int(end.timestamp())})")
+        f"FOR VALUES FROM ('{int(start.timestamp())}') TO ('{int(end.timestamp())}')")
     assert partitioning.drop_partition_sql("telemetry_events_202610") == (
         "DROP TABLE IF EXISTS telemetry_events_202610")
 
