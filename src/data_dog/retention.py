@@ -31,6 +31,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from . import audit, settings
+from .state import Lease, get_state_store
 
 _SECONDS_PER_DAY = 86400.0
 
@@ -38,6 +39,9 @@ _SECONDS_PER_DAY = 86400.0
 # 只清**已终态**：`pending`/`running` 的 job 再老也不能删——那是还没干完的活。
 _TERMINAL_STATUSES = ("succeeded", "failed", "cancelled", "abandoned")
 _TERMINAL_WHERE = "status IN (" + ",".join(f"'{s}'" for s in _TERMINAL_STATUSES) + ")"
+
+# 清理租约的 key（与 file 源 / 升级 sweeper 同一套 Lease 原语，只是名字不同）
+_PURGE_LEASE_KEY = "retention:purge"
 
 
 @dataclass(frozen=True)
@@ -108,11 +112,48 @@ def plan(*, now: float | None = None) -> list[dict[str, Any]]:
 
 
 def run_once(*, now: float | None = None, batch_size: int = 500,
-             max_batches: int = 200, dry_run: bool = False) -> dict[str, Any]:
+             max_batches: int = 200, dry_run: bool = False,
+             lease: bool | None = None) -> dict[str, Any]:
     """跑一轮清理。返回报告（含每表删除行数、是否被批次数截断）。
 
-    `dry_run=True` 时只统计不删（等价于 `plan()` 的汇总口径），且**不写审计**。
+    `dry_run=True` 时只统计不删（等价于 `plan()` 的汇总口径），且**不写审计**、**不抢租约**
+    （只读动作没必要互斥）。
+
+    **单持有者租约（多副本）**：真的删之前先抢 `retention:purge`。抢不到 → 本轮**跳过**
+    并如实返回 `skipped="lease_held"`（不是失败、不是"删了 0 行"——两者要能区分）。
+    理由：多副本同时清会互相锁行、制造 I/O 尖峰，"谁在删"也无人可查。
+    `lease=False` 或 `DD_RETENTION_LEASE=0` 可关闭（单机直跑）。
     """
+    if not dry_run and (lease if lease is not None else settings.retention_lease()):
+        holder = _acquire_purge_lease()
+        if holder is None:
+            current = get_state_store().get(_PURGE_LEASE_KEY)
+            owner = current.get("owner", "") if isinstance(current, dict) else ""
+            return {"ok": True, "skipped": "lease_held", "lease_owner": owner or "?",
+                    "now": time.time() if now is None else now, "dry_run": False,
+                    "batch_size": batch_size, "max_batches": max_batches,
+                    "total": 0, "tables": []}
+        try:
+            return _run_once_locked(now=now, batch_size=batch_size,
+                                    max_batches=max_batches, dry_run=dry_run)
+        finally:
+            holder.release()
+    return _run_once_locked(now=now, batch_size=batch_size,
+                            max_batches=max_batches, dry_run=dry_run)
+
+
+def _acquire_purge_lease() -> Lease | None:
+    """抢清理租约；抢不到返回 None（调用方当作"本轮跳过"）。"""
+    from .state import default_owner, get_state_store
+
+    holder = Lease(get_state_store(), _PURGE_LEASE_KEY, default_owner(),
+                   ttl_s=settings.retention_lease_ttl_s())
+    return holder if holder.acquire() else None
+
+
+def _run_once_locked(*, now: float | None = None, batch_size: int = 500,
+                     max_batches: int = 200, dry_run: bool = False) -> dict[str, Any]:
+    """真正干活的那一半（已持有租约或显式关闭租约时调用）。"""
     from sqlalchemy import func, select
 
     from .storage.db import session_scope
@@ -202,8 +243,10 @@ def main(argv: list[str] | None = None) -> int:
     """`python -m data_dog.retention [--dry-run] [--json]`。
 
     做成 CLI（而不是常驻线程）：清理是**低频、可外部调度**的作业，交给 cron /
-    K8s CronJob 比在应用进程里再养一个循环更好——重启不会漏跑，多副本也不会各自跑一份
-    （真要放进服务，得先给它配单持有者租约，见 `state/lease.py` 的既有做法）。
+    K8s CronJob 比在应用进程里再养一个循环更好——重启不会漏跑。
+    外部调度可能**同时**触发多个副本（重叠的 cron、手工补跑），故真删之前先抢
+    `retention:purge` 单持有者租约（`state/lease.py` 同一把原语，`DD_RETENTION_LEASE`，
+    默认开）：抢不到就本轮跳过，见 `run_once`。
     """
     import argparse
     import json as _json
@@ -228,6 +271,13 @@ def main(argv: list[str] | None = None) -> int:
                       dry_run=args.dry_run)
     if args.json:
         print(_json.dumps(report, ensure_ascii=False))
+        return 0
+
+    if report.get("skipped"):
+        # 说清楚是"本轮没干活"而不是"跑了但没东西可清"——两者对运维的含义完全不同。
+        print("===== 数据保留清理：本轮跳过 =====")
+        print(f"  单持有者租约被 {report.get('lease_owner', '?')} 持有"
+              "（多副本同一时刻只允许一个在删）；下一轮再来")
         return 0
 
     mode = "DRY-RUN（未删除）" if args.dry_run else "已执行"

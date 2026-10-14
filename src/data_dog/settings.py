@@ -402,6 +402,25 @@ def retention_days() -> dict[str, int]:
     }
 
 
+def retention_lease() -> bool:
+    """保留清理是否先抢**单持有者租约**（DD_RETENTION_LEASE，默认 1 = 抢）。
+
+    为什么：清理本身幂等（同一批删两次结果一样），但多副本同时跑会互相锁行、制造 I/O 尖峰，
+    而且"谁在删"没人知道。抢不到就**本轮跳过**（不是失败）——下一轮再来。
+    单机直跑想省掉一步可设 0。
+    """
+    return _get_bool("DD_RETENTION_LEASE", default=True)
+
+
+def retention_lease_ttl_s() -> float:
+    """清理租约 TTL（秒，DD_RETENTION_LEASE_TTL_S，默认 300）。
+
+    TTL 即"持有者崩了之后多久别人能接管"：太长则崩溃后空窗久，太短则长跑会被抢。
+    默认给得比一轮清理宽裕（单轮通常秒级，批数用满时可能分钟级）。
+    """
+    return max(1.0, _get_float("DD_RETENTION_LEASE_TTL_S", default=300.0))
+
+
 def public_base_url() -> str:
     """对外可访问的服务基址（`DD_PUBLIC_BASE_URL`，如 https://dog.example.com）。
 

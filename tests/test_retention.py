@@ -304,3 +304,105 @@ def test_cutoffs_skip_disabled_knobs(monkeypatch):
     c = retention.cutoffs(now=NOW)
     assert "alerts" not in c and "audit_log" not in c
     assert c["telemetry_events"] == pytest.approx(NOW - 7 * DAY)
+
+
+# ---------------------------------------------------------------- 单持有者租约（多副本）
+
+@pytest.fixture()
+def clean_state():
+    """每个用例一把干净的共享状态：租约存在进程内单例里，用例之间不能互相串。"""
+    from data_dog.state import reset_state_store
+
+    reset_state_store()
+    yield
+    reset_state_store()
+
+
+def _hold_purge_lease(*, owner: str = "other-replica", ttl_s: float = 300.0):
+    """模拟「另一个副本正在清」：以别的 owner 抢住同一把租约。"""
+    from data_dog.state import Lease, get_state_store
+
+    holder = Lease(get_state_store(), retention._PURGE_LEASE_KEY, owner,
+                   ttl_s=ttl_s)
+    assert holder.acquire(), "测试自己都没抢到租约"
+    return holder
+
+
+def test_run_once_skips_when_another_replica_holds_the_lease(url, clean_state):
+    """别的副本持有租约 → 本轮**跳过且一行不删**，并如实标记 skipped。
+
+    钉住的是「跳过」与「删了 0 行」必须能区分：前者是「这轮不该我干」，后者是「没有
+    东西可清」。混在一起，运维看报告就分不出「清理根本没跑起来」和「库里很干净」。
+    """
+    _seed(url, "telemetry_events", _old(3))
+    holder = _hold_purge_lease()
+    try:
+        report = retention.run_once(now=NOW)
+    finally:
+        holder.release()
+
+    assert report["skipped"] == "lease_held", report
+    assert report["lease_owner"] == "other-replica"
+    assert report["total"] == 0 and report["tables"] == []
+    assert _count(url, "telemetry_events") == 3, "抢不到租约竟然还是删了"
+
+
+def test_run_once_proceeds_after_the_holder_releases(url, clean_state):
+    """接管有窗口但不丢活：持有者一放，下一轮就接着清。"""
+    _seed(url, "telemetry_events", _old(3))
+    holder = _hold_purge_lease()
+
+    assert retention.run_once(now=NOW)["skipped"] == "lease_held"
+    holder.release()
+
+    report = retention.run_once(now=NOW)
+    assert report.get("skipped") is None
+    assert report["total"] == 3
+    assert _count(url, "telemetry_events") == 0
+
+
+def test_lease_is_released_so_the_next_run_can_take_it(url, clean_state):
+    """干完就还锁：单副本连续两轮都能跑（没人永远占着），第二轮无事可做。"""
+    from data_dog.state import Lease, get_state_store
+
+    _seed(url, "telemetry_events", _old(2))
+    assert retention.run_once(now=NOW)["total"] == 2
+    assert retention.run_once(now=NOW)["total"] == 0
+    idle = Lease(get_state_store(), retention._PURGE_LEASE_KEY, "probe")
+    assert idle.holder() == "", "清理跑完没有释放租约——别的副本会被永久挡住"
+
+
+def test_lease_off_switch_bypasses_the_lock(url, clean_state, monkeypatch):
+    """环境变量关掉租约：单机直跑不抢锁，别人持有也不管。
+
+    给「只有一个副本、不想多一次共享状态往返」的场景留的退路——但多副本下必须开。
+    """
+    _seed(url, "telemetry_events", _old(3))
+    holder = _hold_purge_lease()
+    try:
+        monkeypatch.setenv("DD_RETENTION_LEASE", "0")
+        report = retention.run_once(now=NOW)
+        assert report.get("skipped") is None, "关掉租约却仍然跳过"
+        assert report["total"] == 3
+        assert _count(url, "telemetry_events") == 0
+    finally:
+        holder.release()
+
+
+def test_dry_run_neither_takes_nor_respects_the_lease(url, clean_state):
+    """只读动作不参与互斥：dry-run 不抢锁，别人持锁也照常统计。"""
+    from data_dog.state import Lease, get_state_store
+
+    _seed(url, "telemetry_events", _old(2))
+    report = retention.run_once(now=NOW, dry_run=True)
+    assert report["total"] == 2 and "skipped" not in report
+    idle = Lease(get_state_store(), retention._PURGE_LEASE_KEY, "probe")
+    assert idle.holder() == "", "dry-run 竟然留了锁"
+
+    holder = _hold_purge_lease()
+    try:
+        again = retention.run_once(now=NOW, dry_run=True)
+    finally:
+        holder.release()
+    assert again["total"] == 2 and "skipped" not in again
+    assert _count(url, "telemetry_events") == 2, "dry-run 竟然删了东西"
