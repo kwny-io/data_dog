@@ -25,6 +25,10 @@
  *    pick **from that list only** (anything else → 403); with it unset the cookie
  *    is ignored and behavior is byte-identical to before. It is tenant
  *    *selection*, not user authorization: run it behind an authenticating proxy.
+ *  - **Per-user authorization is opt-in** (`DD_WEB_TRUST_PROXY_AUTH=1` +
+ *    `DD_WEB_USER_TENANTS`): a trusted reverse proxy names the user, and the
+ *    console refuses tenants outside that user list. Console-level only — the
+ *    service still enforces tenancy itself from the forced `X-Tenant-Id`.
  *  - The console itself becomes a privileged surface, so it is gated: set
  *    `DD_WEB_BASIC_AUTH=user:pass`, or explicitly opt out for local use with
  *    `DD_WEB_ALLOW_ANONYMOUS=1`. If a key is configured and neither is set, the
@@ -41,6 +45,15 @@ export interface ProxyConfig {
   /** Opt-in allow-list (`DD_WEB_TENANTS`, comma separated) for tenant *selection*.
    *  Empty = single-tenant mode: the `dd_web_tenant` cookie is ignored outright. */
   tenants: string[];
+  /** Opt-in trusted-proxy identity (`DD_WEB_TRUST_PROXY_AUTH=1`). Off = nobody is
+   *  identified and the console behaves exactly as before. The upstream proxy
+   *  MUST strip/overwrite `userHeader`, or anyone can impersonate a user. */
+  trustProxyAuth: boolean;
+  /** Header carrying the authenticated user (default `x-auth-request-user`). */
+  userHeader: string;
+  /** `DD_WEB_USER_TENANTS="alice:tenant-a,tenant-b;bob:tenant-b"` — user → allowed
+   *  tenants. With identity on, a request may only touch tenants assigned to it. */
+  userTenants: Map<string, string[]>;
   /** `user:pass` gate for the console itself. Empty = no gate configured. */
   basicAuth: string;
   /** Explicit, auditable opt-out used when running locally without a gate. */
@@ -75,6 +88,24 @@ export function parseTenants(raw: string | undefined): string[] {
 }
 
 
+/** `alice:a,b;bob:b` → Map。空/坏片段跳过；用户重复时**取并集**（不静默丢失）。 */
+export function parseUserTenants(raw: string | undefined): Map<string, string[]> {
+  const out = new Map<string, string[]>();
+  for (const entry of (raw ?? "").split(";")) {
+    const trimmed = entry.trim();
+    if (!trimmed) continue;
+    const idx = trimmed.indexOf(":");
+    if (idx <= 0) continue;
+    const user = trimmed.slice(0, idx).trim();
+    const tenants = parseTenants(trimmed.slice(idx + 1));
+    if (!user || tenants.length === 0) continue;
+    const prev = out.get(user) ?? [];
+    out.set(user, [...prev, ...tenants.filter((t) => !prev.includes(t))]);
+  }
+  return out;
+}
+
+
 export function resolveProxyConfig(
   env: Record<string, string | undefined> = process.env,
 ): ProxyConfig {
@@ -83,6 +114,9 @@ export function resolveProxyConfig(
     apiKey: (env.DD_WEB_API_KEY ?? "").trim(),
     tenant: (env.DD_WEB_TENANT ?? DEFAULT_TENANT).trim() || DEFAULT_TENANT,
     tenants: parseTenants(env.DD_WEB_TENANTS),
+    trustProxyAuth: (env.DD_WEB_TRUST_PROXY_AUTH ?? "").trim() === "1",
+    userHeader: ((env.DD_WEB_USER_HEADER ?? "").trim() || "x-auth-request-user").toLowerCase(),
+    userTenants: parseUserTenants(env.DD_WEB_USER_TENANTS),
     basicAuth: (env.DD_WEB_BASIC_AUTH ?? "").trim(),
     allowAnonymous: (env.DD_WEB_ALLOW_ANONYMOUS ?? "").trim() === "1",
   };
@@ -214,6 +248,56 @@ export function resolveTenant(
     };
   }
   return { ok: true, tenant: chosen };
+}
+
+
+/**
+ * Who is asking, and which tenant they run as.
+ *
+ * Two independent **opt-in** layers (both off by default → behavior unchanged):
+ *  - `DD_WEB_TENANTS`: the browser may *select* a tenant from a server allow-list
+ *    (`resolveTenant`);
+ *  - `DD_WEB_TRUST_PROXY_AUTH=1` + `DD_WEB_USER_TENANTS`: a trusted reverse proxy
+ *    says who the user is (`userHeader`) and the console enforces that the user
+ *    only touches tenants assigned to them. This is **console-level** authorization.
+ *
+ * Boundaries (read before enabling): the upstream proxy MUST strip the user header
+ * from inbound requests, or anyone can impersonate a user; the backend still sees
+ * one global key and does its own tenant enforcement from `X-Tenant-Id`; this is
+ * not a user directory, not OIDC, and not per-user authorization *inside* the
+ * service. See docs/delivery.md for what remains open.
+ */
+export function resolveIdentity(
+  incoming: Headers,
+  cfg: ProxyConfig,
+): { ok: true; user: string; tenant: string } | { ok: false; status: number; message: string } {
+  if (!cfg.trustProxyAuth) {
+    const base = resolveTenant(incoming, cfg);
+    return base.ok ? { ok: true, user: "", tenant: base.tenant } : base;
+  }
+
+  const user = (incoming.get(cfg.userHeader) ?? "").trim();
+  if (!user) {
+    return { ok: false, status: 403,
+             message: `缺少身份头 ${cfg.userHeader}：反代没有注入已认证用户（失败关闭）` };
+  }
+  const own = cfg.userTenants.get(user);
+  if (!own || own.length === 0) {
+    return { ok: false, status: 403,
+             message: `未知用户 ${user}：不在 DD_WEB_USER_TENANTS 里（失败关闭，不给默认权限）` };
+  }
+
+  const cookie = readCookie(incoming.get("cookie"), TENANT_COOKIE);
+  if (cookie && !own.includes(cookie)) {
+    return { ok: false, status: 403,
+             message: `用户 ${user} 无权访问租户 ${cookie}（不在其授权清单内）` };
+  }
+  const tenant = cookie || (own.includes(cfg.tenant) ? cfg.tenant : own[0]!);
+  if (cfg.tenants.length > 0 && !cfg.tenants.includes(tenant)) {
+    return { ok: false, status: 403,
+             message: `用户 ${user} 的租户 ${tenant} 不在 DD_WEB_TENANTS 允许清单内` };
+  }
+  return { ok: true, user, tenant };
 }
 
 

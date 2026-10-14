@@ -13,8 +13,8 @@ import {
   buildUpstreamHeaders,
   buildUpstreamUrl,
   checkConsoleAuth,
+  resolveIdentity,
   resolveProxyConfig,
-  resolveTenant,
   sanitizeApiPath,
   type ProxyConfig,
 } from "./proxy";
@@ -46,9 +46,11 @@ export async function proxyRequest(
     return errorJson(auth.status, "denied", auth.message, auth.headers);
   }
 
-  // Tenant: server config by default; with `DD_WEB_TENANTS` the browser may pick
-  // from that allow-list only (a value outside it is a 403, not a silent fallback).
-  const who = resolveTenant(req.headers, cfg);
+  // Identity/tenant: server config by default; opt-in allow-list for tenant
+  // selection, opt-in trusted-proxy identity for per-user authorization.
+  // Anything outside the configured sets is a 403 (fail closed), never a
+  // silent fallback.
+  const who = resolveIdentity(req.headers, cfg);
   if (!who.ok) {
     return errorJson(who.status, "denied", who.message);
   }

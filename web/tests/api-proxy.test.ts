@@ -13,6 +13,8 @@ import {
   buildUpstreamUrl,
   checkConsoleAuth,
   parseTenants,
+  parseUserTenants,
+  resolveIdentity,
   resolveProxyConfig,
   resolveTenant,
   safeEqual,
@@ -293,5 +295,90 @@ describe("proxy — 租户选择允许清单（A10）", () => {
     expect(parseTenants(" a , b ,, a ")).toEqual(["a", "b"]);
     expect(parseTenants("")).toEqual([]);
     expect(parseTenants(undefined)).toEqual([]);
+  });
+});
+
+// ------------------------------------- 可信反代身份 + 用户级租户授权（A10）
+
+describe("proxy — 可信反代身份 + 用户级租户授权（A10）", () => {
+  const ENV = {
+    ...BASE_ENV,
+    DD_WEB_TRUST_PROXY_AUTH: "1",
+    DD_WEB_USER_TENANTS: "alice:tenant-a,tenant-b;bob:tenant-b",
+  } as Record<string, string | undefined>;
+
+  it("默认关闭：没有身份头也照常工作（行为不变）", () => {
+    expect(resolveIdentity(new Headers(), resolveProxyConfig(BASE_ENV))).toEqual({
+      ok: true,
+      user: "",
+      tenant: "tenant-from-server",
+    });
+  });
+
+  it("开启后缺身份头 → 403（失败关闭，不猜用户）", () => {
+    const who = resolveIdentity(new Headers(), resolveProxyConfig(ENV));
+    expect(who.ok).toBe(false);
+    if (!who.ok) expect(who.status).toBe(403);
+  });
+
+  it("开启后未知用户 → 403（不给默认权限）", () => {
+    const req = new Headers({ "x-auth-request-user": "mallory" });
+    const who = resolveIdentity(req, resolveProxyConfig(ENV));
+    expect(who.ok).toBe(false);
+    if (!who.ok) expect(who.message).toContain("未知用户");
+  });
+
+  it("已知用户：无 cookie 时落到其授权清单里的第一个租户", () => {
+    const req = new Headers({ "x-auth-request-user": "bob" });
+    expect(resolveIdentity(req, resolveProxyConfig(ENV))).toEqual({
+      ok: true,
+      user: "bob",
+      tenant: "tenant-b",
+    });
+  });
+
+  it("已知用户：cookie 只能在其授权清单内选，越权 → 403（不静默回退）", () => {
+    const cfg = resolveProxyConfig(ENV);
+    const okReq = new Headers({
+      "x-auth-request-user": "alice",
+      cookie: `${TENANT_COOKIE}=tenant-b`,
+    });
+    expect(resolveIdentity(okReq, cfg)).toEqual({
+      ok: true,
+      user: "alice",
+      tenant: "tenant-b",
+    });
+    const badReq = new Headers({
+      "x-auth-request-user": "bob",
+      cookie: `${TENANT_COOKIE}=tenant-a`,
+    });
+    const who = resolveIdentity(badReq, cfg);
+    expect(who.ok).toBe(false);
+    if (!who.ok) expect(who.message).toContain("无权访问租户 tenant-a");
+  });
+
+  it("身份头可配置；用户清单解析支持并集与坏片段", () => {
+    const cfg = resolveProxyConfig({ ...ENV, DD_WEB_USER_HEADER: "X-Forwarded-User" });
+    expect(cfg.userHeader).toBe("x-forwarded-user");
+    const req = new Headers({ "x-forwarded-user": "alice" });
+    expect(resolveIdentity(req, cfg).ok).toBe(true);
+    expect(parseUserTenants("a:x,y;a:y,z;bad;b:")).toEqual(
+      new Map([["a", ["x", "y", "z"]]]),
+    );
+    expect(parseUserTenants(undefined).size).toBe(0);
+  });
+
+  it("越权在**转发之前**被拒（不发上游请求）", async () => {
+    const spy = vi.fn();
+    vi.stubGlobal("fetch", spy);
+    const req = new Request("http://console.local/api/dd/v1/candidates", {
+      headers: { "x-auth-request-user": "bob", cookie: `${TENANT_COOKIE}=tenant-a` },
+    });
+    const res = await proxyRequest(req, ["v1", "candidates"], {
+      ...ENV,
+      DD_WEB_ALLOW_ANONYMOUS: "1",
+    });
+    expect(res.status).toBe(403);
+    expect(spy).not.toHaveBeenCalled();
   });
 });
