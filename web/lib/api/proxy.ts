@@ -18,6 +18,13 @@
  *  - `X-Tenant-Id` is **forced from server config** and any client-supplied
  *    value is dropped. Otherwise the browser could still pick a tenant (harmless
  *    with tenant-bound keys, but impersonation with a global key).
+ *  - **Single-tenant by default (architecture review A10).** A real multi-tenant
+ *    console needs an identity layer (who may see which tenant) that this repo
+ *    does not have. The one opt-in step here is `DD_WEB_TENANTS`: a server-side
+ *    **allow-list** plus a `dd_web_tenant` cookie. With it set, the browser may
+ *    pick **from that list only** (anything else → 403); with it unset the cookie
+ *    is ignored and behavior is byte-identical to before. It is tenant
+ *    *selection*, not user authorization: run it behind an authenticating proxy.
  *  - The console itself becomes a privileged surface, so it is gated: set
  *    `DD_WEB_BASIC_AUTH=user:pass`, or explicitly opt out for local use with
  *    `DD_WEB_ALLOW_ANONYMOUS=1`. If a key is configured and neither is set, the
@@ -31,6 +38,9 @@ export interface ProxyConfig {
   apiKey: string;
   /** Tenant forced onto every request. Client input is ignored. */
   tenant: string;
+  /** Opt-in allow-list (`DD_WEB_TENANTS`, comma separated) for tenant *selection*.
+   *  Empty = single-tenant mode: the `dd_web_tenant` cookie is ignored outright. */
+  tenants: string[];
   /** `user:pass` gate for the console itself. Empty = no gate configured. */
   basicAuth: string;
   /** Explicit, auditable opt-out used when running locally without a gate. */
@@ -54,6 +64,17 @@ const DEFAULT_TENANT = "tenant-demo";
 /** Paths the console is allowed to reach through the proxy. */
 const ALLOWED_EXACT = new Set(["healthz", "readyz", "metrics"]);
 
+/** `DD_WEB_TENANTS="a, b"` → `["a", "b"]`（去空、去重、保序）。空 = 单租户模式。 */
+export function parseTenants(raw: string | undefined): string[] {
+  const out: string[] = [];
+  for (const part of (raw ?? "").split(",")) {
+    const t = part.trim();
+    if (t && !out.includes(t)) out.push(t);
+  }
+  return out;
+}
+
+
 export function resolveProxyConfig(
   env: Record<string, string | undefined> = process.env,
 ): ProxyConfig {
@@ -61,6 +82,7 @@ export function resolveProxyConfig(
     baseUrl: (env.DD_WEB_API_BASE_URL ?? DEFAULT_BASE_URL).replace(/\/+$/, ""),
     apiKey: (env.DD_WEB_API_KEY ?? "").trim(),
     tenant: (env.DD_WEB_TENANT ?? DEFAULT_TENANT).trim() || DEFAULT_TENANT,
+    tenants: parseTenants(env.DD_WEB_TENANTS),
     basicAuth: (env.DD_WEB_BASIC_AUTH ?? "").trim(),
     allowAnonymous: (env.DD_WEB_ALLOW_ANONYMOUS ?? "").trim() === "1",
   };
@@ -149,14 +171,66 @@ const FORWARD_REQUEST_HEADERS = [
   "traceparent",
 ];
 
-export function buildUpstreamHeaders(incoming: Headers, cfg: ProxyConfig): Headers {
+/** Cookie the browser may use to *select* (not authorize) a tenant. */
+export const TENANT_COOKIE = "dd_web_tenant";
+
+function readCookie(header: string | null, name: string): string {
+  if (!header) return "";
+  for (const part of header.split(";")) {
+    const eq = part.indexOf("=");
+    if (eq < 0) continue;
+    if (part.slice(0, eq).trim() !== name) continue;
+    const value = part.slice(eq + 1).trim();
+    try {
+      return decodeURIComponent(value);
+    } catch {
+      return value;      // 坏编码不当攻击，按原值比对（比对不上自然被拒）
+    }
+  }
+  return "";
+}
+
+/**
+ * Which tenant this request runs as.
+ *
+ * Default (no `DD_WEB_TENANTS`): always the server tenant — the browser never gets
+ * to choose. With an allow-list: a `dd_web_tenant` cookie may pick **from the
+ * list**; anything outside it is a hard 403 (fail closed, and say why).
+ */
+export function resolveTenant(
+  incoming: Headers,
+  cfg: ProxyConfig,
+): { ok: true; tenant: string } | { ok: false; status: number; message: string } {
+  if (cfg.tenants.length === 0) return { ok: true, tenant: cfg.tenant };
+  const chosen = readCookie(incoming.get("cookie"), TENANT_COOKIE);
+  if (!chosen) return { ok: true, tenant: cfg.tenant };
+  if (!cfg.tenants.includes(chosen)) {
+    return {
+      ok: false,
+      status: 403,
+      message:
+        `租户 ${chosen} 不在 DD_WEB_TENANTS 允许清单内：控制台只允许在服务端配置的租户` +
+        "清单里选择，不允许任意租户（这是选择，不是授权）。",
+    };
+  }
+  return { ok: true, tenant: chosen };
+}
+
+
+export function buildUpstreamHeaders(
+  incoming: Headers,
+  cfg: ProxyConfig,
+  tenant: string = cfg.tenant,
+): Headers {
   const out = new Headers();
   for (const name of FORWARD_REQUEST_HEADERS) {
     const value = incoming.get(name);
     if (value) out.set(name, value);
   }
-  // Tenant is decided **here**, never by the browser (see module docstring).
-  out.set("X-Tenant-Id", cfg.tenant);
+  // Tenant is decided **here** by `resolveTenant` (single-tenant by default;
+  // with an allow-list the browser may pick from that list only). Never a raw
+  // client header — see module docstring.
+  out.set("X-Tenant-Id", tenant);
   if (cfg.apiKey) out.set("X-API-Key", cfg.apiKey);
   return out;
 }

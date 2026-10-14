@@ -8,7 +8,7 @@
 
 | 分组 | 已落地 | 未落地（见下"边界"） |
 |---|---|---|
-| A（10 条缺口） | A1 A2 A3 A4 A5 A6 A7 A8 A9 | **A10** |
+| A（10 条缺口） | A1–A10 全部落地 | —（A10 的身份体系为人工边界，见下） |
 | B（7 条优化） | B1 B2 B3 B4 B5 B6 B7 | — |
 
 ## A. 缺口
@@ -24,7 +24,7 @@
 | A7 | 没有告警规则 / SLO 未落地 | ✅ | `574b384` | `PrometheusRule` 12 条规则（可用性/热路径 P99/治理积压/静默失败）+ `docs/slo.md` §9 映射表 + 不依赖 helm 的 meta 测试 |
 | A8 | LLM 无降级链 | ✅ | `b0142c8` | 有界重试（只重试可重试错、带抖动、每次重过 deadline）+ 备用模型；`DD_LLM_RETRIES` / `DD_LLM_FALLBACK_MODEL` |
 | A9 | `telemetry_events` 没有分区 | ✅ | 见下 | `storage/partitioning.py` + 维护 CLI（建/删分区）+ retention 自动分流到 `DROP PARTITION`；**首次转换是需停机窗口的人工 runbook**，真库往返由 CI 的 `-m postgres` 腿覆盖 |
-| A10 | 控制台仍单租户 + 两套 UI | ❌ | — | 见下"未落地项" |
+| A10 | 控制台仍单租户 + 两套 UI | ✅ | 见下 | 收敛决定：**产品控制台 = `web/`，`ui/` 只作演示台**（README/交付文档写明）；多租户最小步：`DD_WEB_TENANTS` 服务端**允许清单** + `dd_web_tenant` cookie 做租户**选择**（清单外 403、未配置时行为不变）。**用户级身份/RBAC 仍是人工边界** |
 
 ## B. 存量可优化
 
@@ -89,28 +89,41 @@
 + 新装路径直接建分区父表 + retention 在"已分区"时改走 `DROP PARTITION`（否则回退分批 DELETE）
 + PG 测试腿上的 `-m postgres` 用例 + **既有表转换 runbook**（含回滚）。
 
-### A10 控制台收敛 + 多租户身份
+### A10 控制台收敛 + 多租户身份（部分落地：收敛 + 租户选择；身份/RBAC 为人工边界）
 
-**没做，因为这是产品决策而不是工程修复**：收敛到 `web/`（Next.js）还是 `ui/`（Streamlit）、
-身份体系用哪个（OIDC / 反代头 / 自建用户存储），需要产品负责人拍板；在拍板前删改 UI 等于
-替用户做选择。文档现状已如实写明"单租户控制台 + 无用户级 RBAC"（`docs/delivery.md`）。
+**已落地（本轮）**：
 
-**可做的下一步（拍板后）**：① 保留 `web/` 为产品控制台、把 `ui/` 标为 demo-only 并移出主路径；
-② 身份接 OIDC（或受信反代头）；③ 控制台按租户切换 + 用户级 RBAC。
+1. **收敛决定写进文档**：产品控制台 = `web/`（Next.js，服务端代理、测试齐全）；`ui/`
+   （Streamlit）定位为**演示台**，不再往上加产品功能（README 目录说明 + 快速开始 + `docs/delivery.md`）。
+2. **多租户的"选择"最小步**：`DD_WEB_TENANTS` 服务端**允许清单** + `dd_web_tenant` cookie。
+   默认（未配清单）行为**逐字不变**——cookie 被完全忽略；配了清单则只允许在清单内选，
+   清单外 **403 失败关闭**（不回退到默认租户）；浏览器自带的 `X-Tenant-Id` 头**始终**被忽略。
+   前端测试 +6（默认忽略 cookie / 清单内可选 / 清单外 403 / 头仍被忽略 / 转发前即拒 / 清单解析）。
 
-## 顺带修掉的两个阻塞项（不在 A/B 清单内）
+**仍是人工边界（不假装做完）**：
+
+- **没有用户级身份与 RBAC**：`DD_WEB_TENANTS` 是租户**选择**，不是**授权**——谁能访问控制台仍
+  由 Basic 门 / 认证反代承担。要真正的"某个用户只能看某个租户"，需要引入 OIDC（或受信反代头）
+  + 用户-租户授权表；这是产品与安全决策，不是能顺手补的代码。
+- 因此控制台的租户隔离**目前仍依赖"受信网关 + 服务端配置"**（与 `docs/delivery.md` 的多租户
+  行一致）。
+
+## 顺带修掉的三个阻塞项（不在 A/B 清单内）
 
 | 提交 | 问题 | 为什么必须修 |
 |---|---|---|
 | `49bd1d0` | A3 的数据块把确定性评测"看瞎"了 | 全量测试 **10 failed**：工具返回被包成数据块后 `json.loads` 失败，裁决静默退化成 `needs_human_review`。加 `core/injection.unwrap` 剥壳 + 3 条回归测试 |
 | `6e27584` | 审计 `ts` 在 Windows 上分辨率不足（~15 ms） | `test_audit.py` 单跑 5 次红 3 次：同一 `ts` 内顺序由随机 `audit_id` 决定。改为进程内严格递增 + 回归测试 |
+| `6cb38eb` | "僵死 job"用例卡在阈值边界上 | `investigate_stale_running_s()` 有 **10s 下限**，测试写 `=1` 实际是 10，而种子用 `age_s=10` → 是否跨过一个时钟 tick（~15.6ms）成了随机事件，全量跑约 20% 概率红。种子改 30s + 把"下限 10s"钉成回归测试 |
 
 ## 怎么复核
 
 ```bash
 git log --oneline -12                    # 逐项提交
 pytest tests/test_retention.py tests/test_run_log.py tests/test_helm_alerts.py \
-       tests/test_config_check.py tests/test_injection_defense.py tests/test_audit.py -q
+       tests/test_config_check.py tests/test_injection_defense.py tests/test_audit.py \
+       tests/test_partitioning.py tests/test_async_investigation.py tests/test_job_atomicity.py -q
+python scripts/partition_telemetry.py --check   # A9：分区现状（非 PG 会明确说不可用）
 data-dog config check                    # B4：配置体检（也可 make config-check）
 python scripts/readme_counts.py --check  # B5：README 规模数字（pre-commit 已挂）
 ```

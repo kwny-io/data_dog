@@ -104,6 +104,8 @@ data-dog test
 
 ### 还想看 Web 界面（可选）
 
+**这两页是演示台**（A10 收敛决定：产品控制台 = `web/`，Streamlit 只作演示/离线对比，不再往它加产品功能）：
+
 ```bash
 pip install -e ".[ui]"          # 装上 streamlit
 python -m streamlit run ui/app.py           # 调查台：数据面产出候选 → 调查 → ReAct 轨迹 → 报告
@@ -292,7 +294,7 @@ src/data_dog/
   settings.py   配置集中（纯 os.environ，调用时惰性读取，不缓存）
   paths.py      资源定位（资源位置外部可注入，防"打包后路径失联"）
   observability.py  可观测性（token 消耗 / 每步耗时 / 成本统计）
-ui/             Streamlit 网页版
+ui/             Streamlit **演示台**（不是产品控制台；产品控制台是 web/，见下）
 evals/          Agent 评估框架（7 case，含对抗性）
 scripts/        数据清洗 / 算子生成 / RAG 落地脚本
 schemas/        标准事件正式 Schema（JSON Schema，5 份）+ 版本演进策略 + 校验工具

@@ -12,8 +12,11 @@ import {
   buildUpstreamHeaders,
   buildUpstreamUrl,
   checkConsoleAuth,
+  parseTenants,
   resolveProxyConfig,
+  resolveTenant,
   safeEqual,
+  TENANT_COOKIE,
   sanitizeApiPath,
 } from "@/lib/api/proxy";
 import { proxyRequest } from "@/lib/api/proxy-handler";
@@ -228,5 +231,67 @@ describe("proxyRequest — 端到端", () => {
     const res = await proxyRequest(req, ["v1", "candidates", "cand_x"], E2E_ENV);
     expect(res.status).toBe(404);
     expect((await res.json()).error).toBe("not_found");
+  });
+});
+
+// ------------------------------------------------- 多租户"选择"允许清单（A10）
+
+describe("proxy — 租户选择允许清单（A10）", () => {
+  const ENV = { ...BASE_ENV, DD_WEB_TENANTS: "tenant-a, tenant-b" } as Record<
+    string,
+    string | undefined
+  >;
+
+  it("未配 DD_WEB_TENANTS：cookie 被完全忽略（单租户默认）", () => {
+    const req = new Headers({ cookie: `${TENANT_COOKIE}=tenant-b` });
+    const out = buildUpstreamHeaders(req, resolveProxyConfig(BASE_ENV));
+    expect(out.get("X-Tenant-Id")).toBe("tenant-from-server");
+  });
+
+  it("配了允许清单：cookie 可在清单内选租户", () => {
+    const req = new Headers({ cookie: `x=1; ${TENANT_COOKIE}=tenant-b` });
+    const cfg = resolveProxyConfig(ENV);
+    const who = resolveTenant(req, cfg);
+    expect(who).toEqual({ ok: true, tenant: "tenant-b" });
+    const out = buildUpstreamHeaders(req, cfg, who.ok ? who.tenant : "");
+    expect(out.get("X-Tenant-Id")).toBe("tenant-b");
+  });
+
+  it("清单外的租户 → 403（失败关闭，不回退到默认租户）", () => {
+    const req = new Headers({ cookie: `${TENANT_COOKIE}=victim` });
+    const who = resolveTenant(req, resolveProxyConfig(ENV));
+    expect(who.ok).toBe(false);
+    if (!who.ok) expect(who.status).toBe(403);
+  });
+
+  it("即便配了清单，浏览器自带的 X-Tenant-Id 头仍被忽略（只认服务端清单）", () => {
+    const req = new Headers({
+      "X-Tenant-Id": "victim",
+      cookie: `${TENANT_COOKIE}=tenant-a`,
+    });
+    expect(resolveTenant(req, resolveProxyConfig(ENV))).toEqual({
+      ok: true,
+      tenant: "tenant-a",
+    });
+  });
+
+  it("清单外的租户在**转发之前**就被拒（不发上游请求）", async () => {
+    const spy = vi.fn();
+    vi.stubGlobal("fetch", spy);
+    const req = new Request("http://console.local/api/dd/v1/candidates", {
+      headers: { cookie: `${TENANT_COOKIE}=victim` },
+    });
+    const res = await proxyRequest(req, ["v1", "candidates"], {
+      ...ENV,
+      DD_WEB_ALLOW_ANONYMOUS: "1",
+    });
+    expect(res.status).toBe(403);
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it("DD_WEB_TENANTS 解析：去空、去重、保序", () => {
+    expect(parseTenants(" a , b ,, a ")).toEqual(["a", "b"]);
+    expect(parseTenants("")).toEqual([]);
+    expect(parseTenants(undefined)).toEqual([]);
   });
 });

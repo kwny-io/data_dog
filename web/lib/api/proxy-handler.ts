@@ -14,6 +14,7 @@ import {
   buildUpstreamUrl,
   checkConsoleAuth,
   resolveProxyConfig,
+  resolveTenant,
   sanitizeApiPath,
   type ProxyConfig,
 } from "./proxy";
@@ -45,6 +46,13 @@ export async function proxyRequest(
     return errorJson(auth.status, "denied", auth.message, auth.headers);
   }
 
+  // Tenant: server config by default; with `DD_WEB_TENANTS` the browser may pick
+  // from that allow-list only (a value outside it is a 403, not a silent fallback).
+  const who = resolveTenant(req.headers, cfg);
+  if (!who.ok) {
+    return errorJson(who.status, "denied", who.message);
+  }
+
   const apiPath = sanitizeApiPath(path);
   if (!apiPath) {
     // 404 rather than 403: an unknown path genuinely has no route, and the
@@ -60,7 +68,7 @@ export async function proxyRequest(
   try {
     upstream = await fetch(target, {
       method,
-      headers: buildUpstreamHeaders(req.headers, cfg),
+      headers: buildUpstreamHeaders(req.headers, cfg, who.tenant),
       body: hasBody ? await req.arrayBuffer() : undefined,
       // Do not follow redirects implicitly: the browser sees the 3xx and the
       // service's own contract stays visible (same stance as the Python side).
