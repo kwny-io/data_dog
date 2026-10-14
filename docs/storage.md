@@ -173,6 +173,30 @@ FeatureNotSupported: unique constraint on partitioned table must include all par
 
 所以这不是"实现没做完"，而是**"重复上报去重"与"按年龄删分区"二选一**的数据模型决策。
 
+**推荐（2026-10-14 真库实测后的工程判断）**：**暂不转换，先盯实测触发线**；越过再走「摄取日桶」
+方案，而不是上面三条里的任何一条。
+
+| 方案 | 幂等（重投递去重） | 按时间删分区 | 判定 |
+|---|---|---|---|
+| A：`RANGE(created_at)` + 主键加 `created_at` | ❌ 重投递会重复入库 | ✅ | **排除**（数据完整性问题） |
+| B：`HASH(tenant_id, event_id)` | ✅ | ❌ 省不下那笔 DELETE | **排除**（花了停机窗口迁移却拿不到收益） |
+| C：维持现状（分批 DELETE） | ✅ | — | **默认**：已有 `(tenant_id, created_at)` 索引 + 有界批次 + 单持有者租约 |
+| **D：`RANGE(created_day)`**：`created_day` 是 `floor(created_at/86400)` 的生成列，主键 `(created_day, tenant_id, event_id)` | ✅ **同日**重投递仍去重（跨天会重复 → 写进边界 + 指标） | ✅ | **触发线越过时选它** |
+
+为什么 A 一定会破坏幂等（两处代码事实）：`repository._upsert_stmt` 把 `created_at` 放进 `keep_out`
+（**首次**写入时间不被覆盖），而真 PG introspection 显示该列**没有 server default**——重投递时 ORM
+会带一个**新的** `created_at`；它一旦进主键，`ON CONFLICT` 就不再命中，于是插入重复行。
+
+为什么 D 不破坏保留语义：retention 按**摄取时间**删除（刻意不用事件时间，否则补传的历史事件会
+"永远年轻"）；`created_day` 正是摄取时间的日粒度派生，晚到的历史事件落在**今天**的桶里，不会被误删。
+
+**触发线（用 `tools/loadgen.py` 实测，不要用 `docs/slo.md` §2 的设计预算当现状）**：7 天窗口的
+`telemetry_events` 行数达到 **≈5,000 万（约 25 GB）**，或单轮 retention 的 DELETE 超过 **≈60 s**，
+再上 D。**本机真库实测**（单节点 `postgres:16-alpine`，1,000,000 行 / 202 MB，payload 比 SLO 的
+0.5 KB 偏小）：分批 DELETE（500/批）**≈52,000 行/秒** → 默认一轮（`max_batches=200`，最多 10 万行）
+约 **1.9 s**；整段过期分区 `DROP TABLE` **0.03 s**（与行数无关、不产生死元组）。即：**在百万行量级
+DELETE 还不是问题**——所以先定触发线，而不是先动表结构。
+
 **已有防护**：`partitioning.check_partitionable()` 会逐条点名阻塞项（非 PG / 表不存在 / 分区键
 类型不支持 / **唯一约束不含分区键** / 入向外键），`--check` 会打印，转换类操作在阻塞项存在时
 直接拒绝。真库回归用例 `test_real_telemetry_shape_is_blocked_by_its_primary_key` 用同形探针把
