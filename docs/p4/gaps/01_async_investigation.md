@@ -64,6 +64,8 @@ CREATE TABLE investigation_job (
 ```
 POST /v1/investigations            提交 → 202 {job_id, status}.  (旧行为改为异步)
 GET  /v1/investigations/jobs/{job_id}   查 job 状态（pending/running/succeeded/failed）
+GET  /v1/investigations/jobs/{job_id}/log     运行日志（ReAct 轨迹）
+GET  /v1/investigations/jobs/{job_id}/result  成功后取齐 report/verdict/trace/usage（与同步同形，B2-1）
 POST /v1/investigations/jobs/{job_id}/cancel  取消
 GET  /v1/investigations/{id}       查报告（**保持现状**，id 既可是 report_id）
 ```

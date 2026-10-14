@@ -28,7 +28,7 @@ from data_dog.service.deps import (
     require_tenant_or_ops,
 )
 
-# 快照：42 条端点的 (method, path) 与**注册顺序**（有意增删/重排时同步更新它）。
+# 快照：50 条端点的 (method, path) 与**注册顺序**（有意增删/重排时同步更新它）。
 ROUTES = (
     ("GET", "/healthz"),
     ("GET", "/readyz"),
@@ -48,6 +48,7 @@ ROUTES = (
     ("GET", "/v1/investigations/jobs"),
     ("GET", "/v1/investigations/jobs/{job_id}"),
     ("GET", "/v1/investigations/jobs/{job_id}/log"),
+    ("GET", "/v1/investigations/jobs/{job_id}/result"),
     ("POST", "/v1/investigations/jobs/{job_id}/cancel"),
     ("GET", "/v1/investigations/runs"),
     ("GET", "/v1/investigations/{investigation_id}"),

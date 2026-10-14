@@ -300,6 +300,60 @@ def _row_to_candidate(row: dict[str, Any]) -> CandidateEvent:
         evidence_refs=list(row.get("evidence_refs", [])),
         detector_provenance=row.get("detector_provenance", ""),
     )
+def _verdict_for(report_dict: dict[str, Any], cand: CandidateEvent,
+                 trace: list[dict[str, Any]]) -> tuple[str, str]:
+    """一句话结论（verdict / verdict_detail）：同步响应与异步结果端点**共用**。
+
+    为什么抽出来：同步路径原本内联这段（把候选的 severity/component/rule_matches 合进报告，
+    再从 trace 的 `query_candidate_evidence` 结果里取实测温度）。异步结果端点要同一句话，
+    内联第二份必然分叉——"演示台说过温、前端说无异常"就是这么来的。
+    """
+    tel_map = {cand.component_ref: {"metrics": {}, "device_sn": cand.device_sn}}
+    for step in trace or []:
+        res = (step or {}).get("result") or {}
+        if (step or {}).get("name") == "query_candidate_evidence" and res.get("metrics"):
+            tel_map[cand.component_ref]["metrics"] = res["metrics"]
+            break
+    return derive_verdict(
+        [report_dict | {"severity_hint": cand.severity_hint,
+                        "component_ref": cand.component_ref,
+                        "rule_matches": cand.rule_matches}],
+        {}, tel_map)
+
+
+def _async_result_payload(tenant: str, job: dict[str, Any]) -> dict[str, Any] | None:
+    """把**已成功**的异步 job 拼成与同步响应同形的载荷（B2）。
+
+    异步此前只给 report_id：调用方要自己拼三处才能拿到控制台需要的东西（verdict 要候选
+    字段、trace/usage 在运行日志里）。这里收敛成一次调用，口径与同步响应同一处实现。
+
+    `alerting` **不返回**：它是**执行期**副作用的结果（`report_alert` 的返回值），读路径
+    重建会重复上报；控制台也不消费它（`web/lib/api/types.ts` 的 `InvestigationResult`
+    里没有这个字段）。要查告警去 `/v1/alerts`。
+
+    未成功 / 报告查不到 → None（路由翻成 409）。
+    """
+    report_id = job.get("report_id")
+    if job.get("status") != "succeeded" or not report_id:
+        return None
+    with session_scope() as s:
+        report = repo.get_report(s, str(report_id), tenant_id=tenant)
+        log = repo.get_run_log(s, str(job.get("job_id", "")), tenant_id=tenant)
+        cand_row = repo.get_candidate(s, str(job.get("candidate_id", "")), tenant_id=tenant)
+    if report is None or cand_row is None:
+        return None
+    cand = _row_to_candidate(cand_row)
+    trace = list((log or {}).get("steps") or [])
+    report_dict = dict(report)
+    usage = (report_dict.get("model_provenance") or {}).get("usage", {})
+    verdict, verdict_detail = _verdict_for(report_dict, cand, trace)
+    return {"ok": True, "investigation_id": report_id,
+            "candidate_id": job.get("candidate_id"),
+            "report": report_dict, "verdict": verdict,
+            "verdict_detail": verdict_detail, "trace": trace,
+            "usage": usage, "run_id": job.get("job_id")}
+
+
 def _job_public(job: dict[str, Any]) -> dict[str, Any]:
     """job 行的对外视图（去掉内部 worker_id，保留可轮询的字段）。"""
     return {
@@ -485,18 +539,25 @@ def _steps_digest(steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _steps_for_storage(steps: list[dict[str, Any]], *, status: str,
-                       disposition: str) -> tuple[list[dict[str, Any]], bool]:
+                       disposition: str, kind: str = "sync"
+                       ) -> tuple[list[dict[str, Any]], bool]:
     """按 settings.run_log_full_steps() 决定落库留多少步；返回 (steps, 是否裁剪)。
 
-    默认 auto 档：成功且已判定 → 只留骨架（写放大从"每次重跑 40 步"降到"一行工具名"），
-    失败/取消/needs_human_review → 全文。排查价值恰好集中在后三类。
+    默认 auto 档：**同步**成功且已判定 → 只留骨架（写放大从"每次重跑 40 步"降到"一行
+    工具名"），失败/取消/needs_human_review → 全文。
+
+    **异步（kind="async"）例外：一律全文**。理由：synth 之外的调用方（控制台）靠
+    `GET /v1/investigations/jobs/{id}/result` 拿 ReAct 轨迹渲染时间线，而异步**没有**
+    "当场把轨迹返回给调用方"这一步——运行日志是**唯一**副本，摘要了就再也补不回来。
+    （B3 与 B2 的冲突由此收敛：摘要只允许用在"轨迹另有一份交付给调用方"的同步路径。）
     """
     mode = settings.run_log_full_steps()
     if mode == "always":
         return steps, False
     if mode == "never":
         return _steps_digest(steps), bool(steps)
-    full = (status in _RUN_LOG_FULL_STATUSES
+    full = (kind != "sync"
+            or status in _RUN_LOG_FULL_STATUSES
             or disposition in _RUN_LOG_FULL_DISPOSITIONS)
     if full:
         return steps, False
@@ -532,7 +593,7 @@ def _run_log_payload(*, run_id: str, candidate_id: str, kind: str, status: str,
     """
     steps = [_safe_step(ev) for ev in trace[:_RUN_LOG_MAX_STEPS]]
     steps, _truncated = _steps_for_storage(steps, status=status,
-                                           disposition=disposition)
+                                           disposition=disposition, kind=kind)
     return {
         "run_id": run_id,
         "candidate_id": candidate_id,
@@ -750,22 +811,9 @@ def _execute_investigation(tenant: str, candidate_id: str, *,
 
     report_dict = report.to_dict()
     usage = report_dict.get("model_provenance", {}).get("usage", {})
-    # 人话结论：与演示台/候选详情同源（presentation.derive_verdict）
-    tel_map = {cand.component_ref: {
-        "metrics": {},
-        "device_sn": cand.device_sn,
-    }}
-    # 从 trace 里取该候选窗口的实测指标，给 verdict 用（与证据端点一致）
-    for step in trace:
-        res = step.get("result") or {}
-        if step.get("name") == "query_candidate_evidence" and res.get("metrics"):
-            tel_map[cand.component_ref]["metrics"] = res["metrics"]
-            break
-    verdict, verdict_detail = derive_verdict(
-        [report_dict | {"severity_hint": cand.severity_hint,
-                        "component_ref": cand.component_ref,
-                        "rule_matches": cand.rule_matches}],
-        {}, tel_map)
+    # 人话结论：与演示台/候选详情同源（presentation.derive_verdict）。
+    # 抽成 `_verdict_for` 是因为**异步结果端点也要同一口径**（B2）——各写一份必分叉。
+    verdict, verdict_detail = _verdict_for(report_dict, cand, trace)
     response = {
         "ok": True,
         "investigation_id": report.investigation_id,

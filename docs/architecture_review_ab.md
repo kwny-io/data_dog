@@ -9,7 +9,7 @@
 | 分组 | 已落地 | 未落地（见下"边界"） |
 |---|---|---|
 | A（10 条缺口） | A1 A2 A3 A4 A5 A6 A7 A8 | **A9 A10** |
-| B（7 条优化） | B1 B3 B4 B5 B6 B7 | **B2** |
+| B（7 条优化） | B1 B3 B4 B5 B6 B7 | **B2**（第 1/3 步已落地，见下） |
 
 ## A. 缺口
 
@@ -40,27 +40,31 @@
 
 ## 未落地项：边界与原因
 
-### B2 同步默认翻异步（`DD_INVESTIGATE_ASYNC`）
+### B2 同步默认翻异步（`DD_INVESTIGATE_ASYNC`）——🚧 第 1/3 步已落地
 
-**没翻，因为按现状翻会是一次功能回退**——三条代码事实：
+**第 1 步（后端补载荷）已完成**：新增 `GET /v1/investigations/jobs/{id}/result`，成功后就地取齐
+`report` + `verdict`/`verdict_detail` + `trace` + `usage`，口径与同步响应**同源**
+（`runtime._verdict_for` 一处实现）。
 
-1. 控制台消费的是**同步响应**的完整载荷：`web/components/InvestigationPanel.tsx` 要渲染
-   `verdict` / `trace` / `usage` / `alerting`（`web/lib/api/client.ts` 的 `investigate`）。
-2. **异步路径不产出同等载荷**：`JobRunner._finish` 只落 report + run_log；
-   `GET /v1/investigations/jobs/{id}` 只回 job 行（`_job_public`），`GET /v1/investigations/{id}`
-   只回 report。`trace`/`usage` 要另取运行日志，而 **`alerting` 在异步路径无处可取**。
-   → 直接翻默认（或让控制台改轮询）会让控制台丢掉结论与轨迹展示。
-3. 翻默认还有**进程级副作用**：`create_app` 按 `investigate_async()` 决定是否起 worker 池
-   （`service/runtime.py`）——默认翻开会给每个应用实例加一个线程池 + 队列轮询线程。
+复核时**修正了一处此前的判断错误**：控制台其实**不消费 `alerting`**
+（`web/lib/api/types.ts` 的 `InvestigationResult` 里没有这个字段）——它渲染的是
+`verdict`/`verdict_detail`/`trace`/`usage`。所以"异步拿不到 alerting"不是阻塞点（而且
+`alerting` 是**执行期副作用**的结果，读路径重建会重复上报，本就不该在结果端点里）。
 
-**可做的下一步（按序，缺一不可）**：
+**顺带暴露并修掉的一个真冲突**：B3 的 `auto` 档会给"成功且已判定"的运行只落轨迹**骨架**，
+而异步的轨迹**只存在于运行日志**——摘要了控制台就再也渲染不出 ReAct 时间线。现在 `auto`
+按 `kind` 区分：同步（轨迹已在 HTTP 响应里交付）可摘要，**异步一律全文**。
 
-1. 后端：让异步完成态一次拿到 `verdict` / `alerting`（补字段或新端点）；
-2. 前端：控制台改"提交 → 轮询 → 取报告"，并补 MSW/vitest 与取消语义；
-3. 再翻默认，并把同步变成显式 `?sync=1`（或留一个发布周期双轨）。
+**仍未做的第 2/3 步**（也是"没翻默认"的真实原因）：
 
-现状已被测试钉住：`tests/test_async_investigation.py`（未开 → 200 + 完整报告，旧契约）——
-未来翻默认时它会红，提醒执行上面三步，而不是悄悄改变契约。
+1. ~~后端：异步完成态一次拿到 `verdict`/`trace`/`usage`~~ ✅（`_verdict_for` + `.../result`）；
+2. **前端：控制台改成"提交(`POST` 无 `?sync`) → 轮询 job → `.../result` 一次取齐"**，
+   并补 MSW/vitest 与"停止轮询"的取消语义（现在的取消是 abort 一个同步长 fetch）；
+3. **再翻默认**（`DD_INVESTIGATE_ASYNC` 默认 1），同步退回显式 `?sync=1`。
+
+第 3 步还有一个**进程级副作用**要先想清楚：`create_app` 按 `investigate_async()` 决定是否起
+worker 池（`service/runtime.py`）——默认翻开会给每个应用实例加一个线程池 + 队列轮询线程，
+所有测试进程也会跟着起。翻之前要确认这正是想要的（本轮可把测试都显式钉成同步，翻时只改一处）。
 
 ### A9 `telemetry_events` 分区
 

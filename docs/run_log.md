@@ -55,8 +55,9 @@ curl -H "X-Tenant-Id: tenant-a" \
 返回体里有什么（`log` 字段）：
 
 - `steps[]`：每步 `{step, name, args, result}`——**ReAct 轨迹**，也就是"它查了什么"。
-  成功且已判定的那次只落**骨架**（`{step, name, _digest: true}`），此时 `steps_truncated=true`
-  （见 §4 的写放大取舍）；失败/取消/`needs_human_review` 是全文；
+  **同步**成功且已判定的那次只落**骨架**（`{step, name, _digest: true}`），此时
+  `steps_truncated=true`（见 §4 的写放大取舍）；失败/取消/`needs_human_review` 是全文；
+  **异步一律全文**——异步没有"当场把轨迹返回给调用方"这一步，日志是唯一副本（见 §4）；
 - `usage` / `duration_ms` / `model`：token、耗时、用的哪个模型（"慢在哪/贵在哪"）；
 - `status` / `error_code` / `error_detail`：失败上下文（**脱敏后**的 provider 原文）；
 - `candidate_id` / `report_id` / `created_at`：串回业务对象。
@@ -86,8 +87,11 @@ curl -H "X-Tenant-Id: tenant-a" \
   单步序列化上限 4 KB、最多 40 步、失败上下文 1 KB。超长时**如实标注截断**，不假装完整。
   要看完整证据请走 `/v1/candidates/{id}/evidence`——运行日志是"过程记录"，不是证据包。
 - **写放大有取舍（B3）**：一次调查最多 40 步、单步 4 KB，重跑多的候选会把库撑大。故
-  `DD_RUN_LOG_FULL_STEPS`（默认 `auto`）：**成功且已判定**只落轨迹**骨架**（步号 + 工具名，
+  `DD_RUN_LOG_FULL_STEPS`（默认 `auto`）：**同步**成功且已判定只落轨迹**骨架**（步号 + 工具名，
   体积≈0），**失败 / 取消 / 结论 `needs_human_review`** 落全文——排查价值恰好集中在这三类。
+  **异步不摘要**（`kind=async` 一律全文）：同步调用方已在 HTTP 响应里拿到轨迹，日志是"存档"；
+  异步调用方拿不到响应体，`GET /v1/investigations/jobs/{id}/result` 要把轨迹当**唯一交付物**
+  返回给控制台渲染 ReAct 时间线——摘要了就再也补不回来（B3 与 B2 的冲突在此收敛）。
   两种"不完整"（骨架、40 步上限）都用 `steps_truncated` 如实标注，绝不假装完整。
   要一律留全文设 `always`；极省空间设 `never`（失败排查也会缺入参/结果）。
 - **落库失败不毁结果**：同步路径写日志失败只记一条 warning（调查结论照常返回并落库）；

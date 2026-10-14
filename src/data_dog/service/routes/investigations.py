@@ -17,6 +17,7 @@ from ..deps import require_tenant
 from ..runtime import (
     _DEFAULT_PAGE_SIZE,
     _MAX_PAGE_SIZE,
+    _async_result_payload,
     _execute_investigation,
     _job_public,
     _run_log_public,
@@ -72,6 +73,31 @@ def get_investigation_job_log(
     if log is None:
         raise HTTPException(status_code=404, detail="运行日志不存在")
     return {"ok": True, "log": _run_log_public(log)}
+
+
+@router.get("/v1/investigations/jobs/{job_id}/result", tags=["investigate"])
+def get_investigation_job_result(
+    job_id: str,
+    tenant: str = Depends(require_tenant),
+) -> dict[str, Any]:
+    """异步调查的**完整结果**（与同步响应同形）——轮询到 succeeded 后一次取齐（B2）。
+
+    返回 `report` + `verdict` / `verdict_detail` + `trace`（ReAct 轨迹）+ `usage`，口径与
+    `POST /v1/investigations` 的同步响应**同源**（`runtime._verdict_for`）。
+    `alerting` 不在其中：它是**执行期**副作用的结果，读路径重建会重复上报；控制台也不消费它。
+
+    未成功（pending/running/failed/cancelled）→ **409** + 当前状态；跨租户 / 不存在 → 404。
+    """
+    with session_scope() as s:
+        job = repo.get_job(s, job_id, tenant_id=tenant)
+    if job is None:
+        raise HTTPException(status_code=404, detail="调查任务不存在")
+    payload = _async_result_payload(tenant, job)
+    if payload is None:
+        raise HTTPException(
+            status_code=409,
+            detail=f"调查尚未成功（status={job.get('status')}）")
+    return payload
 
 
 @router.post("/v1/investigations/jobs/{job_id}/cancel", tags=["investigate"])

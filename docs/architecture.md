@@ -182,7 +182,8 @@ eval_feedback.py  回灌：人工标签 vs Agent 处置 → 一致率 / 误报�
   要并行须转 Kafka/MQTT）；租约依赖各副本时钟大致同步（须跑 NTP）；租约接管有 ≤TTL 窗口。
 - **调查端点已可异步，默认仍同步**。`DD_INVESTIGATE_ASYNC=1` 时 `POST /v1/investigations`
   提交即返回 `202 {job_id}`，真实 LLM 调查交给进程内 worker 池（`DD_INVESTIGATE_WORKERS`），
-  worker 立即释放；`GET /v1/investigations/jobs/{job_id}` 轮询、`.../cancel` 取消。
+  worker 立即释放；`GET /v1/investigations/jobs/{job_id}` 轮询、`.../cancel` 取消、
+  `.../result` 在成功后就地取齐 report/verdict/trace/usage（与同步响应同形，B2 第一步）。
   多副本不重复执行靠**两层**：共享待办队列 + 数据库条件领取（`UPDATE ... WHERE status='pending'`）。
   **默认关**（`=0`）——既有前端按同步长任务实现，无预警翻成 202 会直接崩；`?sync=1` 强制走同步。
   **边界**：进程内线程池**不是**分布式调度器；取消是协作式（等当前步返回）；job 表保留策略**已落地**（④：`DD_RETENTION_JOB_DAYS` 默认 7 天，只清已终态）。

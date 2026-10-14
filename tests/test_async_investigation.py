@@ -324,3 +324,55 @@ def test_sync_path_unchanged_when_async_off(tmp_path, monkeypatch):
                     json={"candidate_id": cid})
         assert r2.status_code == 200
     reset_engine()
+
+
+# ---------------------------------------------------------------- 异步结果载荷（B2）
+
+def test_job_result_matches_sync_shape(client):
+    """轮询到 succeeded 后，`/jobs/{id}/result` 一次给齐 report/verdict/trace/usage（B2）。
+
+    为什么需要它：控制台渲染的是 `verdict` + ReAct 轨迹 + `usage`，而异步此前只给
+    `report_id`——调用方得自己拼三处（verdict 要候选字段、trace/usage 在运行日志里）。
+    """
+    cid = _seed_candidate(client)
+    job_id = client.post("/v1/investigations", headers=_Q,
+                         json={"candidate_id": cid}).json()["job_id"]
+    job = _wait_status(client, job_id, "succeeded")
+
+    r = client.get(f"/v1/investigations/jobs/{job_id}/result", headers=_Q)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["investigation_id"] == job["report_id"]
+    assert body["candidate_id"] == cid
+    assert body["report"]["investigation_id"] == job["report_id"]
+    assert body["verdict"] and body["verdict_detail"], body
+    assert body["trace"], "轨迹不能空——控制台靠它渲染 ReAct 时间线"
+    # 异步轨迹必须是**全文**（args/result 都在）：运行日志是唯一副本，摘要了就补不回来
+    first = body["trace"][0]
+    assert {"step", "name", "args", "result"} <= set(first), first
+    assert "_digest" not in first, "异步轨迹被摘要了（B3 与 B2 的冲突回归）"
+    assert isinstance(body["usage"], dict), body["usage"]
+    assert "alerting" not in body, "alerting 是执行期副作用，读路径重建会重复上报"
+    print("PASS test_job_result_matches_sync_shape")
+
+
+def test_job_result_is_404_for_unknown_and_cross_tenant(client):
+    """未知 job / 跨租户 → 404（不泄露存在性）。"""
+    cid = _seed_candidate(client)
+    job_id = client.post("/v1/investigations", headers=_Q,
+                         json={"candidate_id": cid}).json()["job_id"]
+    assert client.get("/v1/investigations/jobs/job_does_not_exist/result",
+                      headers=_Q).status_code == 404
+    assert client.get(f"/v1/investigations/jobs/{job_id}/result",
+                      headers={"X-Tenant-Id": "tenant-other"}).status_code == 404
+
+
+def test_async_result_payload_is_none_unless_succeeded():
+    """未成功（pending/running/failed/cancelled）→ 没有"结果"可拼（路由翻 409）。"""
+    from data_dog.service.runtime import _async_result_payload
+
+    for status in ("pending", "running", "failed", "cancelled"):
+        assert _async_result_payload("t", {
+            "status": status, "report_id": "r", "job_id": "j",
+            "candidate_id": "c"}) is None
+    print("PASS test_async_result_payload_is_none_unless_succeeded")
