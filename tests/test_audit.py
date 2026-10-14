@@ -90,6 +90,26 @@ def test_query_filters_and_pagination(db):
     assert audit.query(tenant_id="t1", since=1.0)["total"] == 5
 
 
+def test_audit_ts_is_strictly_increasing_within_a_process(db):
+    """连续写的审计 ts 必须**严格递增**——否则"新的在前"由随机 audit_id 决定。
+
+    这不是理论问题：Windows 上 time.time() 的分辨率约 15 ms，连写 5 条会拿到同一个 ts，
+    而 SQL 是 ts DESC, audit_id（audit_id 是随机 hex）→ 列表口径不确定。
+    实测：加固前 test_query_filters_and_pagination 跑 5 次红 3 次。
+    """
+    for i in range(5):
+        assert audit.record(action=audit.ACTION_OPS_ACCESS,
+                            outcome=audit.OUTCOME_ALLOWED,
+                            tenant_id="t1", actor=f"k{i}") is True
+
+    items = audit.query(tenant_id="t1", limit=10)["items"]
+    ts = [it["ts"] for it in items]
+    assert len(set(ts)) == 5, f"同 tick 的 ts 相同 → 顺序不可判定：{ts}"
+    assert ts == sorted(ts, reverse=True), f"没有按新→旧返回：{ts}"
+    assert [it["actor"] for it in items] == ["k4", "k3", "k2", "k1", "k0"]
+    print("PASS test_audit_ts_is_strictly_increasing_within_a_process")
+
+
 def test_tenant_view_is_scoped_but_system_tenant_is_separate(db):
     audit.record(action=audit.ACTION_AUTH_DENIED, outcome=audit.OUTCOME_DENIED,
                  tenant_id="t1", reason="a")

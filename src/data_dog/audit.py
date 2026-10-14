@@ -31,6 +31,7 @@ trace_id 上下文），而这两个都是**叶子层**，叶子层之间不许�
 from __future__ import annotations
 
 import logging
+import threading
 import uuid
 from typing import Any
 
@@ -140,6 +141,28 @@ def query(*, tenant_id: str | None, action: str | None = None,
             "has_more": (offset + len(items)) < total, "items": items}
 
 
+_ts_lock = threading.Lock()
+_last_ts = 0.0
+
+
 def _now() -> float:
+    """当前时间（秒），并保证**进程内严格递增**。
+
+    为什么需要这一层：Windows 上 time.time() 的实际分辨率可达约 15 ms——连写 5 条审计
+    可能拿到**完全相同**的 ts。于是"新的在前"退化成"数据库返回顺序"：SQL 是
+    ts DESC, audit_id（而 audit_id 是随机 hex），列表口径因此**不确定**
+    （tests/test_audit.py::test_query_filters_and_pagination 实测约一半的运行会红）。
+    审计的先后本身是合规语义的一部分，不能用随机 tiebreak 糊过去。
+    同一 tick 内 +1µs 递推：偏差上限是"同一毫秒内的条数 × 1µs"，审计场景可忽略。
+
+    边界：只保证**同一进程**内写下的顺序可见。多副本各写各的时钟，跨进程同 tick 仍可能
+    平序——要严格全序得用数据库序列，不在本模块范围内。
+    """
+    global _last_ts
     import time
-    return time.time()
+    with _ts_lock:
+        t = time.time()
+        if t <= _last_ts:
+            t = _last_ts + 1e-6
+        _last_ts = t
+        return t
