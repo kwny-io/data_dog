@@ -155,8 +155,10 @@ def _old_telemetry(n: int) -> list[dict]:
 def _seed(url: str, table: str, rows: list[dict]) -> None:
     from sqlalchemy import create_engine
 
-    from data_dog.storage.models import Base
+    from data_dog.storage.models import Base, day_of
 
+    if table == "telemetry_events":        # 主键含摄取日桶（A9）：种子行按 created_at 补算
+        rows = [{**r, "created_day": day_of(r["created_at"])} for r in rows]
     eng = create_engine(url)
     with eng.begin() as c:
         c.execute(Base.metadata.tables[table].insert(), rows)

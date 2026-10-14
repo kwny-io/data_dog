@@ -23,7 +23,7 @@
 | A6 | 多副本下 retention 无租约 | ✅ | `bf75343` | 真删前抢 `retention:purge` 单持有者租约；抢不到本轮**跳过**并如实标注（≠ 删了 0 行） |
 | A7 | 没有告警规则 / SLO 未落地 | ✅ | `574b384` | `PrometheusRule` 12 条规则（可用性/热路径 P99/治理积压/静默失败）+ `docs/slo.md` §9 映射表 + 不依赖 helm 的 meta 测试 |
 | A8 | LLM 无降级链 | ✅ | `b0142c8` | 有界重试（只重试可重试错、带抖动、每次重过 deadline）+ 备用模型；`DD_LLM_RETRIES` / `DD_LLM_FALLBACK_MODEL` |
-| A9 | `telemetry_events` 没有分区 | 🚧 | `46b344c` + 本轮 | 基础设施（分区模块/维护 CLI/retention 分流）已落地并在**真 PG** 验证；但 `telemetry_events` 的**转换被主键冲突阻塞**（PG 要求唯一约束含分区键，而主键是去重键）——**需数据模型决策**，见下 |
+| A9 | `telemetry_events` 没有分区 | 🚧 1/3 | `46b344c` + 本轮 | 决策已定：走「摄取日桶」（接受跨天重复）；**第 1/3 步（schema + 写路径 + 迁移）已落地**，分区模块日粒度与转换脚本待做，见下 |
 | A10 | 控制台仍单租户 + 两套 UI | ✅ | 见下 | 收敛决定：**产品控制台 = `web/`，`ui/` 只作演示台**（README/交付文档写明）；多租户最小步：`DD_WEB_TENANTS` 服务端**允许清单** + `dd_web_tenant` cookie 做租户**选择**（清单外 403、未配置时行为不变）。**用户级身份/RBAC 仍是人工边界** |
 
 ## B. 存量可优化
@@ -76,9 +76,22 @@
 - 多副本必须配 `DD_STATE_BACKEND=postgres`（memory 后端的队列只在进程内）——`data-dog config check`
   会对"异步 + memory"报警告。
 
-### A9 `telemetry_events` 分区 —— 🚧 基础设施已落地并在**真 PG** 验证；转换被主键冲突阻塞
+### A9 `telemetry_events` 分区 —— 🚧 已决策走「摄取日桶」并开工（第 1/3 步落地）
 
-**已落地**（`46b344c`）：`storage/partitioning.py`（纯函数 + PG 探测 + 幂等建分区 + 只删整段过期
+**决策（已确认）**：接受"**跨天重投递可能多一行**"这一代价，走「摄取日桶」（D）。真库已验证机制：
+应用维护的 `created_day` 普通列 + 主键 `(created_day, tenant_id, event_id)` + `PARTITION BY RANGE
+(created_day)` 可建；同日重投递仍去重；`DROP TABLE` 昨日分区 0.009 s。**注意**：生成列不行——
+PG 16 报 `Column "created_day" is a generated column.`（生成列做分区键是 PG 17 能力），所以是写路径
+显式维护的普通列。
+
+**第 1/3 步已落地**：schema + 写路径——`TelemetryEventRow.created_day`（`BigInteger`，进主键）
++ `models.day_of()`（唯一取整来源）+ `save_telemetry(..., now=...)` 由**同一时刻**算出
+`created_at`/`created_day` + 迁移 `a9c1d2e3f4b5`（加列 → 回填 → 换主键，PG 用 `ALTER`、SQLite 走
+batch；回填用 `floor` 而非 PG 的 double→int 四舍五入）+ 测试（同日幂等 / 跨天两行 / 回填 floor）。
+**第 2 步**：`partitioning.py` 改日粒度（分区键 `created_day`、边界为日序号）与 retention 的
+`DROP PARTITION` 分流；**第 3 步**：既有表转换脚本 + 停机窗口 runbook + 真 PG 往返。
+
+**此前的基础设施**（`46b344c`）：`storage/partitioning.py`（纯函数 + PG 探测 + 幂等建分区 + 只删整段过期
 的分区）+ `scripts/partition_telemetry.py`（`--check` / `--ensure-months` / `--drop-before`）+
 retention 自动分流到 `DROP PARTITION`。测试含 `-m postgres` 真库往返。
 

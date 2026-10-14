@@ -181,7 +181,7 @@ FeatureNotSupported: unique constraint on partitioned table must include all par
 | A：`RANGE(created_at)` + 主键加 `created_at` | ❌ 重投递会重复入库 | ✅ | **排除**（数据完整性问题） |
 | B：`HASH(tenant_id, event_id)` | ✅ | ❌ 省不下那笔 DELETE | **排除**（花了停机窗口迁移却拿不到收益） |
 | C：维持现状（分批 DELETE） | ✅ | — | **默认**：已有 `(tenant_id, created_at)` 索引 + 有界批次 + 单持有者租约 |
-| **D：`RANGE(created_day)`**：`created_day = floor(created_at/86400)` 由**写路径维护**的普通列，主键 `(created_day, tenant_id, event_id)` | ✅ **同日**重投递仍去重（跨天会重复 → 写进边界 + 指标） | ✅ | **触发线越过时选它** |
+| **D：`RANGE(created_day)`**：`created_day = floor(created_at/86400)` 由**写路径维护**的普通列，主键 `(created_day, tenant_id, event_id)` | ✅ **同日**重投递仍去重（跨天会重复 → 写进边界 + 指标） | ✅ | **已选定并开工（第 1/3 步已落地）** |
 
 为什么 A 一定会破坏幂等（两处代码事实）：`repository._upsert_stmt` 把 `created_at` 放进 `keep_out`
 （**首次**写入时间不被覆盖），而真 PG introspection 显示该列**没有 server default**——重投递时 ORM
@@ -195,6 +195,18 @@ FeatureNotSupported: unique constraint on partitioned table must include all par
 **D 的机制已在真 PG 验证**（`postgres:16-alpine`，2026-10-14）：建表（主键含分区键）成功；同日用两个
 不同 `created_at` 重投递同一 `(tenant, event_id)` → **仍是 1 行**（去重保住）；跨天重投递 → 2 行（边界
 如其所述）；`DROP TABLE` 昨日分区 **0.009 s**，今日数据不受影响。
+
+**实现进度（第 1/3 步已落地）**：
+
+- **schema + 写路径**：`TelemetryEventRow.created_day` 进主键；`models.day_of()` 是唯一取整来源；
+  `save_telemetry(..., now=)` 用**同一时刻**算 `created_at`/`created_day`（不会跨午夜差一天）；
+  迁移 `a9c1d2e3f4b5` 加列 → 回填 → 换主键（PG `ALTER`、SQLite batch；回填用 `floor`，不用 PG
+  的 double→int 四舍五入）。
+- **代价可观测**：`repository.count_cross_day_duplicates()` 找出同一 `(tenant_id, event_id)` 落在
+  多个日桶的行。它**刻意不挂 `/metrics` 或 retention 热路径**（`GROUP BY` 扫描不便宜），由运维
+  按需/定期跑；`since` 传保留窗口起点可在分区表上触发分区裁剪。
+- **待做**：第 2/3 步——`partitioning.py` 改日粒度（分区键 `created_day`、边界为日序号）与
+  retention 的 `DROP PARTITION` 分流；第 3/3 步——既有表转换脚本 + 停机窗口 runbook + 真 PG 往返。
 
 **一个必须知道的限制**：`created_day` **不能是生成列**——PG 16 明确拒绝"生成列做分区键"（实测报错
 `Column "created_day" is a generated column.`），PG 17 才允许。所以 D 要有一个**普通列 + 写路径显式

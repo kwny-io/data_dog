@@ -21,6 +21,7 @@ from data_dog.storage import migrations
 
 _HEAD = "head"
 _BASELINE = "a06f16a9eff1"
+_PRE_DAY_BUCKET = "f2a3b4c5d6e7"        # 加 created_day 之前的那一版 head
 
 
 def _upgrade(url: str, rev: str) -> None:
@@ -32,7 +33,7 @@ def _downgrade(url: str, rev: str) -> None:
 
 # 改主键的表 → 期望的复合主键列（顺序即主键顺序）
 _COMPOSITE_PKS = {
-    "telemetry_events": ["tenant_id", "event_id"],
+    "telemetry_events": ["tenant_id", "event_id", "created_day"],
     "candidates": ["tenant_id", "candidate_id"],
     "reports": ["tenant_id", "investigation_id"],
     "alerts": ["tenant_id", "event_id"],
@@ -117,6 +118,8 @@ def test_migrate_populated_db_preserves_rows(db_path, monkeypatch):
     assert con.execute("SELECT tenant_id FROM reports").fetchone()[0] == "demo"
     # telemetry 的 tenant_id 是既有列 → 原值 T9 必须被保留，不能覆盖成 demo
     assert con.execute("SELECT tenant_id FROM telemetry_events").fetchone()[0] == "T9"
+    # 日桶回填：created_at=1.0 → floor(1.0/86400)=0
+    assert con.execute("SELECT created_day FROM telemetry_events").fetchone()[0] == 0
     con.close()
 
 
@@ -136,6 +139,29 @@ def test_composite_pk_allows_same_id_across_tenants(db_path, monkeypatch):
     ).fetchall()
     con.close()
     assert rows == [("demo", "cand_x"), ("t2", "cand_x")]
+
+
+def test_day_bucket_backfill_uses_floor_not_rounding(db_path, monkeypatch):
+    """回填是 **floor**，不是四舍五入。
+
+    用"桶内偏后"的时间戳（18:00）来区分两者：四舍五入会把它算成次日——而这正是 PG 的
+    `CAST(double AS bigint)` 的语义（迁移里因此没有用它，见迁移文件的 `_backfill_expr`）。
+    """
+    monkeypatch.setenv("DD_DATABASE_URL", _url(db_path))
+    _upgrade(_url(db_path), _PRE_DAY_BUCKET)
+    ts = 1_800_036_000.0                       # 日桶 20833 的 18:00
+    con = sqlite3.connect(db_path)
+    con.execute("INSERT INTO telemetry_events VALUES "
+                "('ev1','T9','SN1','2026-01-01','leg.hip','{}','[]','','','',"
+                f"'','',{ts})")
+    con.commit()
+    con.close()
+
+    _upgrade(_url(db_path), _HEAD)
+    con = sqlite3.connect(db_path)
+    got = con.execute("SELECT created_day, created_at FROM telemetry_events").fetchone()
+    con.close()
+    assert got == (20833, ts), got
 
 
 # ---------------------------------------------------------------- downgrade

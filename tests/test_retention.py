@@ -36,6 +36,14 @@ def url(tmp_path, monkeypatch):
 
 
 def _seed(u: str, table: str, rows: list[dict]) -> None:
+    """插入种子行。
+
+    `telemetry_events` 的主键含**摄取日桶** `created_day`（A9，= floor(created_at/86400)）：
+    直接构造行时它必须显式给出，否则 NOT NULL 主键会 IntegrityError。这里按 created_at 补算，
+    让种子行只写业务字段。
+    """
+    if table == "telemetry_events":
+        rows = [{**r, "created_day": int(r["created_at"] // DAY)} for r in rows]
     eng = create_engine(u)
     with eng.begin() as c:
         c.execute(Base.metadata.tables[table].insert(), rows)

@@ -22,7 +22,7 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from sqlalchemy import Float, Index, Integer, String, Text
+from sqlalchemy import BigInteger, Float, Index, Integer, String, Text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.types import JSON
@@ -33,6 +33,15 @@ from .db import Base
 def _now() -> float:
     return time.time()
 
+
+def day_of(ts: float) -> int:
+    """摄取日桶：`floor(created_at / 86400)`（epoch 秒 → UTC 日序号）。
+
+    这是 `TelemetryEventRow.created_day` 的**唯一算法来源**：写入路径与分区模块共用它，
+    避免"取整方式各写一遍"（`//` 对正数是 floor，换成 `int()` 或 PG 的 double→int 转换
+    ——后者是**四舍五入**——语义就悄悄变了）。
+    """
+    return int(ts // 86400.0)
 
 # 复杂/多态字段的列类型：**PostgreSQL 上必须是 JSONB**（与模块 docstring 的声明一致，
 # 并由 tests/test_project_meta.py 的 `test_json_columns_are_jsonb_on_postgres` 钉住）。
@@ -49,6 +58,11 @@ class TelemetryEventRow(Base):
     # 若只做普通列，两个租户同 event_id 会撞同一 PK、后者静默覆盖前者。
     tenant_id: Mapped[str] = mapped_column(String(80), primary_key=True)
     event_id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    # 摄取日桶 = floor(created_at / 86400)（A9 分区的前置条件）。它必须进主键：PG 要求
+    # **分区表的唯一约束包含全部分区键**，而按 created_at 分区做不到（主键与它无关，真 PG
+    # 实测直接报 FeatureNotSupported）。同日重投递仍命中同一主键 → **幂等保住**；
+    # **跨天重投递会多一行**（已知代价，检测见 docs/storage.md §8.2）。
+    created_day: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     device_sn: Mapped[str] = mapped_column(String(80), index=True)
     occurred_at: Mapped[str] = mapped_column(String(40))
     component_ref: Mapped[str] = mapped_column(String(120), index=True)

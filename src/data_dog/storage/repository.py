@@ -517,21 +517,38 @@ def set_alert_state(session: Session, *, tenant_id: str, event_id: str,
 
 # ---------------------------------------------------------------- 遥测事件
 
-def save_telemetry(session: Session, events: list[Any], *, tenant_id: str) -> int:
+def save_telemetry(session: Session, events: list[Any], *, tenant_id: str,
+                   now: float | None = None) -> int:
     """保存规范化遥测。**租户来自调用方（认证上下文），忽略事件正文里的 tenant_id**
-    ——与「身份只在网关注入、正文自称一律丢弃」的规则一致。主键 (tenant_id, event_id)。"""
+    ——与「身份只在网关注入、正文自称一律丢弃」的规则一致。
+
+    主键是 `(tenant_id, event_id, created_day)`，`created_day = floor(created_at / 86400)`
+    （A9 分区的前置条件：PG 要求分区表的唯一约束包含分区键）：
+
+    - `created_at` 与 `created_day` 由**同一时刻**算出（`now` 只是测试注入点），所以不会出现
+      "跨午夜时两者差一天"；
+    - **同日**重投递仍命中同一主键 → 幂等（绝大多数重试都是同日）；**跨天重投递会多一行**
+      ——已知代价，检测见 docs/storage.md §8.2；
+    - `created_at` 仍是**首次写入**时间（不进更新集），保留策略继续按**摄取时间**清理。
+    """
     n = 0
     for e in events:
         d = _as_dict(e)
         eid = d["event_id"]
-        pk = {"tenant_id": tenant_id, "event_id": eid}
+        ts = M._now() if now is None else float(now)
+        day = M.day_of(ts)
+        pk = {"tenant_id": tenant_id, "event_id": eid, "created_day": day}
 
         if not _upsert_one_stmt(session, M.TelemetryEventRow, pk,
-                                _telemetry_values(d)):
-            def apply_fn(row: Any, _d: dict[str, Any] = d) -> None:  # noqa: B023
+                                {**_telemetry_values(d), "created_at": ts}):
+            def apply_fn(row: Any, _d: dict[str, Any] = d,          # noqa: B023
+                         _ts: float = ts, _day: int = day) -> None:
                 _apply_telemetry(row, _d)
+                if row.created_at is None:      # 新行：与 created_day 同一时刻
+                    row.created_at = _ts
+                    row.created_day = _day
 
-            _upsert(session, M.TelemetryEventRow, (tenant_id, eid), pk, apply_fn)
+            _upsert(session, M.TelemetryEventRow, (tenant_id, eid, day), pk, apply_fn)
         n += 1
     return n
 
@@ -561,6 +578,28 @@ def _telemetry_values(d: dict[str, Any]) -> dict[str, Any]:
 def _apply_telemetry(row: Any, d: dict[str, Any]) -> None:
     for k, v in _telemetry_values(d).items():
         setattr(row, k, v)
+
+
+def count_cross_day_duplicates(session: Session, *, tenant_id: str | None = None,
+                               since: float | None = None) -> list[tuple[str, str, int]]:
+    """跨天重投递的**检测**：同一 `(tenant_id, event_id)` 出现在多个日桶里（返回 n>1 的项）。
+
+    为什么需要它：`created_day` 进主键换来"能按时间分区"，代价是**跨天重投递不再去重**
+    （同日重投递仍然幂等，见 `save_telemetry`）。没有检测，"代价"就只是一句空话——
+    这是把已知代价变成**可观测事实**的最小实现。
+
+    成本：`GROUP BY` 扫描（分区表上 `since` 能触发分区裁剪）。**刻意不挂在 `/metrics` 或
+    retention 的每次运行上**（那是热路径/后台热路径），由运维按需/定期跑。
+    """
+    q = session.query(M.TelemetryEventRow.tenant_id, M.TelemetryEventRow.event_id,
+                      func.count().label("n"))
+    if tenant_id is not None:
+        q = q.filter(M.TelemetryEventRow.tenant_id == tenant_id)
+    if since is not None:
+        q = q.filter(M.TelemetryEventRow.created_at >= since)
+    q = (q.group_by(M.TelemetryEventRow.tenant_id, M.TelemetryEventRow.event_id)
+          .having(func.count() > 1))
+    return [(str(t), str(e), int(n)) for t, e, n in q.all()]
 
 
 def list_telemetry(session: Session, *, tenant_id: str,

@@ -50,7 +50,8 @@ def _seed_telemetry(u: str, tenant: str, n: int, prefix: str = "e") -> None:
         c.execute(Base.metadata.tables["telemetry_events"].insert(), [
             {"tenant_id": tenant, "event_id": f"{tenant}-{prefix}{i}",
              "device_sn": "SN1", "occurred_at": "2026-01-01T00:00:00Z",
-             "component_ref": "leg.hip", "created_at": 1.0} for i in range(n)])
+             "component_ref": "leg.hip", "created_at": 1.0,
+             "created_day": 0} for i in range(n)])   # 日桶 = floor(1.0/86400)（A9）
     eng.dispose()
 
 
