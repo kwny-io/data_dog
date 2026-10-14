@@ -1,4 +1,4 @@
-"""热表按月分区（架构评审 A9）：`telemetry_events` 从"分批 DELETE"升级为"DROP PARTITION"。
+"""热表按「摄取日桶」分区（架构评审 A9）：`telemetry_events` 从"分批 DELETE"升级为"DROP PARTITION"。
 
 为什么
 ------
@@ -15,7 +15,11 @@
 - **本模块不改表结构**。把**既有**普通表转成分区表在 PG 上不能原地做（建新父表 + 拷数据 +
   重建索引/外键 + 改名切换），属于**需要停机窗口**的迁移。本模块只做**已分区之后**的日常维护
   （建下月分区 / 删过期分区），转换与首次建表见 `docs/storage.md` 的 runbook。
-- 分区键固定为 `created_at`（表的时间列），`PARTITION BY RANGE (created_at)`，分区粒度=自然月。
+- 分区键固定为 **`created_day`**（摄取日桶 `floor(created_at/86400)`，A9 决策），
+  `PARTITION BY RANGE (created_day)`，**分区粒度 = 自然月**（一个分区覆盖该月所有日桶）。
+  为什么不是 `created_at`：PG 要求分区表的唯一约束包含分区键，而该表去重键是
+  `(tenant_id, event_id)`；`created_day` 由写路径与 `created_at` 同一时刻算出，既满足规则又
+  保住**同日**幂等（代价：跨天重投递会多一行，见 `docs/storage.md` §8.2）。
 """
 from __future__ import annotations
 
@@ -25,8 +29,15 @@ from typing import Any
 
 from sqlalchemy import text
 
+from .models import day_of
+
 PARTITION_TABLE = "telemetry_events"
-PARTITION_KEY = "created_at"
+# 分区键是**摄取日桶** `created_day`（= floor(created_at/86400)），不是 `created_at` 本身：
+# PG 要求分区表的唯一约束包含全部分区键，而 `telemetry_events` 的去重键是
+# `(tenant_id, event_id)`——把 `created_at` 塞进主键会破坏幂等（重投递带新时间戳）。
+# `created_day` 由写路径与 `created_at` 同一时刻算出 → 同日重投递仍去重。代价：跨天重投递
+# 会多一行（见 docs/storage.md §8.2）。
+PARTITION_KEY = "created_day"
 
 _NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _SUFFIX_RE = re.compile(r"_(\d{4})(\d{2})$")
@@ -60,15 +71,14 @@ def _check_name(table: str) -> str:
     return table
 
 
-def _ts(dt: datetime) -> str:
-    """分区边界字面量：**epoch 秒整数**。
+def _day_bounds(start: datetime, end: datetime) -> tuple[int, int]:
+    """把"月的起止时刻"换成**日序号**边界（分区键是日桶，不是时间戳）。
 
-    为什么不是时间戳字面量：本仓的时间列是 **epoch 秒的 `double precision`**（`created_at` /
-    `ts` / `finished_at` 都是 `Float`）。在真 PG 上实测：`FOR VALUES FROM
-    ('2026-10-01 00:00:00+00')` 会被按 `double precision` 解析并报
-    `invalid input syntax for type double precision`。数值边界（`1780272000`）才对。
+    为什么边界不能用时间戳字面量：本仓的时间列是 **epoch 秒的 `double precision`**，真 PG 实测
+    `FOR VALUES FROM ('2026-10-01 00:00:00+00')` 会报 `invalid input syntax for type double
+    precision`；而且分区键现在根本不是时间列，而是 `floor(created_at/86400)` 的**整数日序号**。
     """
-    return str(int(dt.astimezone(timezone.utc).timestamp()))
+    return day_of(start.timestamp()), day_of(end.timestamp())
 
 
 def month_bounds(when: datetime) -> tuple[datetime, datetime]:
@@ -96,8 +106,9 @@ def partition_name(table: str, when: datetime) -> str:
 def create_partition_sql(table: str, start: datetime, end: datetime) -> str:
     """`CREATE TABLE ... PARTITION OF ...`（**纯函数**，离开数据库也能断言）。"""
     name = partition_name(table, start)
+    start_day, end_day = _day_bounds(start, end)
     return (f"CREATE TABLE IF NOT EXISTS {name} PARTITION OF {_check_name(table)} "
-            f"FOR VALUES FROM ('{_ts(start)}') TO ('{_ts(end)}')")
+            f"FOR VALUES FROM ({start_day}) TO ({end_day})")
 
 
 def drop_partition_sql(name: str) -> str:
@@ -106,7 +117,10 @@ def drop_partition_sql(name: str) -> str:
 
 
 def partition_end(name: str) -> float | None:
-    """从分区名解析"上界"（epoch 秒）。名字不合 `<表>_<YYYYMM>` → None（保守：不删）。"""
+    """从分区名解析"上界"（**epoch 秒**，= 上界日序号 × 86400）。名字不合规 → None（保守：不删）。
+
+    返回值与 retention 的 `cutoff`（epoch 秒）同量纲，调用方无需知道分区键是日序号。
+    """
     m = _SUFFIX_RE.search(name)
     if not m:
         return None
@@ -114,7 +128,7 @@ def partition_end(name: str) -> float | None:
     if not 1 <= month <= 12:
         return None
     _, end = month_bounds(datetime(year, month, 1, tzinfo=timezone.utc))
-    return end.timestamp()
+    return day_of(end.timestamp()) * 86400.0
 
 
 def is_partitioned(session: Any, table: str = PARTITION_TABLE) -> bool:

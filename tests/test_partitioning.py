@@ -65,15 +65,19 @@ def test_shift_months_wraps_year():
     assert partitioning.shift_months(base, 14) == datetime(2028, 1, 1, tzinfo=timezone.utc)
 
 
-def test_create_and_drop_sql_use_epoch_bounds():
-    """边界是 **epoch 秒整数**：本仓时间列是 double precision（真 PG 上时间戳字面量会报错）。"""
+def test_create_and_drop_sql_use_day_bucket_bounds():
+    """边界是**日序号整数**（分区键 `created_day`，不是时间戳）。
+
+    这里写死数字（20727 / 20758）而不是用 `day_of()` 现算——否则断言与实现同源，等于没测。
+    2026-10-01 → day 20727；2026-11-01 → day 20758。
+    """
     start = datetime(2026, 10, 1, tzinfo=timezone.utc)
     _, end = partitioning.month_bounds(start)
     sql = partitioning.create_partition_sql("telemetry_events", start, end)
     assert sql == (
         "CREATE TABLE IF NOT EXISTS telemetry_events_202610 "
         "PARTITION OF telemetry_events "
-        f"FOR VALUES FROM ('{int(start.timestamp())}') TO ('{int(end.timestamp())}')")
+        "FOR VALUES FROM (20727) TO (20758)")
     assert partitioning.drop_partition_sql("telemetry_events_202610") == (
         "DROP TABLE IF EXISTS telemetry_events_202610")
 
@@ -86,8 +90,9 @@ def test_ddl_rejects_identifiers_outside_the_whitelist():
 
 
 def test_partition_end_parses_suffix_and_rejects_odd_names():
+    """上界仍以 **epoch 秒**返回（与 retention 的 cutoff 同量纲）：20758 × 86400。"""
     end = partitioning.partition_end("telemetry_events_202610")
-    assert end == datetime(2026, 11, 1, tzinfo=timezone.utc).timestamp()
+    assert end == 20758 * 86400.0 == datetime(2026, 11, 1, tzinfo=timezone.utc).timestamp()
     assert partitioning.partition_end("telemetry_events_default") is None
     assert partitioning.partition_end("telemetry_events_202613") is None
 
@@ -219,19 +224,22 @@ def test_retention_still_deletes_rows_when_not_partitioned(url):
 def test_partition_roundtrip_on_postgres():
     """真 PG：前置检查通过 → 建分区 → 插入落到分区 → 删过期分区 → 新数据仍可写。
 
-    探针忠实还原本仓的两件事：时间列是 `double precision` epoch；唯一约束必须包含分区键。
+    探针就是**日桶形态**：`created_day bigint` 进主键、按它 RANGE 分区（与 `telemetry_events`
+    迁移后的形态一致）。
     """
     from sqlalchemy import create_engine, text
     from sqlalchemy.orm import Session
+
+    from data_dog.storage.models import day_of
 
     table = "partition_probe"
     eng = create_engine(_PG_URL, future=True)
     with eng.begin() as c:
         c.execute(text(f"DROP TABLE IF EXISTS {table} CASCADE"))
         c.execute(text(
-            f"CREATE TABLE {table} (tenant_id varchar(80) NOT NULL, "
-            "event_id varchar(80) NOT NULL, created_at double precision NOT NULL, v int, "
-            "PRIMARY KEY (tenant_id, event_id, created_at)) PARTITION BY RANGE (created_at)"))
+            f"CREATE TABLE {table} (created_day bigint NOT NULL, tenant_id varchar(80) NOT NULL, "
+            "event_id varchar(80) NOT NULL, v int, "
+            "PRIMARY KEY (created_day, tenant_id, event_id)) PARTITION BY RANGE (created_day)"))
     try:
         with Session(eng) as s:
             assert partitioning.is_partitioned(s, table) is True
@@ -239,33 +247,34 @@ def test_partition_roundtrip_on_postgres():
             now = datetime(2026, 10, 1, tzinfo=timezone.utc)
             names = partitioning.ensure_partitions(s, table, months=3, now=now)
             assert names == [f"{table}_202610", f"{table}_202611", f"{table}_202612"]
-            oct_ts = int(datetime(2026, 10, 15, tzinfo=timezone.utc).timestamp())
-            nov_ts = int(datetime(2026, 11, 15, tzinfo=timezone.utc).timestamp())
-            s.execute(text(f"INSERT INTO {table} VALUES ('t1','e1',{oct_ts},1)"))
+            oct_day = day_of(datetime(2026, 10, 15, tzinfo=timezone.utc).timestamp())
+            nov_day = day_of(datetime(2026, 11, 15, tzinfo=timezone.utc).timestamp())
+            s.execute(text(f"INSERT INTO {table} VALUES ({oct_day},'t1','e1',1)"))
             s.commit()
+            # 落对了分区：数据确实在那个物理分区里（不是只看父表能查到）
+            assert s.execute(text(f"SELECT count(*) FROM {table}_202610")).scalar() == 1
             cutoff = datetime(2026, 11, 1, tzinfo=timezone.utc).timestamp()
             dropped = partitioning.drop_partitions_before(s, cutoff, table)
             assert dropped == [f"{table}_202610"]
             s.commit()
             assert partitioning.list_partitions(s, table) == [
                 f"{table}_202611", f"{table}_202612"]
-            s.execute(text(f"INSERT INTO {table} VALUES ('t1','e2',{nov_ts},2)"))
+            s.execute(text(f"INSERT INTO {table} VALUES ({nov_day},'t1','e2',2)"))
             s.commit()
     finally:
         with eng.begin() as c:
             c.execute(text(f"DROP TABLE IF EXISTS {table} CASCADE"))
-        eng.dispose()
 
 
 @pytest.mark.postgres
 @pytest.mark.skipif(not _PG_URL, reason="未设 DD_TEST_PG_URL，跳过 PG 分区集成测试")
 def test_real_telemetry_shape_is_blocked_by_its_primary_key():
-    """**真 PG 实测出来的硬结论**：`telemetry_events` 按 created_at 分区做不到。
+    """**真 PG 实测出来的硬结论**：唯一约束不含分区键 = 转不了。
 
     PG 规则：分区表的唯一约束必须包含全部分区键（`unique constraint on partitioned table
-    must include all partitioning columns`）。该表主键是 `(tenant_id, event_id)`——正是写入
-    路径 `INSERT ... ON CONFLICT DO UPDATE` 的去重键。这条用真库把"不行"钉死，并验证前置
-    检查能**点名**是哪个约束挡住的（而不是一句"注意事项"）。
+    must include all partitioning columns`）。A9 之所以走"日桶进主键"就是被这条逼的：日桶
+    **不在**主键里的表，无论分区键选 `created_at` 还是 `created_day`，都转不成。这条用真库把
+"不行 + 被谁挡住"钉死，而不是留一句"注意事项"。
     """
     from sqlalchemy import create_engine, text
     from sqlalchemy.exc import NotSupportedError
@@ -278,17 +287,17 @@ def test_real_telemetry_shape_is_blocked_by_its_primary_key():
         c.execute(text(
             f"CREATE TABLE {table} (tenant_id varchar(80) NOT NULL, "
             "event_id varchar(80) NOT NULL, created_at double precision NOT NULL, "
-            "PRIMARY KEY (tenant_id, event_id))"))
+            "created_day bigint NOT NULL, PRIMARY KEY (tenant_id, event_id))"))
     try:
         with Session(eng) as s:
             blockers = partitioning.check_partitionable(s, table)
-        assert any("不含分区键 created_at" in b for b in blockers), blockers
+        assert any("不含分区键 created_day" in b for b in blockers), blockers
         assert any("主键" in b for b in blockers), blockers
         with pytest.raises(NotSupportedError) as e:
             with eng.begin() as c:
                 c.execute(text(
                     f"CREATE TABLE {table}_partitioned (LIKE {table} INCLUDING ALL) "
-                    "PARTITION BY RANGE (created_at)"))
+                    "PARTITION BY RANGE (created_day)"))
         assert "must include all partitioning columns" in str(e.value)
     finally:
         with eng.begin() as c:

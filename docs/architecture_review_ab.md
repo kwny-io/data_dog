@@ -23,7 +23,7 @@
 | A6 | 多副本下 retention 无租约 | ✅ | `bf75343` | 真删前抢 `retention:purge` 单持有者租约；抢不到本轮**跳过**并如实标注（≠ 删了 0 行） |
 | A7 | 没有告警规则 / SLO 未落地 | ✅ | `574b384` | `PrometheusRule` 12 条规则（可用性/热路径 P99/治理积压/静默失败）+ `docs/slo.md` §9 映射表 + 不依赖 helm 的 meta 测试 |
 | A8 | LLM 无降级链 | ✅ | `b0142c8` | 有界重试（只重试可重试错、带抖动、每次重过 deadline）+ 备用模型；`DD_LLM_RETRIES` / `DD_LLM_FALLBACK_MODEL` |
-| A9 | `telemetry_events` 没有分区 | 🚧 1/3 | `46b344c` + 本轮 | 决策已定：走「摄取日桶」（接受跨天重复）；**第 1/3 步（schema + 写路径 + 迁移）已落地**，分区模块日粒度与转换脚本待做，见下 |
+| A9 | `telemetry_events` 没有分区 | 🚧 2/3 | `46b344c` + 本轮 | 决策已定：走「摄取日桶」（接受跨天重复）；**第 1/3 步（schema + 写路径 + 迁移）已落地**，分区模块日粒度与转换脚本待做，见下 |
 | A10 | 控制台仍单租户 + 两套 UI | ✅ | 见下 | 收敛决定：**产品控制台 = `web/`，`ui/` 只作演示台**（README/交付文档写明）；多租户最小步：`DD_WEB_TENANTS` 服务端**允许清单** + `dd_web_tenant` cookie 做租户**选择**（清单外 403、未配置时行为不变）。**用户级身份/RBAC 仍是人工边界** |
 
 ## B. 存量可优化
@@ -88,8 +88,9 @@ PG 16 报 `Column "created_day" is a generated column.`（生成列做分区键�
 + `models.day_of()`（唯一取整来源）+ `save_telemetry(..., now=...)` 由**同一时刻**算出
 `created_at`/`created_day` + 迁移 `a9c1d2e3f4b5`（加列 → 回填 → 换主键，PG 用 `ALTER`、SQLite 走
 batch；回填用 `floor` 而非 PG 的 double→int 四舍五入）+ 测试（同日幂等 / 跨天两行 / 回填 floor）。
-**第 2 步**：`partitioning.py` 改日粒度（分区键 `created_day`、边界为日序号）与 retention 的
-`DROP PARTITION` 分流；**第 3 步**：既有表转换脚本 + 停机窗口 runbook + 真 PG 往返。
+**第 2 步已落地**：`partitioning.py` 改日粒度——分区键 `created_day`、DDL 边界为**日序号**、
+`partition_end()` 仍返回 epoch（retention 比较逻辑未改）、真 PG 往返用例改日桶形态并加"落进物理
+分区"断言。**第 3 步**：既有表转换脚本 + 停机窗口 runbook。
 
 **此前的基础设施**（`46b344c`）：`storage/partitioning.py`（纯函数 + PG 探测 + 幂等建分区 + 只删整段过期
 的分区）+ `scripts/partition_telemetry.py`（`--check` / `--ensure-months` / `--drop-before`）+

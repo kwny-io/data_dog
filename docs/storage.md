@@ -205,8 +205,12 @@ FeatureNotSupported: unique constraint on partitioned table must include all par
 - **代价可观测**：`repository.count_cross_day_duplicates()` 找出同一 `(tenant_id, event_id)` 落在
   多个日桶的行。它**刻意不挂 `/metrics` 或 retention 热路径**（`GROUP BY` 扫描不便宜），由运维
   按需/定期跑；`since` 传保留窗口起点可在分区表上触发分区裁剪。
-- **待做**：第 2/3 步——`partitioning.py` 改日粒度（分区键 `created_day`、边界为日序号）与
-  retention 的 `DROP PARTITION` 分流；第 3/3 步——既有表转换脚本 + 停机窗口 runbook + 真 PG 往返。
+- **分区模块已改日粒度（第 2/3 步已落地）**：分区键 `created_day`，分区粒度仍是**自然月**
+  （一个分区覆盖该月所有日桶），DDL 边界是**日序号整数**（`FOR VALUES FROM (20727) TO (20758)`）；
+  `partition_end()` 仍返回 epoch 秒（20758 × 86400），因此 retention 的 `cutoff` 比较逻辑一行未改。
+  真 PG 往返用例已改成日桶形态（`created_day bigint` 进主键），并新增"插入确实落进那个物理分区"
+  的断言。
+- **待做**：第 3/3 步——既有表转换脚本 + 停机窗口 runbook。
 
 **一个必须知道的限制**：`created_day` **不能是生成列**——PG 16 明确拒绝"生成列做分区键"（实测报错
 `Column "created_day" is a generated column.`），PG 17 才允许。所以 D 要有一个**普通列 + 写路径显式
