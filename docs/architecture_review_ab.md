@@ -8,7 +8,7 @@
 
 | 分组 | 已落地 | 未落地（见下"边界"） |
 |---|---|---|
-| A（10 条缺口） | A1 A2 A3 A4 A5 A6 A7 A8 | **A9 A10** |
+| A（10 条缺口） | A1 A2 A3 A4 A5 A6 A7 A8 A9 | **A10** |
 | B（7 条优化） | B1 B2 B3 B4 B5 B6 B7 | — |
 
 ## A. 缺口
@@ -23,7 +23,7 @@
 | A6 | 多副本下 retention 无租约 | ✅ | `bf75343` | 真删前抢 `retention:purge` 单持有者租约；抢不到本轮**跳过**并如实标注（≠ 删了 0 行） |
 | A7 | 没有告警规则 / SLO 未落地 | ✅ | `574b384` | `PrometheusRule` 12 条规则（可用性/热路径 P99/治理积压/静默失败）+ `docs/slo.md` §9 映射表 + 不依赖 helm 的 meta 测试 |
 | A8 | LLM 无降级链 | ✅ | `b0142c8` | 有界重试（只重试可重试错、带抖动、每次重过 deadline）+ 备用模型；`DD_LLM_RETRIES` / `DD_LLM_FALLBACK_MODEL` |
-| A9 | `telemetry_events` 没有分区 | ❌ | — | 见下"未落地项" |
+| A9 | `telemetry_events` 没有分区 | ✅ | 见下 | `storage/partitioning.py` + 维护 CLI（建/删分区）+ retention 自动分流到 `DROP PARTITION`；**首次转换是需停机窗口的人工 runbook**，真库往返由 CI 的 `-m postgres` 腿覆盖 |
 | A10 | 控制台仍单租户 + 两套 UI | ❌ | — | 见下"未落地项" |
 
 ## B. 存量可优化

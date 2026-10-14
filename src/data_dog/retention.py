@@ -156,6 +156,7 @@ def _run_once_locked(*, now: float | None = None, batch_size: int = 500,
     """真正干活的那一半（已持有租约或显式关闭租约时调用）。"""
     from sqlalchemy import func, select
 
+    from .storage import partitioning
     from .storage.db import session_scope
     from .storage.models import Base
 
@@ -166,8 +167,13 @@ def _run_once_locked(*, now: float | None = None, batch_size: int = 500,
     days = settings.retention_days()
     rows: list[dict[str, Any]] = []
     total = 0
+    partitions_dropped: list[str] = []
 
     with session_scope(system=True) as s:
+        # A9：telemetry 若已是分区表，删数据改走 DROP PARTITION（O(1)、不留死元组、不动索引）。
+        # 非 PG / 未分区 → False → 原分批 DELETE，行为与以前完全一致。
+        telemetry_partitioned = partitioning.is_partitioned(
+            s, partitioning.PARTITION_TABLE)
         for rule in RULES:
             d = days.get(rule.knob, 0)
             if d <= 0:
@@ -178,6 +184,19 @@ def _run_once_locked(*, now: float | None = None, batch_size: int = 500,
             cutoff = ts - d * _SECONDS_PER_DAY
             tbl = Base.metadata.tables[rule.table]
             cond = _condition(tbl, rule, cutoff)
+
+            if (not dry_run and telemetry_partitioned
+                    and rule.table == partitioning.PARTITION_TABLE):
+                # 整段过期的分区直接删表：不逐行 DELETE、不产生死元组。
+                names = partitioning.drop_partitions_before(
+                    s, cutoff, partitioning.PARTITION_TABLE)
+                partitions_dropped.extend(names)
+                rows.append({"table": rule.table, "label": rule.label, "days": d,
+                             "knob": rule.knob, "off": False, "cutoff": cutoff,
+                             "mode": "drop_partition",
+                             "dropped_partitions": names,
+                             "deleted": 0, "batches": 0, "capped": False})
+                continue
 
             if dry_run:
                 n = int(s.execute(
@@ -197,15 +216,22 @@ def _run_once_locked(*, now: float | None = None, batch_size: int = 500,
             total += deleted
 
     report = {"ok": True, "now": ts, "dry_run": dry_run, "batch_size": batch_size,
-              "max_batches": max_batches, "total": total, "tables": rows}
+              "max_batches": max_batches, "total": total, "tables": rows,
+              # A9：本轮的 DROP PARTITION 名单（`total` 只统计逐行删除，分区删除单独列，
+              # 避免把"删了几个整分区"混进"删了几行"里制造假精确）。
+              "dropped_partitions": partitions_dropped}
 
     # 真的删了东西才留痕：空跑不留痕（否则周期性任务会把审计刷成噪声）。
-    if not dry_run and total > 0:
+    if not dry_run and (total > 0 or partitions_dropped):
+        reason = f"按保留期清理，共删除 {total} 行"
+        if partitions_dropped:
+            reason += f"，另删除 {len(partitions_dropped)} 个过期分区"
         audit.record(action=audit.ACTION_RETENTION_PURGE,
                      outcome=audit.OUTCOME_ALLOWED, target="retention",
-                     reason=f"按保留期清理，共删除 {total} 行",
+                     reason=reason,
                      detail={"batch_size": batch_size, "max_batches": max_batches,
                              "total_deleted": total,
+                             "dropped_partitions": partitions_dropped,
                              "tables": [{"table": r["table"], "days": r["days"],
                                          "deleted": r["deleted"],
                                          "capped": r["capped"]}
@@ -288,11 +314,18 @@ def main(argv: list[str] | None = None) -> int:
         elif args.dry_run:
             print(f"  {r['table']:<20} 保留 {r['days']:>4} 天 → 将删除 "
                   f"{r['would_delete']:>6} 行")
+        elif r.get("mode") == "drop_partition":
+            names = r.get("dropped_partitions") or []
+            print(f"  {r['table']:<20} 保留 {r['days']:>4} 天 → 已删除 "
+                  f"{len(names)} 个分区（DROP PARTITION）：{', '.join(names) or '无'}")
         else:
             flag = "（本轮到批数上限，未清完）" if r["capped"] else ""
             print(f"  {r['table']:<20} 保留 {r['days']:>4} 天 → 已删除 "
                   f"{r['deleted']:>6} 行 / {r['batches']} 批{flag}")
-    print(f"  合计：{report['total']} 行")
+    line = f"  合计：{report['total']} 行"
+    if report.get("dropped_partitions"):
+        line += f" + {len(report['dropped_partitions'])} 个分区"
+    print(line)
     return 0
 
 

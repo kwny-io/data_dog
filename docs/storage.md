@@ -130,3 +130,42 @@ postgresql+psycopg://user:pw@host:5432/data_dog        # 生产
 | State Store（Checkpoint） | — | ❌（属 P4 实时流） |
 
 > 这一步把项目从"重启即丢"变成"**数据可持久化、可审计**"，是 L1→L2 的关键一环。
+---
+
+## 8. 热表按月分区（架构评审 A9）
+
+`telemetry_events` 是唯一的**只增**大表，保留期一到靠 `delete_in_batches` 一批 500 行地删。
+分区把"删数据"变成"删表"：`DROP TABLE` 是 O(1)、不产生死元组、不需要 VACUUM，也不让"最近 7 天"
+的查询跟整表历史争索引。**默认不开启**——它是需要一次结构变更的部署选择，不是代码开关。
+
+### 8.1 日常维护（已分区之后）
+
+```bash
+python scripts/partition_telemetry.py --check                  # 只读：是否分区 / 有哪些分区
+python scripts/partition_telemetry.py --ensure-months 3        # 建"本月起未来 3 个月"分区（幂等）
+python scripts/partition_telemetry.py --drop-before 2026-08    # 删"整段早于 2026-08"的分区
+```
+
+- `--ensure-months` 建议挂**每月定时任务**：分区表最容易踩的坑就是"忘了建下月分区 → 写入直接
+  报 `no partition of relation ... found for row`"。
+- `--drop-before` 只删**整段过期**的分区（上界 ≤ 截止时间）；边界月里可能还有要留的数据，
+  宁可少删（保数据），留给下一轮。
+- 一旦确认是分区表，`retention` 的 `telemetry_events` 规则会**自动**改走 `DROP PARTITION`
+  （报告里 `mode=drop_partition` + `dropped_partitions`，`total` 只统计逐行删除，不混口径）。
+  非 PG / 未分区 → 原分批 `DELETE`，行为完全不变。
+
+### 8.2 建表 / 转换 runbook（需要停机窗口）
+
+把**既有**普通表转成分区表在 PG 上不能原地做，必须：建新分区父表 → 按 `created_at` 回填数据 →
+重建索引/外键 → 在低峰期 `ALTER TABLE ... RENAME` 切换 → 校验行数与索引。步骤**不自动化**：
+一条写错的 DDL 就是生产数据事故，这属于"要有停机窗口、要有回滚脚本、要有人看着"的迁移。
+本仓库只提供**已分区之后**的维护与删除路径（上面的 CLI），首次建表/转换由 DBA 按本节执行。
+
+### 8.3 诚实边界
+
+- **只在 PostgreSQL 上有效**；SQLite（测试/单机演示）走原路径。非 PG 上执行维护 CLI 会明确
+  拒绝（退出码 2），不会假装成功。
+- **本机没有 PG**：纯函数（分区名/月边界/DDL 文本）、非 PG 边界、retention 分流都能离线验证；
+  真库往返（建分区→插入→删过期分区）是 `-m postgres` 用例，**由 CI 的 postgres 腿实测**
+  （本地无 `DD_TEST_PG_URL` 时跳过）。
+- **转换未自动化、未在本仓实测**：见 8.2 的理由；这是本项最需要人工介入的部分。

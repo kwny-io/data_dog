@@ -42,6 +42,7 @@ ALL_ENTRY_FILES = [
     "src/data_dog/alerting/p3_demo.py",
     "src/data_dog/operator_factory/p1_demo.py",
     "src/data_dog/agent/degradation_demo.py",
+    "scripts/partition_telemetry.py",
     "src/data_dog/synth/synth_eval.py",
     "src/data_dog/synth/dataset_eval.py",
     "src/data_dog/mujoco_sim/mujoco_eval.py",
