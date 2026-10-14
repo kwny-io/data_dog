@@ -194,3 +194,65 @@ def test_notification_without_investigation_does_not_fake_a_link(monkeypatch):
     assert note.payload["run_log_path"] == ""
     assert note.payload["run_log_url"] == ""
     assert "运行日志" not in note.body
+
+
+# ---------------------------------------------------------------- 写放大（B3）
+
+def _trace(n: int = 3) -> list[dict]:
+    return [{"type": "tool_call", "step": i + 1, "name": f"tool_{i}",
+             "args": {"x": i}, "result": {"ok": True, "blob": "y" * 50},
+             "injection_hits": []} for i in range(n)]
+
+
+def _payload(status: str, disposition: str = "", **kw) -> dict:
+    from data_dog.service.runtime import _run_log_payload
+
+    return _run_log_payload(run_id="run_x", candidate_id="c1", kind="sync",
+                            status=status, trace=_trace(),
+                            disposition=disposition, **kw)
+
+
+def test_success_run_log_stores_only_step_digest(monkeypatch):
+    """成功且已判定 → 只落骨架（步号+工具名）：写放大从"每次重跑 40 步正文"降下来。"""
+    monkeypatch.delenv("DD_RUN_LOG_FULL_STEPS", raising=False)
+    log = _payload("succeeded", disposition="confirmed")
+    assert log["step_count"] == 3, "step_count 仍记真实步数（裁剪不该把它变小）"
+    assert [s["name"] for s in log["steps"]] == ["tool_0", "tool_1", "tool_2"]
+    assert all(set(s) == {"step", "name", "_digest"} for s in log["steps"]), log["steps"]
+
+
+@pytest.mark.parametrize("status,disposition", [
+    ("failed", ""), ("cancelled", ""), ("succeeded", "needs_human_review")])
+def test_failed_or_uncertain_run_log_keeps_full_steps(monkeypatch, status, disposition):
+    """失败 / 取消 / "AI 拿不准" → 留全文（入参 + 结果）：排查价值恰好集中在这三类。"""
+    monkeypatch.delenv("DD_RUN_LOG_FULL_STEPS", raising=False)
+    log = _payload(status, disposition=disposition)
+    assert all("args" in s and "result" in s for s in log["steps"]), log["steps"]
+
+
+def test_run_log_full_steps_override_and_bad_value(monkeypatch):
+    """always / never 覆盖 auto；非法值回落到 auto（日志开关不该让请求失败关闭）。"""
+    monkeypatch.setenv("DD_RUN_LOG_FULL_STEPS", "always")
+    assert "args" in _payload("succeeded", disposition="confirmed")["steps"][0]
+
+    monkeypatch.setenv("DD_RUN_LOG_FULL_STEPS", "never")
+    assert _payload("failed")["steps"][0].get("_digest") is True
+
+    monkeypatch.setenv("DD_RUN_LOG_FULL_STEPS", "yes-please")
+    assert _payload("succeeded", disposition="confirmed")["steps"][0].get("_digest") is True
+
+
+def test_api_marks_truncated_steps(client, monkeypatch):
+    """API 要**如实标注**步骤被裁剪，不假装完整（steps_truncated）。"""
+    monkeypatch.setenv("DD_RUN_LOG_FULL_STEPS", "never")
+    cid = _seed_candidate(client)
+    iid = client.post("/v1/investigations", headers=_Q,
+                      json={"candidate_id": cid}).json()["investigation_id"]
+    log = client.get(f"/v1/investigations/{iid}/log", headers=_Q).json()["log"]
+    assert log["steps_truncated"] is True
+    assert log["step_count"] >= len(log["steps"]) >= 1
+    assert all("args" not in s for s in log["steps"]), log["steps"]
+    # 列表页也带这个标记（列表不带正文，但"是否完整"必须能看出来）
+    item = client.get("/v1/investigations/runs", headers=_Q).json()["items"][0]
+    assert item["steps_truncated"] is True
+    print("PASS test_api_marks_truncated_steps")

@@ -315,6 +315,9 @@ def _job_public(job: dict[str, Any]) -> dict[str, Any]:
 def _run_log_public(row: dict[str, Any], *, with_steps: bool = True) -> dict[str, Any]:
     """运行日志的对外视图。**列表页不带 steps 正文**（一次 40 步轨迹不该塞进列表响应），
     详情页带；两者共用同一份字段口径，避免"列表和详情说的不是一回事"。"""
+    stored_steps = row.get("steps") or []
+    full_count = int(row.get("step_count", 0) or 0)
+    digested = any(isinstance(s, dict) and s.get("_digest") for s in stored_steps)
     out: dict[str, Any] = {
         "run_id": row.get("run_id"),
         "candidate_id": row.get("candidate_id"),
@@ -325,12 +328,15 @@ def _run_log_public(row: dict[str, Any], *, with_steps: bool = True) -> dict[str
         "error_detail": row.get("error_detail") or "",
         "model": row.get("model") or "",
         "step_count": row.get("step_count", 0),
+        # 落库时可能只保留**骨架**（B3：成功且已判定时），或步数被 40 步上限截断
+        # → 两种都如实标注，不假装完整。
+        "steps_truncated": digested or full_count > len(stored_steps),
         "duration_ms": row.get("duration_ms", 0.0),
         "usage": row.get("usage") or {},
         "created_at": row.get("created_at"),
     }
     if with_steps:
-        out["steps"] = row.get("steps") or []
+        out["steps"] = stored_steps
     return out
 def _submit_async_investigation(tenant: str, candidate_id: str,
                                 response: Response,
@@ -461,6 +467,41 @@ _RUN_LOG_MAX_STEPS = 40          # 轨迹最多留多少步（AgentLoop 本身�
 _RUN_LOG_MAX_STEP_CHARS = 4000   # 单步（入参 + 结果）序列化后的字符上限
 _RUN_LOG_MAX_DETAIL = 1000       # 失败上下文上限
 
+# 落库时"留全文"的状态/结论闭集（见 settings.run_log_full_steps 的 auto 档）。
+# 失败与取消当然要留全文；**结论是 needs_human_review 的成功调查**同样要——
+# "AI 拿不准"的那一次恰恰是技术员最想复看轨迹的。
+_RUN_LOG_FULL_STATUSES = frozenset({"failed", "cancelled"})
+_RUN_LOG_FULL_DISPOSITIONS = frozenset({"needs_human_review"})
+
+
+def _steps_digest(steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """轨迹骨架：只留步号 + 工具名（丢掉体积最大的入参与结果正文）。
+
+    每步带 `_digest: true` 这个**显式标记**：对外视图靠它如实标注"步骤不完整"。
+    只用"步数变少"判断是不行的——骨架**保留步数**，少的只是每步的正文。
+    """
+    return [{"step": s.get("step"), "name": s.get("name"), "_digest": True}
+            for s in steps if isinstance(s, dict)]
+
+
+def _steps_for_storage(steps: list[dict[str, Any]], *, status: str,
+                       disposition: str) -> tuple[list[dict[str, Any]], bool]:
+    """按 settings.run_log_full_steps() 决定落库留多少步；返回 (steps, 是否裁剪)。
+
+    默认 auto 档：成功且已判定 → 只留骨架（写放大从"每次重跑 40 步"降到"一行工具名"），
+    失败/取消/needs_human_review → 全文。排查价值恰好集中在后三类。
+    """
+    mode = settings.run_log_full_steps()
+    if mode == "always":
+        return steps, False
+    if mode == "never":
+        return _steps_digest(steps), bool(steps)
+    full = (status in _RUN_LOG_FULL_STATUSES
+            or disposition in _RUN_LOG_FULL_DISPOSITIONS)
+    if full:
+        return steps, False
+    return _steps_digest(steps), bool(steps)
+
 
 def _safe_step(ev: dict[str, Any]) -> dict[str, Any]:
     """把一步轨迹脱敏 + 裁剪成可落库的 JSON；超长**如实标注**截断，不假装完整。"""
@@ -484,9 +525,14 @@ def _run_log_payload(*, run_id: str, candidate_id: str, kind: str, status: str,
                      trace: list[dict[str, Any]], report_id: str | None = None,
                      error_code: str | None = None, error_detail: str = "",
                      usage: dict[str, Any] | None = None, model: str = "",
-                     duration_ms: float = 0.0) -> dict[str, Any]:
-    """构造一条运行日志。落库与响应**共用同一份口径**，避免两处各写一遍而漂移。"""
+                     duration_ms: float = 0.0, disposition: str = "") -> dict[str, Any]:
+    """构造一条运行日志。落库与响应**共用同一份口径**，避免两处各写一遍而漂移。
+
+    `disposition`（结论）参与"落多少步"的取舍：成功但 needs_human_review 仍留全文。
+    """
     steps = [_safe_step(ev) for ev in trace[:_RUN_LOG_MAX_STEPS]]
+    steps, _truncated = _steps_for_storage(steps, status=status,
+                                           disposition=disposition)
     return {
         "run_id": run_id,
         "candidate_id": candidate_id,
@@ -538,14 +584,16 @@ def _execute_investigation(tenant: str, candidate_id: str, *,
 
     def _with_log(out: dict[str, Any], *, status: str, run_id: str | None = None,
                   report_id: str | None = None, error_code: str | None = None,
-                  error_detail: str = "", usage: dict[str, Any] | None = None
+                  error_detail: str = "", usage: dict[str, Any] | None = None,
+                  disposition: str = ""
                   ) -> dict[str, Any]:
         log = _run_log_payload(
             run_id=run_id or attempt_run_id, candidate_id=candidate_id,
             kind="sync" if persist else "async", status=status, trace=trace,
             report_id=report_id, error_code=error_code, error_detail=error_detail,
             usage=usage, model=str(settings.llm_model() or ""),
-            duration_ms=(time.monotonic() - started) * 1000.0)
+            duration_ms=(time.monotonic() - started) * 1000.0,
+            disposition=disposition)
         out["run_id"] = log["run_id"]
         out["run_log"] = log
         if persist:
@@ -723,7 +771,9 @@ def _execute_investigation(tenant: str, candidate_id: str, *,
     # 同步失败没有报告，run_id 是本次尝试的 run_xxx，靠 GET /v1/investigations/runs 发现。
     result = _with_log(out, status="succeeded",
                        run_id=report.investigation_id if persist else None,
-                       report_id=report.investigation_id, usage=usage)
+                       report_id=report.investigation_id, usage=usage,
+                       # 结论参与"落多少步"：needs_human_review 仍留全文（B3）
+                       disposition=str(getattr(report, "disposition", "") or ""))
     # 同步端点只回 response（out 是给 worker 看的），故把 run_id 也放进 response，
     # 调用方拿到报告 id 的**同时**就知道运行日志去哪取。
     response["run_id"] = result["run_id"]

@@ -23,7 +23,7 @@
 | 📊 | **带 ground truth 的规模化评估（双栏）** | **忠实 MuJoCo 数据集 10 万条**，分层抽跑真实 Agent：**确定性 provider** n=2000 → **准确率 0.818**（Wilson 95% CI 0.801–0.834）、normal 误报率 **0.064**；**真 LLM** n=500 → **0.708**（0.667–0.746）、normal 误报率 **0.72**（故障召回反而更高）。逐类召回一并如实报（**F4 偏置 0.43 为当前最低**）；误报根因（裁决口径把"证据不足"与"证据充分但正常"混为一谈）**已定位并改口径，效果标注为未实测**（本机 key 余额为零）；另有 7 个评估 case（含 2 个对抗性：提示注入 / 身份伪装） |
 | 🚚 | **能交付：服务 + 容器 + HTTPS** | FastAPI（liveness / readiness 分离）+ Dockerfile + compose（含 Caddy 自动申请 HTTPS）+ Makefile |
 
-**规模**：源码 152 个 Python 文件 / 27378 行，测试 95 个文件 / 22007 行；前端 `web/` 为 Next.js 15 控制台（60 个 TS/TSX 文件）；5 份正式事件 JSON Schema；30 个 `make` 命令（另有 `help`）。
+**规模**：源码 152 个 Python 文件 / 27444 行，测试 95 个文件 / 22069 行；前端 `web/` 为 Next.js 15 控制台（60 个 TS/TSX 文件）；5 份正式事件 JSON Schema；30 个 `make` 命令（另有 `help`）。
 
 ---
 
@@ -71,7 +71,7 @@ LLM 调用补上**有界重试 + 备用模型降级**（`DD_LLM_RETRIES` / `DD_L
 （同步，run_id = 报告 id）、`GET /v1/investigations/jobs/{job_id}/log`（异步，run_id = job_id）、
 `GET /v1/investigations/runs?candidate_id=&status=`（列表，只回摘要）。**告警通知**也带上 
 `investigation_id` + `run_log_path`（配 `DD_PUBLIC_BASE_URL` 时给全链），值班人收到告警能一键
-回到诊断过程。边界：轨迹**脱敏并裁剪**（单步 4 KB / 最多 40 步），是过程记录不是证据包；
+回到诊断过程。边界：轨迹**脱敏并裁剪**（单步 4 KB / 最多 40 步），是过程记录不是证据包；**写放大有取舍**——`DD_RUN_LOG_FULL_STEPS`（默认 `auto`）下"成功且已判定"只落**轨迹骨架**（步号+工具名），失败/取消/`needs_human_review` 落全文，两种不完整都用 `steps_truncated` 如实标注；
 保留默认 90 天（`DD_RETENTION_RUN_LOG_DAYS`，0 = 永久）；不是分布式追踪。见 [docs/run_log.md](docs/run_log.md)。
 
 - **Windows 控制台的 UTF-8 兜底**：演示脚本与 CLI 输出含 `▸`/`✅` 等符号，Windows 简体中文控制台按 GBK 编码 stdout → `UnicodeEncodeError` 直接崩、整链走不完（CI 只跑 Linux，单测全绿也抓不到）。现由 `core/console.py` 在各入口（含 console_script 回调，`__main__` 路径覆盖不到它）统一重配 stdout/stderr 为 UTF-8（`errors="replace"`），`PYTHONIOENCODING=gbk` 下的子进程回归测试守住。

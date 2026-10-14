@@ -881,6 +881,22 @@ def investigate_async() -> bool:
     return _get_bool("DD_INVESTIGATE_ASYNC", default=False)
 
 
+def run_log_full_steps() -> str:
+    """运行日志落库时保留多少轨迹步骤（DD_RUN_LOG_FULL_STEPS，默认 auto）。
+
+    - **auto**（默认）：**成功且已判定**只落"调了什么工具"的骨架（步号 + 工具名），
+      失败/取消、以及结论为 needs_human_review 的落**全文**（入参 + 结果）。
+      理由：一次调查最多 40 步、单步 4 KB，重跑多的候选会把库撑大；而排查价值集中在
+      "失败 / 拿不准"这两类——成功那次结论与证据都在 report 里。
+    - **always**：一律落全文（需要完整轨迹留档时用）。
+    - **never**：一律只落骨架（最省空间，但失败排查也会缺入参/结果）。
+
+    非法值按 auto 处理：日志级别的开关不值得让请求失败关闭。
+    """
+    v = _get("DD_RUN_LOG_FULL_STEPS", default="auto").strip().lower()
+    return v if v in ("auto", "always", "never") else "auto"
+
+
 def investigate_workers() -> int:
     """异步调查 worker 池大小（进程内线程数）。"""
     return max(1, _get_int("DD_INVESTIGATE_WORKERS", default=4))
