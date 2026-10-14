@@ -55,6 +55,26 @@ def test_readme_scale_numbers_match_reality():
     print("PASS test_readme_scale_numbers_match_reality")
 
 
+def test_pre_commit_runs_readme_counts_check():
+    """README 数字的核对必须挂在 pre-commit 上（否则只有"人记得"时才跑）。
+
+    这条真的漏过：数字脚本早就存在，但**没有任何自动闸门调用它**——本轮新增测试文件时
+    README 就漂了一次，靠人肉才发现。而且钩子里这一步必须**无条件跑**：漂移最常见的形态是
+    "只新增了文件、README 忘了改"，那种提交里根本没有 .py 变更，会被"无暂存 .py 就退出"跳过。
+    """
+    hook = (ROOT / "scripts" / "git-hooks" / "pre-commit").read_text(encoding="utf-8")
+    assert "readme_counts.py --check" in hook, "pre-commit 没有核对 README 规模数字"
+    assert hook.index("readme_counts.py --check") > hook.index("ruff check"), \
+        "核对步骤必须在 ruff 之后单独成步"
+
+    step = next(line for line in hook.splitlines()
+                if "readme_counts.py --check" in line and line.strip().startswith('"$PY"'))
+    assert not step.startswith((" ", "\t")), (
+        "核对步骤被缩进了——说明它被圈在 if [ -n '$files' ] 里，"
+        "没有 .py 变更的提交会直接跳过它")
+    print("PASS test_pre_commit_runs_readme_counts_check")
+
+
 def test_requirements_txt_is_generated_from_pyproject():
     """requirements.txt 必须等于由 pyproject 生成的结果（两份手抄清单必然漂移）。"""
     gr = _load_script("gen_requirements")

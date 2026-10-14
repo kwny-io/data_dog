@@ -1,6 +1,7 @@
 #!/bin/sh
 # data_dog pre-commit：只跑"快且能拦住大多数问题"的静态检查（亚秒级）。
-# 全量门禁（ruff + mypy + 645 项测试）放在 pre-push，避免每次提交都等几分钟。
+# 两件事：ruff（只查暂存的 .py）+ README 规模数字核对（数的是 git 跟踪文件）。
+# 全量门禁（ruff + mypy + 全量测试）放在 pre-push，避免每次提交都等几分钟。
 #
 # 启用：make hooks   （等价于 git config core.hooksPath scripts/git-hooks）
 # 临时跳过：git commit --no-verify  （不建议：CI 会拦，只是把失败推后）
@@ -20,11 +21,18 @@ fi
 
 # 只检查本次暂存的 Python 文件（--diff-filter=ACM：新增/修改/复制的）
 files=$(git diff --cached --name-only --diff-filter=ACM -- '*.py' || true)
-if [ -z "$files" ]; then
-    exit 0
+if [ -n "$files" ]; then
+    count=$(printf '%s\n' "$files" | wc -l | tr -d ' ')
+    echo "[pre-commit] ruff check（$count 个暂存文件）"
+    printf '%s\n' "$files" | xargs "$PY" -m ruff check --force-exclude
 fi
 
-count=$(printf '%s\n' "$files" | wc -l | tr -d ' ')
-echo "[pre-commit] ruff check（$count 个暂存文件）"
-printf '%s\n' "$files" | xargs "$PY" -m ruff check --force-exclude
+# README 的规模数字必须与**这个提交的索引**一致。
+# 为什么放在这里、且**必须无条件跑**：readme_counts 数的是 git 跟踪的文件，于是"新增一个
+# 测试文件"就会让 README 漂一位——而漂移不会自己报错，直到有人真的去数一遍。
+# 漂移最常见的形态恰恰是**没有 .py 变更**的提交（只新增了文件、README 忘了改），
+# 所以这一步不能挂在上面那个 if 块里面。（这个坑真踩过：脚本早就有了，但没人调用它。）
+echo "[pre-commit] README 规模数字核对（scripts/readme_counts.py --check）"
+"$PY" scripts/readme_counts.py --check
+
 echo "[pre-commit] 通过"
