@@ -10,6 +10,7 @@ import { describe, expect, it } from "vitest";
 
 import { ApiError, api } from "@/lib/api/client";
 import { humanize } from "@/lib/errors";
+import { candidate, investigationResult } from "./fixtures";
 import { server } from "./msw/server";
 
 describe("API client — header injection", () => {
@@ -223,5 +224,105 @@ describe("API client — long task cancellation", () => {
     setTimeout(() => controller.abort(), 20);
 
     await expect(p).rejects.toMatchObject({ name: "AbortError" });
+  });
+});
+
+describe("API client — async investigation (submit → poll → result)", () => {
+  it("polls the job, then reads the assembled result (report+verdict+trace+usage)", async () => {
+    const seen: string[] = [];
+    let polls = 0;
+    server.use(
+      http.post("*/v1/investigations", () =>
+        HttpResponse.json({ ok: true, job_id: "job_1", status: "pending" }, { status: 202 }),
+      ),
+      http.get("*/v1/investigations/jobs/job_1", () => {
+        polls += 1;
+        seen.push("poll");
+        return HttpResponse.json({
+          ok: true,
+          job: {
+            job_id: "job_1",
+            candidate_id: candidate.candidate_id,
+            status: polls < 2 ? "running" : "succeeded",
+            report_id: investigationResult.investigation_id,
+            error_code: null,
+          },
+        });
+      }),
+      http.get("*/v1/investigations/jobs/job_1/result", () => {
+        seen.push("result");
+        return HttpResponse.json(investigationResult);
+      }),
+    );
+
+    const out = await api.investigate(candidate.candidate_id, { pollMs: 1 });
+    expect(seen).toEqual(["poll", "poll", "result"]);
+    expect(out.investigation_id).toBe(investigationResult.investigation_id);
+    expect(out.verdict).toBeTruthy();
+    expect(out.trace.length).toBeGreaterThan(0);
+  });
+
+  it("returns the synchronous response as-is when the backend is not in async mode", async () => {
+    server.use(http.post("*/v1/investigations", () => HttpResponse.json(investigationResult)));
+    const out = await api.investigate("cand_ab12cd34ef56");
+    expect(out.investigation_id).toBe(investigationResult.investigation_id);
+  });
+
+  it("turns a failed job into an ApiError carrying the backend error_code", async () => {
+    server.use(
+      http.post("*/v1/investigations", () =>
+        HttpResponse.json({ ok: true, job_id: "job_2", status: "pending" }, { status: 202 }),
+      ),
+      http.get("*/v1/investigations/jobs/job_2", () =>
+        HttpResponse.json({
+          ok: true,
+          job: {
+            job_id: "job_2",
+            candidate_id: "cand_x",
+            status: "failed",
+            report_id: null,
+            error_code: "timeout",
+          },
+        }),
+      ),
+    );
+
+    await expect(api.investigate("cand_x", { pollMs: 1 })).rejects.toMatchObject({
+      name: "ApiError",
+      code: "timeout",
+    });
+  });
+
+  it("stops polling and asks the backend to cancel when the caller aborts", async () => {
+    let cancelled = false;
+    server.use(
+      http.post("*/v1/investigations", () =>
+        HttpResponse.json({ ok: true, job_id: "job_3", status: "pending" }, { status: 202 }),
+      ),
+      http.get("*/v1/investigations/jobs/job_3", () =>
+        HttpResponse.json({
+          ok: true,
+          job: {
+            job_id: "job_3",
+            candidate_id: "cand_x",
+            status: "running",
+            report_id: null,
+            error_code: null,
+          },
+        }),
+      ),
+      http.post("*/v1/investigations/jobs/job_3/cancel", () => {
+        cancelled = true;
+        return HttpResponse.json({ ok: true, job: { job_id: "job_3", status: "cancelled" } });
+      }),
+    );
+
+    const controller = new AbortController();
+    const p = api.investigate("cand_x", { signal: controller.signal, pollMs: 1 });
+    setTimeout(() => controller.abort(), 15);
+    await expect(p).rejects.toMatchObject({ name: "AbortError" });
+    // The cancel is fired best-effort (not awaited) so the abort is not delayed.
+    await new Promise((r) => setTimeout(r, 25));
+    expect(cancelled).toBe(true);
   });
 });

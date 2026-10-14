@@ -127,11 +127,15 @@ GET  /v1/investigations/{id}       查报告（**保持现状**，id 既可是 r
 - **默认仍是同步**（`DD_INVESTIGATE_ASYNC` 默认 0）。理由：既有前端按"同步长任务"
   实现，无预警地翻成 202 会直接崩。异步是**开启项**，前端改用轮询后再打开。同步/异步
   **共用同一段执行逻辑**（`_execute_investigation`），不是两套实现。
-  **2026-10-14 复核（架构评审 B2）**：这条**仍未翻**，且不是"前端改轮询就行"——同步响应里
-  的 `verdict` / `trace` / `usage` / `alerting` 在异步路径**取不到**（`_finish` 只落
-  report + run_log；job 端点只回 job 行，report 端点只回报告，`alerting` 无处可取），
-  直接翻会让控制台丢掉结论与轨迹。翻默认前必须先：① 后端让异步完成态一次拿到
-  `verdict`/`alerting`；② 控制台改"提交→轮询→取报告"并补前端测试；③ 再翻默认。
+  **2026-10-14 复核（架构评审 B2）**：
+  ① **后端已补齐**：`GET /v1/investigations/jobs/{id}/result` 成功后就地给 `report` +
+  `verdict`/`verdict_detail` + `trace` + `usage`（与同步响应同形）；`alerting` 刻意不回
+  （执行期副作用，读路径重建会重复上报，控制台也不消费它）。
+  ② **控制台已改造**：`api.investigate` 现在**两种模式都认**——POST 回同步结果就直接用，
+  回 `202 {job_id}` 就轮询 `.../jobs/{id}` 到终态再取 `.../result`；取消会停轮询并**顺带**
+  请后端取消 job。所以"前端按同步长任务实现"不再是阻塞点。
+  ③ **仍未翻默认**：翻开会给**每个应用实例**加一个 worker 线程池 + 队列轮询线程
+  （`create_app` 按 `investigate_async()` 决定是否起），要在部署形态上先想清楚。
   完整边界见 [`docs/architecture_review_ab.md`](../../architecture_review_ab.md)。
 - **多副本不重复靠两层**：① 共享待办队列（`state_kv` 全局 key，多副本 `mutate` 原子
   取件）；② 条件领取（`UPDATE ... WHERE status='pending'`，数据库保证只有一个 rowcount=1）。

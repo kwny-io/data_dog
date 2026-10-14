@@ -12,12 +12,15 @@ import type { CandidateEvent, InvestigationResult } from "@/lib/api/types";
 /**
  * The investigative action, treated as the long task it is.
  *
- * POST /v1/investigations runs a synchronous LLM call on the backend
- * (10–60s, timeout 90s by default). So the UI:
+ * POST /v1/investigations starts a 10–60s LLM investigation on the backend
+ * (timeout 90s by default). The client hides the mode difference: it submits and,
+ * when the backend is in async mode, polls the job before reading the result
+ * (`api.investigate`). So the UI:
  *  - disables the button while in flight;
  *  - shows a progress state with the expected time envelope;
- *  - offers a real cancel that aborts the fetch (AbortController);
- *  - never auto-polls — this is operator-initiated and single-shot.
+ *  - offers a real cancel (AbortController) that stops the poll and asks the backend
+ *    to cancel the job;
+ *  - never repeats on its own — this is operator-initiated and single-shot.
  *
  * A completed report can be kept; the backend persists it and it can be
  * reloaded later via GET /v1/investigations/{id} without re-running the LLM.
@@ -74,7 +77,7 @@ export function InvestigationPanel({
 
   return (
     <div className="space-y-4">
-      <Panel title="Agent 调查" subtitle="同步调用，最长 90 秒 · 可取消">
+      <Panel title="Agent 调查" subtitle="提交后轮询，最长 90 秒 · 可取消">
         <div className="flex flex-wrap items-center gap-3 px-4 py-3">
           {!mutation.isPending ? (
             <Button variant="primary" className="shine-loop" onClick={start}>
@@ -86,7 +89,7 @@ export function InvestigationPanel({
                 ■ 取消
               </Button>
               <span className="flex items-center gap-2 text-sm text-ink-muted" role="status" aria-live="polite">
-                <Spinner /> 调查中（最长 90s）… 已用 {elapsed}s
+                <Spinner /> 调查中（提交后轮询，最长 90s）… 已用 {elapsed}s
               </span>
             </>
           )}

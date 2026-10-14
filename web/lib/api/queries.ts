@@ -153,11 +153,13 @@ export function useReports(
 // ----------------------------------------------------------- investigation
 
 /**
- * The core action. This is a synchronous LLM call on the backend (10–60s),
- * so:
- *  - it is a mutation, not a polling query (spec: do NOT auto-poll);
- *  - the caller owns the AbortController and passes its signal so the button
- *    can cancel.
+ * The core action. The backend runs a 10–60s LLM investigation, in one of two modes
+ * (both handled inside `api.investigate`, see client.ts): synchronous, or async
+ * (`DD_INVESTIGATE_ASYNC=1`) where the client submits, polls the job and then reads
+ * the assembled result. Either way:
+ *  - it stays a mutation (there is no shared cache to poll into);
+ *  - the caller owns the AbortController; aborting stops the poll and asks the
+ *    backend to cancel the job.
  */
 export function useInvestigate(): UseMutationResult<
   InvestigationResult,

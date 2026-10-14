@@ -234,6 +234,21 @@ export interface InvestigationResult {
   usage: InvestigationUsage;
 }
 
+/** `GET /v1/investigations/jobs/{id}` — backend `runtime._job_public`.
+ *
+ * Async mode: `POST /v1/investigations` returns `202 {job_id}` and the LLM work
+ * happens in a worker pool. Poll until terminal, then take `.../result` (same
+ * shape as the synchronous response: report + verdict + trace + usage).
+ */
+export interface InvestigationJob {
+  job_id: string;
+  candidate_id: string;
+  status: "pending" | "running" | "succeeded" | "failed" | "cancelled";
+  report_id: string | null;
+  error_code: string | null;
+  [k: string]: unknown;
+}
+
 /** `GET /v1/candidates/{id}/evidence` (spec §3.5; backend stage D). */
 export interface CandidateEvidence {
   ok: true;

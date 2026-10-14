@@ -71,7 +71,7 @@ LLM 调用补上**有界重试 + 备用模型降级**（`DD_LLM_RETRIES` / `DD_L
 （同步，run_id = 报告 id）、`GET /v1/investigations/jobs/{job_id}/log`（异步，run_id = job_id）、
 `GET /v1/investigations/runs?candidate_id=&status=`（列表，只回摘要）。**告警通知**也带上 
 `investigation_id` + `run_log_path`（配 `DD_PUBLIC_BASE_URL` 时给全链），值班人收到告警能一键
-回到诊断过程。同步失败**没有报告 id** 时，run_id 是**可读的** `run_<候选缩写>_<UTC时间戳>_<4位hex>`（4 位随机尾防同一秒重跑撞主键覆盖日志）。边界：轨迹**脱敏并裁剪**（单步 4 KB / 最多 40 步），是过程记录不是证据包；**写放大有取舍**——`DD_RUN_LOG_FULL_STEPS`（默认 `auto`）下"成功且已判定"只落**轨迹骨架**（步号+工具名），失败/取消/`needs_human_review` 落全文，两种不完整都用 `steps_truncated` 如实标注；
+回到诊断过程。同步失败**没有报告 id** 时，run_id 是**可读的** `run_<候选缩写>_<UTC时间戳>_<4位hex>`（4 位随机尾防同一秒重跑撞主键覆盖日志）。边界：轨迹**脱敏并裁剪**（单步 4 KB / 最多 40 步），是过程记录不是证据包；**写放大有取舍**——`DD_RUN_LOG_FULL_STEPS`（默认 `auto`）下**同步**"成功且已判定"只落**轨迹骨架**（步号+工具名），失败/取消/`needs_human_review` 落全文，**异步一律全文**（异步拿不到同步响应体，日志是轨迹的唯一副本），两种不完整都用 `steps_truncated` 如实标注；
 保留默认 90 天（`DD_RETENTION_RUN_LOG_DAYS`，0 = 永久）；不是分布式追踪。见 [docs/run_log.md](docs/run_log.md)。
 
 - **Windows 控制台的 UTF-8 兜底**：演示脚本与 CLI 输出含 `▸`/`✅` 等符号，Windows 简体中文控制台按 GBK 编码 stdout → `UnicodeEncodeError` 直接崩、整链走不完（CI 只跑 Linux，单测全绿也抓不到）。现由 `core/console.py` 在各入口（含 console_script 回调，`__main__` 路径覆盖不到它）统一重配 stdout/stderr 为 UTF-8（`errors="replace"`），`PYTHONIOENCODING=gbk` 下的子进程回归测试守住。
@@ -448,6 +448,7 @@ docker compose ps
 | `/v1/knowledge/documents/{id}` | DELETE | 删除文档及其切片 |
 | `/v1/investigations/runs` | GET | **调查运行日志**列表（按 `candidate_id` / `status` 过滤，新的在前；只回摘要） |
 | `/v1/investigations/{id}/log` · `/v1/investigations/jobs/{job_id}/log` | GET | 调出**某次调查的运行日志**：ReAct 每步工具/入参/结果 + 用量耗时 + 失败上下文（同步按报告 id、异步按 job id） |
+| `/v1/investigations/jobs/{job_id}/result` | GET | **异步成功后的完整结果**（与同步响应同形）：`report` + `verdict`/`verdict_detail` + `trace` + `usage`；未成功 → 409（`alerting` 是执行期副作用，不在此端点重复上报） |
 | `/v1/audit` | GET | **安全审计**（A1）：认证拒绝 / 运维面访问 / 审计读取；带 `X-Tenant-Id` 看本租户，带 `X-Ops-Token` 看跨租户（含保留租户 `-` 下的系统事件） |
 
 身份**只认请求头** `X-Tenant-Id` / `X-Device-Sn`，正文与查询串里的身份字段一律被忽略（与 P2 网关失败语义一致）；缺租户头 → 401，跨租户读 → 404（不泄露存在性）。

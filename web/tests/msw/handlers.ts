@@ -48,5 +48,32 @@ export const handlers = [
     HttpResponse.json({ ok: true, count: 0, total: 0, limit: 50, offset: 0, has_more: false, items: [] }),
   ),
 
+  // Default = **synchronous** backend mode (DD_INVESTIGATE_ASYNC off): the POST
+  // carries the whole result. Tests that exercise the async flow override these
+  // three with a 202 + a job that reaches "succeeded".
   http.post(`${BASE}/v1/investigations`, () => HttpResponse.json(investigationResult)),
+
+  http.get(`${BASE}/v1/investigations/jobs/:id`, ({ params }) =>
+    HttpResponse.json({
+      ok: true,
+      job: {
+        job_id: String(params.id),
+        candidate_id: candidate.candidate_id,
+        status: "succeeded",
+        report_id: investigationResult.investigation_id,
+        error_code: null,
+      },
+    }),
+  ),
+
+  http.get(`${BASE}/v1/investigations/jobs/:id/result`, () =>
+    HttpResponse.json(investigationResult),
+  ),
+
+  http.post(`${BASE}/v1/investigations/jobs/:id/cancel`, ({ params }) =>
+    HttpResponse.json({
+      ok: true,
+      job: { job_id: String(params.id), status: "cancelled" },
+    }),
+  ),
 ];

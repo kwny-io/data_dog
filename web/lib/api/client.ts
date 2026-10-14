@@ -13,7 +13,14 @@
  *    which runs a synchronous LLM call and can take 10–60s (spec §3.5).
  */
 
-import type { ApiErrorCode, ApiErrorEnvelope, Page, PageParams } from "./types";
+import type {
+  ApiErrorCode,
+  ApiErrorEnvelope,
+  InvestigationJob,
+  InvestigationResult,
+  Page,
+  PageParams,
+} from "./types";
 
 // ------------------------------------------------------------------ config
 
@@ -37,6 +44,13 @@ const DEFAULT_TIMEOUT_MS = 15_000;
  *  backend's DD_INVESTIGATE_TIMEOUT_S (default 90s). */
 export const INVESTIGATE_TIMEOUT_MS = Number(
   process.env.NEXT_PUBLIC_INVESTIGATE_TIMEOUT_MS ?? 110_000,
+);
+
+/** Poll interval while an **async** investigation runs (`DD_INVESTIGATE_ASYNC=1`).
+ *  One second: the backend job is a 10–60s LLM run, so faster polling only adds
+ *  load; tests override it per call (`pollMs`). */
+export const INVESTIGATE_POLL_MS = Number(
+  process.env.NEXT_PUBLIC_INVESTIGATE_POLL_MS ?? 1000,
 );
 
 // ------------------------------------------------------------------ errors
@@ -144,6 +158,49 @@ function newRequestId(): string {
     return crypto.randomUUID();
   }
   return `web-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function isAbort(err: unknown): boolean {
+  return (
+    typeof err === "object" &&
+    err !== null &&
+    (err as { name?: string }).name === "AbortError"
+  );
+}
+
+/** Reject as soon as the caller aborts, so a poll loop cannot hang on a timer. */
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new DOMException("Aborted", "AbortError"));
+      return;
+    }
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new DOMException("Aborted", "AbortError"));
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+/** Map a backend job `error_code` onto the finite client-side code set. */
+function jobErrorCode(job: InvestigationJob): ApiErrorCode {
+  const known: string[] = [
+    "timeout",
+    "unavailable",
+    "execution_failed",
+    "rate_limited",
+    "invalid_input",
+    "not_found",
+    "denied",
+    "ambiguous",
+  ];
+  const code = job.error_code ?? "";
+  return known.includes(code) ? (code as ApiErrorCode) : "execution_failed";
 }
 
 // ---------------------------------------------------------------- request
@@ -371,18 +428,86 @@ export const api = {
     }>(`/v1/investigations/${encodeURIComponent(id)}`, opts);
   },
 
-  /** Long task: synchronous LLM call, cancellable, timeout well past 90s. */
-  investigate(
+  /**
+   * Submit → (poll →) fetch the assembled result. Handles **both** backend modes:
+   *
+   *  - **async** (`DD_INVESTIGATE_ASYNC=1`): POST returns `202 {job_id}`, the LLM
+   *    work runs in a worker pool; poll `.../jobs/{id}` until terminal, then take
+   *    `.../jobs/{id}/result` (report + verdict + trace + usage, the same shape the
+   *    synchronous response always had).
+   *  - **sync** (default today, or `?sync=1`): POST carries the whole result; return it.
+   *
+   * Cancelling aborts the signal: the poll stops immediately **and** we ask the
+   * backend to cancel (best effort — the worker stops at its next step boundary, so
+   * a report may already be persisted; the job status is the truth, not this call).
+   */
+  async investigate(
     candidateId: string,
-    opts?: { signal?: AbortSignal; ctx?: RequestContext },
-  ) {
-    return request<import("./types").InvestigationResult>("/v1/investigations", {
+    opts?: { signal?: AbortSignal; ctx?: RequestContext; pollMs?: number },
+  ): Promise<InvestigationResult> {
+    const signal = opts?.signal;
+    const submitted = await request<
+      InvestigationResult | { ok: true; job_id: string }
+    >("/v1/investigations", {
       method: "POST",
       body: { candidate_id: candidateId },
       longTask: true,
-      signal: opts?.signal,
+      signal,
       ctx: opts?.ctx,
     });
+    if (!("job_id" in submitted) || "report" in submitted) {
+      // Synchronous mode: the POST already carries the whole result.
+      return submitted as InvestigationResult;
+    }
+    const jobId = (submitted as { job_id: string }).job_id;
+    const pollMs = opts?.pollMs ?? INVESTIGATE_POLL_MS;
+    try {
+      for (;;) {
+        await sleep(pollMs, signal);
+        const { job } = await request<{ ok: true; job: InvestigationJob }>(
+          `/v1/investigations/jobs/${encodeURIComponent(jobId)}`,
+          { signal },
+        );
+        if (job.status === "succeeded") {
+          return await request<InvestigationResult>(
+            `/v1/investigations/jobs/${encodeURIComponent(jobId)}/result`,
+            { signal },
+          );
+        }
+        if (job.status === "failed" || job.status === "cancelled") {
+          throw new ApiError({
+            code: jobErrorCode(job),
+            status: job.status === "cancelled" ? 409 : 500,
+            detail: job.error_code ?? job.status,
+          });
+        }
+      }
+    } catch (err) {
+      if (isAbort(err)) {
+        // Best effort: stop the worker too, but never mask the abort with its error.
+        void request<unknown>(
+          `/v1/investigations/jobs/${encodeURIComponent(jobId)}/cancel`,
+          { method: "POST" },
+        ).catch(() => undefined);
+      }
+      throw err;
+    }
+  },
+
+  /** `GET /v1/investigations/jobs/{id}` — poll one async job. */
+  getInvestigationJob(jobId: string, opts?: { signal?: AbortSignal }) {
+    return request<{ ok: true; job: InvestigationJob }>(
+      `/v1/investigations/jobs/${encodeURIComponent(jobId)}`,
+      opts,
+    );
+  },
+
+  /** `POST /v1/investigations/jobs/{id}/cancel` — cooperative cancel. */
+  cancelInvestigationJob(jobId: string) {
+    return request<{ ok: true; job: InvestigationJob }>(
+      `/v1/investigations/jobs/${encodeURIComponent(jobId)}/cancel`,
+      { method: "POST" },
+    );
   },
 
   ingest(

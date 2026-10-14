@@ -9,7 +9,7 @@
 | 分组 | 已落地 | 未落地（见下"边界"） |
 |---|---|---|
 | A（10 条缺口） | A1 A2 A3 A4 A5 A6 A7 A8 | **A9 A10** |
-| B（7 条优化） | B1 B3 B4 B5 B6 B7 | **B2**（第 1/3 步已落地，见下） |
+| B（7 条优化） | B1 B3 B4 B5 B6 B7 | **B2**（第 1–2/3 步已落地，见下） |
 
 ## A. 缺口
 
@@ -40,7 +40,7 @@
 
 ## 未落地项：边界与原因
 
-### B2 同步默认翻异步（`DD_INVESTIGATE_ASYNC`）——🚧 第 1/3 步已落地
+### B2 同步默认翻异步（`DD_INVESTIGATE_ASYNC`）——🚧 第 1–2/3 步已落地
 
 **第 1 步（后端补载荷）已完成**：新增 `GET /v1/investigations/jobs/{id}/result`，成功后就地取齐
 `report` + `verdict`/`verdict_detail` + `trace` + `usage`，口径与同步响应**同源**
@@ -55,11 +55,16 @@
 而异步的轨迹**只存在于运行日志**——摘要了控制台就再也渲染不出 ReAct 时间线。现在 `auto`
 按 `kind` 区分：同步（轨迹已在 HTTP 响应里交付）可摘要，**异步一律全文**。
 
-**仍未做的第 2/3 步**（也是"没翻默认"的真实原因）：
+**第 2 步（控制台改造）也已完成**：`web/lib/api/client.ts` 的 `api.investigate` 现在**两种模式
+都认**——`POST` 回同步结果（含 `report`）就直接返回；回 `202 {job_id}` 就轮询
+`.../jobs/{id}` 到终态，再取 `.../jobs/{id}/result`。取消 = abort：立刻停轮询，并**best-effort**
+请后端取消 job。前端测试 +4（轮询到成功、同步直通、失败 job → `ApiError(timeout)`、abort → 停轮询并
+触发 cancel）。
+
+**仍未做的第 3 步**：
 
 1. ~~后端：异步完成态一次拿到 `verdict`/`trace`/`usage`~~ ✅（`_verdict_for` + `.../result`）；
-2. **前端：控制台改成"提交(`POST` 无 `?sync`) → 轮询 job → `.../result` 一次取齐"**，
-   并补 MSW/vitest 与"停止轮询"的取消语义（现在的取消是 abort 一个同步长 fetch）；
+2. ~~前端：控制台"提交 → 轮询 job → `.../result`"~~ ✅（双模式兼容 + 4 条前端测试）；
 3. **再翻默认**（`DD_INVESTIGATE_ASYNC` 默认 1），同步退回显式 `?sync=1`。
 
 第 3 步还有一个**进程级副作用**要先想清楚：`create_app` 按 `investigate_async()` 决定是否起
