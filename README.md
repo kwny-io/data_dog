@@ -13,7 +13,7 @@
 | | 亮点 | 证据 |
 |---|---|---|
 | 🔗 | **全链闭环，一条命令跑通** | 厂商文档 →[P1]→ 算子 →[P2]→ 候选 →[Agent]→ 报告 →[P3]→ 策略门 → SaaS 反馈，`python -m data_dog.e2e.replay_demo` |
-| 🧪 | **1300 项测试，全离线确定性** | `pytest -q` → `1287 passed, 13 skipped`（97 个测试文件，fake provider，无需 API Key、不联网；13 skipped **全部是按环境条件跳过**：未设 `DD_TEST_PG_URL` 的真 PostgreSQL 用例、未设 `DD_TEST_REDIS_URL` 的真 Redis 契约用例，以及"本机已装可选依赖/平台相关"的分支——两类集成用例由 CI 的 `postgres` / `redis` 腿实测；Redis 后端的行为测试另由 `.[dev]` 里的 `fakeredis` 离线跑。这里刻意不再写逐文件条数：那些数字脚本守不住，会漂） |
+| 🧪 | **1321 项测试，全离线确定性** | `pytest -q` → `1307 passed, 14 skipped`（97 个测试文件，fake provider，无需 API Key、不联网；13 skipped **全部是按环境条件跳过**：未设 `DD_TEST_PG_URL` 的真 PostgreSQL 用例、未设 `DD_TEST_REDIS_URL` 的真 Redis 契约用例，以及"本机已装可选依赖/平台相关"的分支——两类集成用例由 CI 的 `postgres` / `redis` 腿实测；Redis 后端的行为测试另由 `.[dev]` 里的 `fakeredis` 离线跑。这里刻意不再写逐文件条数：那些数字脚本守不住，会漂） |
 | 🔒 | **热路径确定性：上报不交给模型判断** | 上不上报由**确定性策略门**（四条件决策表 + 冲突消解）决定，同输入永远同结论；模型只出现在"调查报告"那一步 |
 | 🧱 | **不拿 `eval` 执行厂商字符串** | 自建**受限 DSL**：词法 → AST 解释器，无动态执行原语、函数闭集白名单、编译期类型检查 |
 | 🔍 | **诚实抽取，区分"能证实 / 待确认"** | 官方 SDK 头文件明写电机 **90°C 触发保护** → `verified`；无出处的 75°C → `unconfirmed`，**不冒充厂商事实** |
