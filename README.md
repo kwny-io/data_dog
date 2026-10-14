@@ -483,6 +483,7 @@ make up-prod                         # = compose.prod.yaml：Caddy 自动申请 
 
 | 想了解 | 看 |
 |---|---|
+| **架构评审 A/B 逐项落地台账（含未落地项的边界与原因）** | `docs/architecture_review_ab.md` |
 | **全局架构（分层 / 依赖 / 数据流）** | `docs/architecture.md` |
 | 落地交付（服务怎么跑、Docker、生产 compose） | `docs/delivery.md` |
 | P1 离线算子工厂 | `docs/operator_factory.md`、`docs/dsl_spec.md` |
