@@ -13,7 +13,9 @@
 #        证明不了"真 WATCH/MULTI/EXEC 语义如我们所假设"。
 # - **前端独立腿**：`web/` 是独立的 Next.js 工程（自带 package-lock），
 #   用 Node 20 + `npm ci` 跑 tsc + eslint + vitest。前端不参与 Python 覆盖率门禁。
-# - **覆盖率门禁**：总分 ≥85%（实测约 89%）+ **单模块 ≥60%**（`scripts/cov_gate.py`）。
+# - **覆盖率门禁**：总分 ≥85%（实测约 88%）+ **单模块 ≥70%**（scripts/cov_gate.py）；
+#   PG-only 文件（分区 DDL / PG StateStore）在默认 SQLite 腿口径不适用，由 postgres 腿的
+#   `--only storage/partitioning.py,state/pg.py --no-allow --min 80` 单独把关（同一文件默认腿 35%、PG 腿 87%）。
 #   为什么两条都要：总分会被大模块平均掉——一个核心模块掉到 20%，只要别处补上同样的
 #   行数，总分照样过。门槛随覆盖率提升而上调，别让它变成"永远刚好过"的摆设。
 # - **Python 3.12**：与 Dockerfile 一致；numpy>=2.5 的存根本身也要求 >=3.12。
@@ -75,8 +77,8 @@ jobs:
             --cov-report=json:coverage.json \
             --cov-fail-under=85
       # 总分会被大模块平均掉：单独再卡一遍"每个模块的下限"，防止某个核心模块塌陷。
-      - name: 单模块覆盖率下限（60%）
-        run: python scripts/cov_gate.py --json coverage.json --min 60
+      - name: 单模块覆盖率下限（70%，分腿）
+        run: python scripts/cov_gate.py --json coverage.json --min 70
 
   postgres:
     name: PostgreSQL 集成测试
@@ -108,7 +110,12 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev,postgres]"
       - name: 跑 PostgreSQL 集成测试
-        run: pytest -q -m postgres
+        run: pytest -q -m postgres --cov=data_dog --cov-report=json:coverage-pg.json
+      # PG-only 文件归这条腿门禁：默认腿跑在 SQLite 上、这些分支执行不到。
+      - name: 单模块覆盖率下限（PG-only 文件，80%）
+        run: |
+          python scripts/cov_gate.py --json coverage-pg.json \
+            --only storage/partitioning.py,state/pg.py --no-allow --min 80
 
   redis:
     name: Redis 集成测试（真服务）
