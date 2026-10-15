@@ -395,6 +395,17 @@ export const api = {
     );
   },
 
+  /** Resolve this candidate's opaque evidence refs into readable evidence.
+   *
+   * Server-side this may read a raw log body, which is **audited**
+   * (`action=rawlog.read`) — call it when the operator asks, not on render. */
+  getCandidateRefs(id: string, opts?: { signal?: AbortSignal }) {
+    return request<import("./types").CandidateRefs>(
+      `/v1/candidates/${encodeURIComponent(id)}/refs`,
+      opts,
+    );
+  },
+
   listAlerts(page?: PageParams, opts?: { signal?: AbortSignal }) {
     return request<Page<import("./types").AlertEvent>>("/v1/alerts", {
       query: pageQuery(page),

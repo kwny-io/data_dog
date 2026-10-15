@@ -38,8 +38,8 @@ const CANDIDATES = [
       { key: "torque_nm", from_value: 6.2, to_value: 14.7, baseline: 6.5, unit: "N·m", note: null },
     ],
     evidence_refs: [
-      "evidence://cand_ab12cd34ef56/temperature_c",
-      "evidence://cand_ab12cd34ef56/current_a",
+      "metricwin://cand_ab12cd34ef56",
+      "rawlog://evt_ab12cd34ef56_1003",
     ],
     detector_provenance: "op.temperature_protect:1",
   },
@@ -58,7 +58,7 @@ const CANDIDATES = [
       { key: "current_a", from_value: 3.9, to_value: 9.6, baseline: 4.2, unit: "A", note: "后右膝关节电机" },
       { key: "temperature_c", from_value: 44, to_value: 63, baseline: 46, unit: "°C", note: null },
     ],
-    evidence_refs: ["evidence://cand_77aa11bb22cc/current_a"],
+    evidence_refs: ["metricwin://cand_77aa11bb22cc"],
     detector_provenance: "op.current_spike:2",
   },
   {
@@ -76,7 +76,7 @@ const CANDIDATES = [
       { key: "bus_voltage_v", from_value: 49.2, to_value: 41.4, baseline: 49.0, unit: "V", note: "负载突加时母线跌落" },
       { key: "soc_pct", from_value: 78, to_value: 74, baseline: 78, unit: "%", note: null },
     ],
-    evidence_refs: ["evidence://cand_9988ff0011ee/bus_voltage_v"],
+    evidence_refs: ["rawlog://evt_9988ff0011ee_1015"],
     detector_provenance: "op.bms_voltage:1",
   },
   {
@@ -347,13 +347,13 @@ const INVESTIGATION = {
       {
         cause: "散热不良导致绕组过热",
         status: "supported",
-        evidence_refs: ["evidence://cand_ab12cd34ef56/temperature_c"],
+        evidence_refs: ["metricwin://cand_ab12cd34ef56"],
         counter_evidence_refs: [],
       },
       {
         cause: "轴承卡滞导致负载电流升高",
         status: "inconclusive",
-        evidence_refs: ["evidence://cand_ab12cd34ef56/current_a"],
+        evidence_refs: ["rawlog://evt_ab12cd34ef56_1003"],
         counter_evidence_refs: [],
       },
     ],
@@ -443,6 +443,58 @@ const server = createServer((req, res) => {
     if (!c) return send(res, 404, { ok: false, error: "not_found", detail: "no such candidate" });
     return send(res, 200, { ok: true, item: c });
   }
+  // 证据引用解析：与真实后端同形（批解析 + 逐条 ok/error + 截断标注）。
+  // 控制台点「解析证据引用」会打这里——devmock 也走真 ref scheme（metricwin/rawlog），
+  // 不再用后端 resolver 白名单之外的 evidence://（那样只会得到 invalid_input）。
+  const refMatch = p.match(/^\/v1\/candidates\/([^/]+)\/refs$/);
+  if (refMatch) {
+    const c = S_CANDIDATES.find((x) => x.candidate_id === refMatch[1]);
+    if (!c) return send(res, 404, { ok: false, error: "not_found", detail: "no such candidate" });
+    const results = (c.evidence_refs ?? []).map((raw) => {
+      const m = String(raw).match(/^([a-z]+):\/\/([^/]+)(?:\/(.*))?$/);
+      const ref = {
+        scheme: m ? m[1] : "?",
+        authority: m ? m[2] : String(raw),
+        path: m && m[3] ? m[3].split("/") : [],
+      };
+      if (ref.scheme === "rawlog") {
+        const body = "[mock] " + ref.authority + "\n2026-08-13T10:03:12Z motor overheat 96C\n";
+        return {
+          ok: true, source: "rawlog", ref,
+          payload: {
+            event_id: ref.authority,
+            key: "rawlog/" + ref.authority + ".log",
+            source: "file",
+            content: body,
+            content_sha256: "0".repeat(64),
+            bytes: body.length,
+            truncated: false,
+          },
+        };
+      }
+      if (ref.scheme === "metricwin") {
+        return {
+          ok: true, source: "metricwin", ref,
+          payload: {
+            candidate_id: ref.authority,
+            indexed: true,
+            component_ref: c.component_ref,
+            window: { start: c.window_start, end: c.window_end },
+            evidence: c.evidence,
+          },
+        };
+      }
+      return { ok: false, ref, error: "invalid_input", detail: "mock 只实现了 metricwin/rawlog" };
+    });
+    return send(res, 200, {
+      ok: true,
+      candidate_id: c.candidate_id,
+      results,
+      resolved: results.filter((r) => r.ok).length,
+      total: results.length,
+    });
+  }
+
   const evMatch = p.match(/^\/v1\/candidates\/([^/]+)\/evidence$/);
   if (evMatch) {
     const c = S_CANDIDATES.find((x) => x.candidate_id === evMatch[1]);

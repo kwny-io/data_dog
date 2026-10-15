@@ -26,7 +26,7 @@ export const candidate: CandidateEvent = {
       note: null,
     },
   ],
-  evidence_refs: ["evidence://cand_ab12cd34ef56/temperature_c"],
+  evidence_refs: ["metricwin://cand_ab12cd34ef56"],
   detector_provenance: "op.temperature_protect:1",
 };
 
@@ -84,7 +84,7 @@ export const report: InvestigationReport = {
     {
       cause: "散热不良导致过热",
       status: "supported",
-      evidence_refs: ["evidence://cand_ab12cd34ef56/temperature_c"],
+      evidence_refs: ["metricwin://cand_ab12cd34ef56"],
       counter_evidence_refs: [],
     },
   ],

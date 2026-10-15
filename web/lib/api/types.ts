@@ -262,6 +262,32 @@ export interface CandidateEvidence {
   vendor_knowledge: Array<Record<string, unknown>>;
 }
 
+// ------------------------------------------------- resolved evidence refs
+
+/** One entry of `GET /v1/candidates/{id}/refs`.
+ *
+ * `ref` is the parsed opaque reference; `payload` is whatever the scheme answered
+ * (`rawlog` → the log body + digest + truncation flags, `metricwin` → the window's
+ * metrics). On failure only `error`/`detail` are present — branch on `error`, never
+ * parse `detail`. */
+export interface ResolvedRef {
+  ok: boolean;
+  source?: string;
+  ref?: { scheme: string; authority: string; path: string[]; raw?: string };
+  payload?: Record<string, unknown>;
+  error?: string;
+  detail?: string;
+}
+
+/** `GET /v1/candidates/{id}/refs` — opaque refs resolved into readable evidence. */
+export interface CandidateRefs {
+  ok: true;
+  candidate_id: string;
+  results: ResolvedRef[];
+  resolved: number;
+  total: number;
+}
+
 // ------------------------------------------------------------- outbox
 
 export interface OutboxRow {

@@ -71,6 +71,13 @@
 - `content_sha256` 是**返回内容**（可能已截断）的摘要；`EvidenceResolver` 的 `expected_digest`
   校验的是整个 payload，两者互补、不要混用。
 
+**控制台已消费这个端点**：候选详情页的「证据引用」面板（`web/components/RefViewer.tsx`）会列出
+`evidence_refs`，点「解析证据引用」才请求（**懒解析**——读正文会留审计、正文可能很大，不能在渲染时自动打），
+展开即可看正文/字节数/截断标注/摘要；解析失败显示后端错误码（`not_found` / `denied` / `execution_failed`），
+不假装有内容。开发用的 devmock 也实现了 `/v1/candidates/{id}/refs`，且引用改用真 scheme
+（`metricwin://` / `rawlog://`）——此前 mock 与 fixtures 用的是 resolver 白名单之外的 `evidence://`，
+在真实后端只会得到 `invalid_input`。
+
 ### 存活 vs 就绪，为什么要分开
 
 - **存活（liveness）**：问"进程是不是死了"。死了才该重启。它**不该查数据库**——否则数据库抖一下，编排层会把好好的进程反复杀掉重启，雪上加霜。

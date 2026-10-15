@@ -22,6 +22,7 @@ import type {
   AlertEvent,
   CandidateEvent,
   CandidateEvidence,
+  CandidateRefs,
   InvestigationReport,
   InvestigationResult,
   OutboxRow,
@@ -109,6 +110,22 @@ export function useCandidateEvidence(
     enabled: opts?.enabled !== false && !!id,
     ...READ_OPTS,
     retry: false, // endpoint may not exist yet (backend stage D) → show empty
+  });
+}
+
+/** Resolve a candidate's evidence refs. **Opt-in**: unlike the other read hooks this is
+ *  disabled until the caller enables it — reading raw log bodies is audited and can be
+ *  large, so it must never happen just because a panel rendered. */
+export function useCandidateRefs(
+  id: string | null,
+  opts?: { enabled?: boolean },
+): UseQueryResult<CandidateRefs, unknown> {
+  return useQuery({
+    queryKey: ["candidate-refs", id],
+    queryFn: ({ signal }) => api.getCandidateRefs(id as string, { signal }),
+    enabled: opts?.enabled === true && !!id,
+    ...READ_OPTS,
+    retry: false, // denied / not_found / invalid_input 是确定性的，重试没意义
   });
 }
 

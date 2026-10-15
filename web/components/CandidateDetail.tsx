@@ -3,6 +3,7 @@
 import { Panel, Badge, SkeletonRows, ErrorState } from "@/components/ui/primitives";
 import { SeverityBadge } from "@/components/badges";
 import { EvidenceRail } from "@/components/EvidenceRail";
+import { EvidenceRefsPanel } from "@/components/RefViewer";
 import { CopyId, TechValue } from "@/components/tech";
 import { useCandidate, useCandidateEvidence } from "@/lib/api/queries";
 import { humanize, technicalLine } from "@/lib/errors";
@@ -141,6 +142,8 @@ export function CandidateDetail({ candidateId, selected }: { candidateId: string
           </div>
         )}
       </Panel>
+
+      <EvidenceRefsPanel candidateId={candidateId} refs={candidate.evidence_refs} />
     </div>
   );
 }
