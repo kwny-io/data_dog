@@ -310,6 +310,54 @@ Web 控制台此前用 `NEXT_PUBLIC_API_KEY` 在浏览器里设 `X-API-Key`。Ne
 > 租户（victim 侧 0 条、目标租户 1 条）。构建产物亦已核对：客户端 JS 里 **0 命中**
 > `X-API-Key` / `DD_WEB_*` / `NEXT_PUBLIC_API_KEY`。
 
+#### 前端 E2E：真浏览器跑一遍（`web/e2e/`）
+
+jsdom 单测证明的是**组件逻辑**（给 msw 喂响应、断言渲染），证明不了"真浏览器里点下去
+能跑通"——服务端代理、租户 cookie、异步轮询、面板的懒加载都发生在浏览器与 Next 之间。
+`web/` 现在有一条 Playwright 腿（`playwright.config.ts` + `web/e2e/`），用
+**devmock 上游 + `next dev`** 起真前后端，由真 Chromium 驱动：
+
+```bash
+cd web
+npx playwright install chromium   # 首次（CI 用 --with-deps）
+npm run e2e                       # 两个 webServer（devmock:8100 / next dev:3100）自动拉起
+```
+
+覆盖的每一项，都对应 jsdom 够不到的地方：
+
+| 覆盖 | jsdom 为什么测不到 |
+|---|---|
+| 服务端代理 `/api/dd/*`（浏览器无凭据、密钥由服务端附加） | 单测用 msw 直接喂响应，`app/api/dd/[...path]/route.ts` **从未执行** |
+| 上游密钥不进浏览器（扫真实脚本 + 观察真实请求头） | 要真产物：`NEXT_PUBLIC_*` 是否被内联、浏览器实际发了哪些头 |
+| 租户 cookie `dd_web_tenant` 只在 `DD_WEB_TENANTS` 允许清单内生效，清单外 403 | 要真 cookie jar，且跨"浏览器 → 代理 → 上游"三段 |
+| 异步调查（POST 202 → 轮询 job → 取 result） | 单测里的"轮询"是 msw 自己排的，不是真往返 |
+| refs「证据引用」面板：懒解析（不点不请求）、展开正文、空状态 | 要真请求到底发没发、真 hydration |
+
+**边界（如实写）**：上游是 devmock（`web/devmock/mock-backend.mjs`，按真实端点**形状**
+作答，语义是自己写的），不是真实 data_dog 服务；跑的是 `next dev` 而不是生产产物，
+构建期差异不在覆盖内（生产版 `node server.js` 的手测记录见上面的实测段落）；
+"取消调查"仍只有单测覆盖——devmock 的 job 很快 `succeeded`，浏览器里点取消是竞态。
+
+##### 这条腿第一次跑就抓到的真实 bug（已修）
+
+**现象**：`web/e2e/investigate.spec.ts` 点击候选行超时，Playwright 报
+`element is not visible`。探针实测该按钮是 **2px × 0px**——**真浏览器里点不动候选行**，
+调查台整页只能靠 `?candidate=` 深链进入。
+
+**根因**：候选行的全幅选择按钮是 `row-tick shine absolute inset-0 z-0`，靠 `absolute`
+铺满整行、让正文层（`pointer-events-none`）上的点击穿透到它。而 `app/globals.css` 里的
+`.shine { position: relative }` 是**未分组（unlayered）CSS**；按 CSS 层叠规则，
+**未分层的规则胜过任何 `@layer`**，而 Tailwind v4 的工具类都在 `@layer utilities` 里。
+于是 `relative` 压掉了 `absolute`，`inset-0` 失效，preflight 又把 button 的 padding
+归零 → 元素塌成 2px × 0px（那 2px 是 `row-tick` 的左边框）。
+
+**为什么 102 项 jsdom 单测全绿也照不到**：那些测试直接 `fireEvent.click` /
+`userEvent.click` 派发到元素上，**与几何无关**；层叠、包含块、padding 归零都不在它的观测范围内。
+
+**修法**：把 `.shine` 系列移进 `@layer components`（层序 `theme → base → components →
+utilities` 由 `@import "tailwindcss"` 声明），utilities 就能正常覆盖它。回归由 E2E 兜住：
+点不开候选行，refs 面板与异步调查两条用例都过不去。
+
 ### 落库失败不静默
 
 `/v1/telemetry` 里落库若失败，返回 **207** 且 `ok:false`，同时**仍带上已算出的候选**。这样调用方能看见"算出来了但没存上"，而不是被一个笼统的 500 糊弄。
@@ -515,5 +563,5 @@ docker run --rm -p 8000:8000 <你的账号>/data-dog:0.1.0
 | 数据合规（可携 / 被遗忘） | **已落地**（⑥）：`GET /v1/tenant/export`（本租户导出，每表有上限并显式回 `truncated`）与 `POST /v1/tenant/purge`（**仅运维面** + 必须 `X-Confirm-Tenant` 原样复述租户 id，否则一行不删）。表清单**按元数据动态发现**（新增租户表自动进入范围），删除走有界分批 + `system=True`，**删除证据记在保留租户 `-` 名下**（否则会随该租户的审计一起被删） | **不是全量流式导出**（有界快照）；**不是加密擦除**；**备份与只读副本上的残留不在范围**（靠备份过期策略）；导出限租户视野（运维需该租户密钥，有意不把"能读走"与"能删"绑在同一个令牌上） |
 | 配置治理 | **唯一读取点**（`settings.py`）+ **部署前体检** `data-dog config check` / `make config-check`：未知键、非法取值（会静默回落默认值）、危险组合（鉴权全关 / 异步+进程内状态 / 自动迁移 / 审计清理）——不连库不验密钥，有错即非零退出 | 密钥与配置的**托管/审批/热更新**（当前仍是环境变量 + 重启生效） |
 | 可观测 | Prometheus 指标 + **PrometheusRule 告警规则**（四组：可用性 / 热路径 P99 / 治理积压 / 静默失败；与 §9 表一一对应）+ JSON 结构化日志 + W3C traceparent 传播 + **调查运行日志可回看**（`investigation_run_log`：ReAct 轨迹/用量耗时/失败上下文，`GET /v1/investigations/{id}/log`、`/jobs/{job_id}/log`、`/v1/investigations/runs`；告警通知带 run 引用。见 [run_log.md](run_log.md)） | Alertmanager 的**接收方 / 路由 / 静默**由集群侧配（chart 只出规则）；日志聚合与**分布式追踪**仍需外部设施（无 OTel SDK，`trace_id` 只做 correlation-id 传播） |
-| 前端控制台 | **收敛为 `web/`（Next.js）**——`ui/`（Streamlit）定位为演示台（A10）；**服务端代理**（浏览器不持有凭据）+ 可选 Basic 门（`DD_WEB_BASIC_AUTH`）；租户默认由 `DD_WEB_TENANT` 单租户决定，可选用 `DD_WEB_TENANTS` **允许清单** + `dd_web_tenant` cookie 做租户**选择**（清单外 403，失败关闭）；**用户级授权最小步**：`DD_WEB_TRUST_PROXY_AUTH=1` + `DD_WEB_USER_TENANTS="alice:a,b;bob:b"`（可信反代注入用户头，用户只能在**自己的**租户内选，越权/未知用户/缺头一律 403） | 用户目录与 OIDC（现在没有登录页，身份完全由反代注入）；服务端**仍无**用户级授权（后端只认 `X-Tenant-Id`）；反代**必须**剥离客户端伪造的用户头 |
+| 前端控制台 | **收敛为 `web/`（Next.js）**——`ui/`（Streamlit）定位为演示台（A10）；**服务端代理**（浏览器不持有凭据）+ 可选 Basic 门（`DD_WEB_BASIC_AUTH`）；租户默认由 `DD_WEB_TENANT` 单租户决定，可选用 `DD_WEB_TENANTS` **允许清单** + `dd_web_tenant` cookie 做租户**选择**（清单外 403，失败关闭）；**用户级授权最小步**：`DD_WEB_TRUST_PROXY_AUTH=1` + `DD_WEB_USER_TENANTS="alice:a,b;bob:b"`（可信反代注入用户头，用户只能在**自己的**租户内选，越权/未知用户/缺头一律 403）；**真浏览器 E2E 已落地**（`web/e2e/`：devmock + `next dev` + Playwright，覆盖服务端代理 / 密钥不进浏览器 / 租户 cookie / 异步轮询 / refs 面板懒解析） | 用户目录与 OIDC（现在没有登录页，身份完全由反代注入）；服务端**仍无**用户级授权（后端只认 `X-Tenant-Id`）；反代**必须**剥离客户端伪造的用户头 |
 | 多地部署 | 跨地域多活为**应用层**近似，RPO > 0 | 数据库同步复制设施（非应用代码可解） |

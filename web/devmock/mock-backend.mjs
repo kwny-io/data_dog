@@ -7,6 +7,10 @@
 // 用法：
 //   node devmock/mock-backend.mjs          # 监听 :8000
 //   然后另开一个终端：NEXT_PUBLIC_API_BASE_URL=http://localhost:8000 npm run dev --prefix web
+//
+// 开关：
+//   EMPTY=1  所有列表数据集为空（看空状态）
+//   ASYNC=1  调查走异步 job（202 + 轮询 + 取结果），E2E 用它覆盖客户端轮询链路
 
 import { createServer } from "node:http";
 
@@ -17,6 +21,39 @@ const TENANT = "tenant-demo";
 // Metrics stay (a live service still reports health), so the dashboard shows
 // its "no data yet" panels rather than failing.
 const EMPTY = process.env.EMPTY === "1";
+
+// ASYNC=1 → POST /v1/investigations 回 202 {job_id}，并实现 job 的轮询/取结果/取消。
+// 默认（不设）保持同步长任务，人工预览时行为一字不变。
+// E2E 用 ASYNC=1：只有让真浏览器走一遍「提交 → 轮询 → 取结果」，
+// 才证明得了客户端的异步轮询链路（jsdom 里那套是 mock 出来的轮询）。
+const ASYNC = process.env.ASYNC === "1";
+
+/** 异步 job 台账（内存）。状态机：running →（第 2 次轮询）succeeded。 */
+const JOBS = new Map();
+let jobSeq = 0;
+
+/** job 对外形状：只在**终态**才带 report_id，与真实后端的 _job_public 一致。 */
+function jobPublic(job) {
+  return {
+    job_id: job.job_id,
+    candidate_id: job.candidate_id,
+    status: job.status,
+    report_id: job.report_id,
+    error_code: job.error_code,
+  };
+}
+
+/** 读请求体。devmock 其余路由都不看正文，只有调查 POST 需要 candidate_id。 */
+function readJson(req) {
+  return new Promise((resolve) => {
+    let raw = "";
+    req.on("data", (c) => { raw += c; });
+    req.on("error", () => resolve({}));
+    req.on("end", () => {
+      try { resolve(raw ? JSON.parse(raw) : {}); } catch { resolve({}); }
+    });
+  });
+}
 
 // ---------------------------------------------------------------- 数据
 
@@ -408,7 +445,7 @@ const page = (items, limit = 50, offset = 0) => {
   };
 };
 
-const server = createServer((req, res) => {
+const server = createServer(async (req, res) => {
   const url = new URL(req.url, `http://localhost:${PORT}`);
   const p = url.pathname;
   const q = url.searchParams;
@@ -420,6 +457,16 @@ const server = createServer((req, res) => {
   if (p === "/healthz") return send(res, 200, { status: "ok", service: "data-dog", version: "0.1.0-mock", uptime_s: 98765 });
   if (p === "/readyz") return send(res, 200, { status: "ready", checks: { database: "ok", migration: "ok", resolver: "ok" } });
   if (p === "/metrics") return send(res, 200, METRICS, "text/plain; version=0.0.4");
+  // E2E 探针（**只存在于 devmock，真实后端没有这个端点**）：回显代理**注入**的租户
+  // 与密钥，用来从浏览器侧证明两件事——租户由 DD_WEB_TENANT/允许清单 cookie 决定、
+  // 密钥由服务端附加。只回布尔与已注入的值，**永不回密钥本身**。
+  if (p === "/v1/whoami")
+    return send(res, 200, {
+      ok: true,
+      tenant: req.headers["x-tenant-id"] ?? null,
+      api_key_present: Boolean(req.headers["x-api-key"]),
+      cookie_forwarded: Boolean(req.headers.cookie),
+    });
   if (p === "/v1/summary")
     return send(res, 200, {
       ok: true,
@@ -528,7 +575,60 @@ const server = createServer((req, res) => {
   }
   if (p === "/v1/reports") return send(res, 200, page(S_REPORTS, limit, offset));
 
+  // ---- 异步 job 三件套（ASYNC=1 才有意义，否则 404）----
+  const jobResult = p.match(/^\/v1\/investigations\/jobs\/([^/]+)\/result$/);
+  if (jobResult && req.method === "GET") {
+    const job = JOBS.get(jobResult[1]);
+    if (!job) return send(res, 404, { ok: false, error: "not_found", detail: "no such job" });
+    if (job.status !== "succeeded")
+      return send(res, 409, { ok: false, error: "ambiguous", detail: "job not succeeded: " + job.status });
+    return send(res, 200, {
+      ...INVESTIGATION,
+      candidate_id: job.candidate_id,
+      report: { ...INVESTIGATION.report, candidate_refs: [job.candidate_id] },
+    });
+  }
+  const jobCancel = p.match(/^\/v1\/investigations\/jobs\/([^/]+)\/cancel$/);
+  if (jobCancel && req.method === "POST") {
+    const job = JOBS.get(jobCancel[1]);
+    if (!job) return send(res, 404, { ok: false, error: "not_found", detail: "no such job" });
+    job.status = "cancelled";
+    return send(res, 200, { ok: true, job: jobPublic(job) });
+  }
+  const jobOne = p.match(/^\/v1\/investigations\/jobs\/([^/]+)$/);
+  if (jobOne && req.method === "GET") {
+    const job = JOBS.get(jobOne[1]);
+    if (!job) return send(res, 404, { ok: false, error: "not_found", detail: "no such job" });
+    if (job.status === "running") {
+      job.polls += 1;
+      // 头两次轮询仍报 running：让客户端真的走一轮轮询，而不是一次就拿到结果
+      // （一次就拿到 = 异步路径根本没被走到，测试会假绿）。
+      if (job.polls >= 2) {
+        job.status = "succeeded";
+        job.report_id = INVESTIGATION.report.investigation_id;
+      }
+    }
+    return send(res, 200, { ok: true, job: jobPublic(job) });
+  }
+
   if (p === "/v1/investigations" && req.method === "POST") {
+    const body = await readJson(req);
+    const candidateId = typeof body.candidate_id === "string" && body.candidate_id
+      ? body.candidate_id
+      : INVESTIGATION.candidate_id;
+    if (ASYNC) {
+      jobSeq += 1;
+      const jobId = "job_mock_" + jobSeq;
+      JOBS.set(jobId, {
+        job_id: jobId,
+        candidate_id: candidateId,
+        status: "running",
+        report_id: null,
+        error_code: null,
+        polls: 0,
+      });
+      return send(res, 202, { ok: true, job_id: jobId });
+    }
     // 模拟同步长任务：延迟 1.5s 再返回，让进度轨可见
     return setTimeout(() => send(res, 200, INVESTIGATION), 1500);
   }
@@ -538,6 +638,6 @@ const server = createServer((req, res) => {
 
 server.listen(PORT, () => {
   console.log(`[mock] data_dog mock backend on http://localhost:${PORT}  (tenant=${TENANT})`);
-  console.log(`[mock] mode=${EMPTY ? "EMPTY (all lists empty)" : "DEMO"}`);
+  console.log(`[mock] mode=${EMPTY ? "EMPTY (all lists empty)" : "DEMO"} investigate=${ASYNC ? "ASYNC (poll)" : "SYNC"}`);
   console.log(`[mock] candidates=${S_CANDIDATES.length} alerts=${S_ALERTS.length} reports=${S_REPORTS.length} outbox=${S_OUTBOX.length}`);
 });

@@ -8,3 +8,9 @@
 *.tsbuildinfo
 next-env.d.ts
 coverage
+
+# E2E（playwright.config.ts）：独立构建目录与运行产物
+/.next-e2e
+/test-results
+/playwright-report
+/blob-report

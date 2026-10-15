@@ -499,36 +499,53 @@ html.lenis body {
  * Both are pure decoration: the ::after carries no pointer events and sits
  * above the surface, never over the text. The reduced-motion guard in the base
  * layer collapses the animation, leaving a clean static surface. */
-.shine {
-  position: relative;
-  overflow: hidden;
-  isolation: isolate;
-}
+/* ⚠ 必须待在 `@layer components` 里，不能写成"裸"CSS。
+ *
+ * Tailwind v4 的层序在 index.css 里声明为 theme → base → components → utilities，
+ * 而**未分组（unlayered）的规则按 CSS 层叠规则胜过任何 @layer 里的规则**——
+ * 裸写就等于让 `.shine { position: relative }` 压掉同一元素上的
+ * `absolute` / `fixed` / `sticky` 工具类，而后者才是调用方的意图。
+ *
+ * 这不是理论风险，是实测过的事故：候选行的**全幅选择按钮**用
+ * `row-tick shine absolute inset-0 z-0` 铺在内容底下（上面的正文层是
+ * `pointer-events-none`，点击本该穿透到它）。被这一条压成 `position: relative`
+ * 后，`inset-0` 失去作用、preflight 又把 button 的 padding 归零，
+ * 元素实际是 **2px × 0px** ——真浏览器里**点不动候选行**，整页只能靠深链进入。
+ * jsdom 单测直接派发 click，与几何无关，所以一直没露；是 Playwright E2E 抓到的
+ * （`web/e2e/investigate.spec.ts`，报 "element is not visible"）。
+ * 放进 components 层后，utilities 正常覆盖它。 */
+@layer components {
+  .shine {
+    position: relative;
+    overflow: hidden;
+    isolation: isolate;
+  }
 
-.shine::after {
-  content: "";
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  left: -140%;
-  width: 55%;
-  transform: skewX(-20deg);
-  background: linear-gradient(
-    90deg,
-    transparent,
-    color-mix(in srgb, var(--spec-cyan) 45%, #ffffff) 50%,
-    transparent
-  );
-  opacity: 0.42;
-  pointer-events: none;
-}
+  .shine::after {
+    content: "";
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: -140%;
+    width: 55%;
+    transform: skewX(-20deg);
+    background: linear-gradient(
+      90deg,
+      transparent,
+      color-mix(in srgb, var(--spec-cyan) 45%, #ffffff) 50%,
+      transparent
+    );
+    opacity: 0.42;
+    pointer-events: none;
+  }
 
-.shine:hover::after {
-  animation: shine-sweep 720ms ease;
-}
+  .shine:hover::after {
+    animation: shine-sweep 720ms ease;
+  }
 
-.shine-loop::after {
-  animation: shine-sweep 3.4s ease-in-out infinite;
+  .shine-loop::after {
+    animation: shine-sweep 3.4s ease-in-out infinite;
+  }
 }
 
 @keyframes shine-sweep {
