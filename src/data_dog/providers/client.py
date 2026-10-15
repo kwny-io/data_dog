@@ -180,20 +180,31 @@ class Provider:
         if self.timeout is not None:
             kwargs["timeout"] = self.timeout
         t0 = time.perf_counter()
+        # 结果标签先按"成功"填，失败分支改写后再抛——`finally` 里统一观测，
+        # 保证**超时/失败也计入直方图**（只看成功样本会把 P95 系统性低估）。
+        outcome = "ok"
         try:
             resp = self._client.chat.completions.create(**kwargs)
         except Exception as e:                          # noqa: BLE001
             # 归一化为统一失败语义：超时 → timeout；其余 → unavailable。
             # 调用方（AgentLoop）据此稳定分类，不必认识各 SDK 的异常类型。
             if _is_timeout(e):
+                outcome = "timeout"
                 raise LLMCallError(ToolErrorCode.TIMEOUT,
                                    f"LLM 调用超时（{self.timeout}s）") from e
+            outcome = "unavailable"
+
             # ⚠️ 脱敏**在源头做**：SDK 异常消息可能带 Authorization / api_key / 大块
             # base64（多模态请求体）。这段 detail 会流到 HTTP 错误体与调查报告，故
             # 先按真实密钥值 + 常见密钥形态抹掉，再截断（见 core/redact.py）。
             raise LLMCallError(
                 ToolErrorCode.UNAVAILABLE,
                 redact(f"{type(e).__name__}: {e}", secrets=[self._api_key])) from e
+        finally:
+            from ..core import metrics as _metrics
+            _metrics.observe_llm_request(self.vendor.id, model, outcome,
+                                         time.perf_counter() - t0)
+
         duration_ms = (time.perf_counter() - t0) * 1000.0
         choice = resp.choices[0]
         msg = choice.message

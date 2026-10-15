@@ -124,6 +124,19 @@ investigation_job_duration_seconds = Histogram(
     registry=registry,
 )
 
+# 单次 **LLM 请求**耗时（一次 HTTP 往返；重试是上层显式做的）。
+# 为什么单独一条：`http_request_duration_seconds` 量的是**端点**耗时，同步调查里"等服务端 LLM"
+# 与"我们自己的编排"是两件事；排查"是模型慢还是我们慢"必须能分开看。
+# 不另设 `llm_requests_total`：直方图自带的 `_count` 就是次数，避免指标重复。
+LLM_LATENCY_BUCKETS = (0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0)
+llm_request_duration_seconds = Histogram(
+    "data_dog_llm_request_duration_seconds",
+    "单次 LLM 请求耗时（秒，按供应商/模型/结果）",
+    labelnames=("vendor", "model", "outcome"),   # outcome: ok / timeout / unavailable
+    buckets=LLM_LATENCY_BUCKETS,
+    registry=registry,
+)
+
 # 租户 LLM 额度（治理）：超限次数按**阶段**分（接活前 / 跑一半），便于区分
 # "还没花钱就被拦"与"已经花了一半被拦"。
 llm_budget_exceeded_total = Counter(
@@ -320,6 +333,16 @@ def observe_forecast(has_eta: bool, confidence: float) -> None:
     """记录一次预测：是否给出 ETA + 置信度。"""
     forecast_total.labels(outcome="predicted" if has_eta else "no_eta").inc()
     forecast_confidence.observe(max(0.0, min(1.0, confidence)))
+
+
+def observe_llm_request(vendor: str, model: str, outcome: str, duration_s: float) -> None:
+    """记一次 LLM 请求。**观测失败绝不影响调用**——指标是旁路，不是链路的一环。"""
+    try:
+        llm_request_duration_seconds.labels(
+            vendor=vendor or "?", model=model or "?", outcome=outcome or "?"
+        ).observe(max(0.0, float(duration_s)))
+    except Exception:                                # noqa: BLE001 - 见 docstring
+        pass
 
 
 def observe_http(method: str, path: str, status: int, duration_s: float) -> None:

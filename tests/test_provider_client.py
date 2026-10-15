@@ -141,6 +141,40 @@ def _make_provider(monkeypatch, responder):
     return p, created[0]
 
 
+def test_llm_latency_histogram_counts_both_success_and_failure(monkeypatch):
+    """provider 调用必须进 `data_dog_llm_request_duration_seconds`——**成功与失败都进**。
+
+    为什么失败也要进：慢请求往往以超时收场，只统计成功样本会把 P95 系统性低估。
+    这条补上"同步路 P95/P99"问题的另一半——端点直方图量的是**端点**，这里量的是**模型**，
+    排查"是模型慢还是我们慢"必须能分开看。
+    """
+    from prometheus_client import generate_latest
+
+    from data_dog.core import metrics
+
+    def _count(outcome: str) -> float:
+        for line in generate_latest(metrics.registry).decode().splitlines():
+            if (line.startswith("data_dog_llm_request_duration_seconds_count")
+                    and 'vendor="deepseek"' in line
+                    and f'outcome="{outcome}"' in line):
+                return float(line.rsplit(" ", 1)[1])
+        return 0.0
+
+    ok0, timeout0 = _count("ok"), _count("timeout")
+
+    p, _ = _make_provider(monkeypatch, lambda kw: _Resp(_Msg("hi")))
+    p.chat([LLMChatMessage(role="user", content="hi")])
+    assert _count("ok") == ok0 + 1
+
+    def _timeout(_kw):
+        raise TimeoutError("read timeout")
+
+    p2, _ = _make_provider(monkeypatch, _timeout)
+    with pytest.raises(LLMCallError):
+        p2.chat([LLMChatMessage(role="user", content="hi")])
+    assert _count("timeout") == timeout0 + 1
+
+
 # ================================================================ config：路径解析
 
 

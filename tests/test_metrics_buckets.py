@@ -54,6 +54,12 @@ def test_job_duration_histogram_covers_the_async_tail():
     assert _finite_buckets("data_dog_investigation_job_duration_seconds")[-1] >= 120.0
 
 
+def test_llm_histogram_covers_the_provider_timeout_budget():
+    """`DD_LLM_TIMEOUT_S` 默认 60s（上层还会重试）：桶要够高，否则超时样本全落 +Inf。"""
+    metrics.observe_llm_request("deepseek", "chat", "timeout", 61.0)
+    assert _finite_buckets("data_dog_llm_request_duration_seconds")[-1] >= 60.0
+
+
 def test_fast_endpoints_keep_fine_grained_buckets():
     """长尾不能靠"整体拉大桶"换来：几十毫秒的端点仍要有细分桶（否则分辨率被牺牲）。"""
     fine = [b for b in _finite_buckets("data_dog_http_request_duration_seconds") if b <= 0.25]
