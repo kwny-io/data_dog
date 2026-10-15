@@ -170,7 +170,7 @@ retention 自动分流到 `DROP PARTITION`。测试含 `-m postgres` 真库往�
 | `af74857` | 目录读取的 TOCTOU + http 截断靠"猜" | POSIX 逐段 `openat`+`O_NOFOLLOW`（任何符号链接都拒，容器实测）；Windows 退回 `resolve()` 检查并**明写**仍有窗口。截断判定改为确定（按「上限+1」取） |
 | `35cd015` | `safe_request(max_bytes=N)` 被传输层 64 KiB 卡死 | 上层以为放宽了上限，实际 `_default_transport` 写死读 `_MAX_BYTES`。`PinnedRequest` 带上 `max_bytes`，真起本地 HTTP 服务验 100 KiB 完整取回 |
 | `cdb13fd` | 控制台没消费 `/refs`（引用只是字符串数组） | 候选详情加「证据引用」面板：**懒解析**（点按钮才请求，因读正文会留审计）、展开看正文/截断/摘要、失败显示错误码；devmock/fixtures 的 `evidence://` 换成真 scheme |
-| `本提交` | knowledge flake 只有一句"无响应"，无法定位 | 握手改用独立启动预算（`initialize` 180s，其余 60s——负载重时的冷启动此前会被误判挂起并 kill）；stderr 落临时文件；报错带上"看门狗 kill/自行退出 + 退出码 + stderr 尾巴"。**未能复现**原 flake，故只声称"可诊断 + 消除负载敏感性" |
+| `e434e91` | knowledge flake 只有一句"无响应"，无法定位 | 握手改用独立启动预算（`initialize` 180s，其余 60s——负载重时的冷启动此前会被误判挂起并 kill）；stderr 落临时文件；报错带上"看门狗 kill/自行退出 + 退出码 + stderr 尾巴"。**未能复现**原 flake，故只声称"可诊断 + 消除负载敏感性" |
 
 ## 怎么复核
 
