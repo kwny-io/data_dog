@@ -29,6 +29,7 @@ from data_dog import knowledge, paths, settings
 from data_dog.knowledge import (
     DEFAULT_CHROMA_EXE,
     REQUEST_TIMEOUT_S,
+    STARTUP_TIMEOUT_S,
     ChromaKnowledgeClient,
     KnowledgeRetrievalError,
     close_knowledge_server,
@@ -194,7 +195,9 @@ def test_query_full_handshake_and_hits(monkeypatch, exe, tmp_path):
                                 "--data-dir", str(data_dir)]
     kw = spawns[0]["kwargs"]
     assert kw["stdin"] is subprocess.PIPE and kw["stdout"] is subprocess.PIPE
-    assert kw["stderr"] is subprocess.DEVNULL      # server 噪声不污染父进程日志
+    # stderr 仍**不污染父进程日志**；现在是落临时文件（为了失败时能取证，见 _describe_exit）。
+    assert kw["stderr"] not in (None, subprocess.DEVNULL)
+    assert hasattr(kw["stderr"], "fileno")
     assert kw["text"] is True and kw["encoding"] == "utf-8"
     assert kw["env"]["ANONYMIZED_TELEMETRY"] == "False"
 
@@ -411,9 +414,50 @@ def test_request_arms_watchdog_and_cancels_it(monkeypatch, exe, tmp_path):
     ChromaKnowledgeClient(exe, tmp_path).query("q")
 
     timers = _RecordingTimer.created
-    assert [t.interval for t in timers] == [REQUEST_TIMEOUT_S, REQUEST_TIMEOUT_S]
+    # 握手（进程+模型冷启动）拿更宽的预算，普通调用保持 60s——这条把两者的**区别**钉成契约。
+    assert [t.interval for t in timers] == [STARTUP_TIMEOUT_S, REQUEST_TIMEOUT_S]
     assert all(t.started and t.daemon and t.cancelled for t in timers)
     print("PASS test_request_arms_watchdog_and_cancels_it")
+
+
+def test_handshake_gets_a_wider_budget_than_calls():
+    """冷启动预算必须**严格大于**普通调用预算：否则负载下的慢启动被当成挂起并被 kill。"""
+    from data_dog.knowledge import _timeout_for
+
+    assert _timeout_for("initialize") == STARTUP_TIMEOUT_S
+    assert _timeout_for("tools/call") == REQUEST_TIMEOUT_S
+    assert STARTUP_TIMEOUT_S > REQUEST_TIMEOUT_S
+    print("PASS test_handshake_gets_a_wider_budget_than_calls")
+
+
+def test_dead_child_error_carries_exit_code_and_stderr(monkeypatch, exe, tmp_path):
+    """子进程崩了：报错要带**退出码**与 **stderr 尾巴**，不能只有一句"无响应"。
+
+    此前 stderr 被丢进 DEVNULL，全量跑偶发失败时完全无法定位（是崩了？还是被我们 kill 的？）。
+    """
+    import tempfile as _tf
+
+    _RecordingTimer.created = []
+    monkeypatch.setattr(knowledge.threading, "Timer", _RecordingTimer)
+    # 先抓住原函数：knowledge.tempfile 就是全局 tempfile 模块，直接调会被自己递归。
+    orig_tmpfile = _tf.TemporaryFile
+
+    def _fake_tmpfile(*args, **kwargs):
+        fh = orig_tmpfile(*args, **kwargs)
+        fh.write(b"onnxruntime: model.onnx not found\n")
+        fh.seek(0)
+        return fh
+
+    monkeypatch.setattr(knowledge.tempfile, "TemporaryFile", _fake_tmpfile)
+    _install_fake_popen(monkeypatch, [_FakeProc(lambda msg: [], exit_code=3)])
+    client = ChromaKnowledgeClient(exe, tmp_path)
+    with pytest.raises(KnowledgeRetrievalError) as exc:
+        client.query("q")
+    msg = str(exc.value)
+    assert "退出码 3" in msg
+    assert "进程自行退出" in msg
+    assert "model.onnx not found" in msg
+    print("PASS test_dead_child_error_carries_exit_code_and_stderr")
 
 
 def test_request_cancels_watchdog_even_on_failure(monkeypatch, exe, tmp_path):

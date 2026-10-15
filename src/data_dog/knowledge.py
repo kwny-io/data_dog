@@ -13,6 +13,7 @@ import atexit
 import json
 import os
 import subprocess
+import tempfile
 import threading
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,15 @@ from . import settings
 
 DEFAULT_CHROMA_EXE = Path(r"D:\.venv-chroma\Scripts\chroma-mcp.exe")
 REQUEST_TIMEOUT_S = 60.0
+# `initialize` 要等子进程启动 + 嵌入模型加载。冷启动在负载重时（全量测试、多副本同机）会明显超过
+# 普通请求预算，用同一个 60s 会把"冷启动慢"误判成"上游挂起"并**直接 kill**。
+# （实测：单跑约 5s；全量并发跑时该用例偶发失败，报错却只有"无响应"——见 _describe_exit 的取证。）
+STARTUP_TIMEOUT_S = 180.0
+
+
+def _timeout_for(method: str) -> float:
+    """按请求阶段选预算：握手（进程+模型冷启动）比普通调用宽得多。"""
+    return STARTUP_TIMEOUT_S if method == "initialize" else REQUEST_TIMEOUT_S
 
 
 class KnowledgeRetrievalError(RuntimeError):
@@ -44,6 +54,9 @@ class ChromaKnowledgeClient:
         self.data_dir = data_dir
         self.proc: subprocess.Popen | None = None
         self._next_id = 1
+        # stderr 落**临时文件**（不是 PIPE）：没人读也不会把子进程憋死，失败时还能取证。
+        self._stderr: Any = None
+        self._killed_by_watchdog = False
 
     def is_alive(self) -> bool:
         return self.proc is not None and self.proc.poll() is None
@@ -66,8 +79,15 @@ class ChromaKnowledgeClient:
         except Exception:
             pass
         self.proc = None
+        if self._stderr is not None:
+            try:
+                self._stderr.close()
+            except Exception:
+                pass
+            self._stderr = None
 
     def _kill(self) -> None:
+        self._killed_by_watchdog = True      # 看门狗开的枪，得留痕（否则只剩"无响应"）
         if self.proc is not None:
             try:
                 self.proc.kill()
@@ -77,11 +97,13 @@ class ChromaKnowledgeClient:
     def _start(self) -> None:
         if not self.exe.exists():
             raise KnowledgeRetrievalError(f"chroma-mcp 不存在: {self.exe}")
+        self._stderr = tempfile.TemporaryFile()
+        self._killed_by_watchdog = False
         self.proc = subprocess.Popen(
             [str(self.exe), "--client-type", "persistent",
              "--data-dir", str(self.data_dir)],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
+            stderr=self._stderr,      # 临时文件：既不会因无人读而阻塞，又能事后取证
             text=True, encoding="utf-8",
             env={**os.environ, "ANONYMIZED_TELEMETRY": "False"},
         )
@@ -105,7 +127,7 @@ class ChromaKnowledgeClient:
         while True:
             line = self.proc.stdout.readline()
             if not line:
-                raise KnowledgeRetrievalError("chroma-mcp 无响应（提前退出/被超时终止）")
+                raise KnowledgeRetrievalError(self._describe_exit())
             line = line.strip()
             if not line:
                 continue
@@ -118,11 +140,45 @@ class ChromaKnowledgeClient:
                     raise KnowledgeRetrievalError(f"JSON-RPC 错误: {resp['error']}")
                 return resp["result"]
 
+    def _stderr_tail(self, limit: int = 400) -> str:
+        """子进程 stderr 的尾巴（临时文件，可安全回读）。"""
+        if self._stderr is None:
+            return ""
+        try:
+            self._stderr.seek(0)
+            data = self._stderr.read(65536)
+        except Exception:
+            return ""
+        if isinstance(data, bytes):
+            data = data.decode("utf-8", errors="replace")
+        return data.strip()[-limit:]
+
+    def _describe_exit(self) -> str:
+        """子进程没回应时，把"为什么"尽量带出来。
+
+        此前只有一句"无响应（提前退出/被超时终止）"：既分不清是**我们 kill 的**还是它自己崩的，
+        也看不到它死前说了什么——线上/全量跑偶发时完全没法定位。
+        """
+        code = None
+        if self.proc is not None:
+            try:
+                code = self.proc.poll()
+            except Exception:
+                code = None
+        why = ("看门狗超时后已 kill（" + str(int(_timeout_for("initialize")))
+               + "s 握手预算）" if self._killed_by_watchdog else "进程自行退出")
+        parts = ["chroma-mcp 无响应（" + why + "）",
+                 "退出码 " + ("None（仍存活但无输出）" if code is None else str(code))]
+        tail = self._stderr_tail()
+        if tail:
+            parts.append("stderr: " + tail)
+        return "；".join(parts)
+
     def _request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         req_id = self._next_id
         self._next_id += 1
         self._send({"jsonrpc": "2.0", "id": req_id, "method": method, "params": params})
-        watchdog = threading.Timer(REQUEST_TIMEOUT_S, self._kill)
+        watchdog = threading.Timer(_timeout_for(method), self._kill)
         watchdog.daemon = True
         try:
             watchdog.start()

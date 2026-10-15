@@ -160,12 +160,17 @@ retention 自动分流到 `DROP PARTITION`。测试含 `-m postgres` 真库往�
 ## 顺带修掉的阻塞项与追加项（不在 A/B 清单内）
 
 | 提交 | 问题 | 为什么必须修 / 做了什么 |
-|---|---|---|| `49bd1d0` | A3 的数据块把确定性评测"看瞎"了 | 全量测试 **10 failed**：工具返回被包成数据块后 `json.loads` 失败，裁决静默退化成 `needs_human_review`。加 `core/injection.unwrap` 剥壳 + 3 条回归测试 |
+|---|---|---|
+| `49bd1d0` | A3 的数据块把确定性评测"看瞎"了 | 全量测试 **10 failed**：工具返回被包成数据块后 `json.loads` 失败，裁决静默退化成 `needs_human_review`。加 `core/injection.unwrap` 剥壳 + 3 条回归测试 |
 | `6e27584` | 审计 `ts` 在 Windows 上分辨率不足（~15 ms） | `test_audit.py` 单跑 5 次红 3 次：同一 `ts` 内顺序由随机 `audit_id` 决定。改为进程内严格递增 + 回归测试 |
 | `6cb38eb` | "僵死 job"用例卡在阈值边界上 | `investigate_stale_running_s()` 有 **10s 下限**，测试写 `=1` 实际是 10，而种子用 `age_s=10` → 是否跨过一个时钟 tick（~15.6ms）成了随机事件，全量跑约 20% 概率红。种子改 30s + 把"下限 10s"钉成回归测试 |
 | `7f71020` | HTTP 推送对端半途断开 → handler 线程未捕获异常 | 全量跑约 1/3 红（`ConnectionAbortedError: [WinError 10053]`）。客户端断开是**正常现象**：`do_POST` 兜住 `(ConnectionError, TimeoutError)` 记 debug 后返回，不吞其它异常 |
 | `32331fe` | 同步调查"模型慢还是我们慢"分不开 | 新增 `llm_request_duration_seconds{vendor,model,outcome}`（桶到 120s）；`Provider.chat()` 的 `finally` 里统一观测，**失败/超时也进**（只统计成功会低估 P95） |
 | `4cde4c4` | `rawlog://` 证据源是 **mock**（`sha256:mock`） | ref 能解析、内容却是假的。新增真读（受控目录 / 对象存储二选一）、未配置即**失败关闭**、超限截断标注、读取留痕 `audit action=rawlog.read`；`--check`/config check 把关互斥 |
+| `af74857` | 目录读取的 TOCTOU + http 截断靠"猜" | POSIX 逐段 `openat`+`O_NOFOLLOW`（任何符号链接都拒，容器实测）；Windows 退回 `resolve()` 检查并**明写**仍有窗口。截断判定改为确定（按「上限+1」取） |
+| `35cd015` | `safe_request(max_bytes=N)` 被传输层 64 KiB 卡死 | 上层以为放宽了上限，实际 `_default_transport` 写死读 `_MAX_BYTES`。`PinnedRequest` 带上 `max_bytes`，真起本地 HTTP 服务验 100 KiB 完整取回 |
+| `cdb13fd` | 控制台没消费 `/refs`（引用只是字符串数组） | 候选详情加「证据引用」面板：**懒解析**（点按钮才请求，因读正文会留审计）、展开看正文/截断/摘要、失败显示错误码；devmock/fixtures 的 `evidence://` 换成真 scheme |
+| `本提交` | knowledge flake 只有一句"无响应"，无法定位 | 握手改用独立启动预算（`initialize` 180s，其余 60s——负载重时的冷启动此前会被误判挂起并 kill）；stderr 落临时文件；报错带上"看门狗 kill/自行退出 + 退出码 + stderr 尾巴"。**未能复现**原 flake，故只声称"可诊断 + 消除负载敏感性" |
 
 ## 怎么复核
 
