@@ -60,6 +60,52 @@ def _resolver(mapping: dict[str, list[str]]):
     return lambda host: mapping[host]
 
 
+def test_transport_receives_the_callers_byte_cap():
+    """`max_bytes` 必须**传进传输层**。
+
+    此前传输层硬编码读 `_MAX_BYTES`（64 KiB）：上层写 `max_bytes=200_000` 只截断"已经只读了
+    64 KiB 的 body"，看起来放宽了上限，其实被传输层卡死（rawlog 的 http 模式就踩到了）。
+    """
+    rec = _Recorder([RawResponse(200, b"x")])
+    safe_request("https://a.example/x", resolver=_resolver({"a.example": [PUBLIC_A]}),
+                 transport=rec, max_bytes=200_000)
+    assert rec.requests[0].max_bytes == 200_000
+    rec2 = _Recorder([RawResponse(200, b"x")])
+    safe_request("https://a.example/x", resolver=_resolver({"a.example": [PUBLIC_A]}),
+                 transport=rec2)
+    assert rec2.requests[0].max_bytes == 64 * 1024, "默认上限仍是 64 KiB"
+
+
+def test_default_transport_reads_up_to_the_caller_cap():
+    """真起本地 HTTP 服务：**默认传输**按调用方上限读完（100 KiB 不再被悄悄砍到 64 KiB）。"""
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    payload = b"z" * (100 * 1024)
+
+    class _H(BaseHTTPRequestHandler):
+        def do_GET(self):                                   # noqa: N802 - stdlib 约定
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, *args):                       # 静音，别刷测试输出
+            return
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), _H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        url = f"http://127.0.0.1:{srv.server_address[1]}/big"
+        wide = safe_request(url, method="GET", allow_private=True, max_bytes=200_000)
+        assert wide.ok is True and len(wide.body) == len(payload)
+        narrow = safe_request(url, method="GET", allow_private=True, max_bytes=1024)
+        assert narrow.ok is True and len(narrow.body) == 1024
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
 # ---------------------------------------------------------------- 逐跳复验
 
 def test_redirect_to_metadata_is_refused_and_second_hop_never_sent():

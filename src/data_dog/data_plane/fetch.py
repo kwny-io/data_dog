@@ -175,6 +175,10 @@ class PinnedRequest:
     headers: dict[str, str] = field(default_factory=dict)
     body: bytes | None = None
     timeout_s: float = 5.0
+    # 单次响应最多读多少字节。**必须由调用方传进来**：此前默认传输硬编码读 `_MAX_BYTES`，
+    # 于是 `safe_request(max_bytes=200_000)` 只截断"已经只读了 64 KiB 的 body"——
+    # 上层以为放宽了上限，其实被传输层悄悄卡死（rawlog 的 http 模式就踩到这一点）。
+    max_bytes: int = _MAX_BYTES
 
     @property
     def host_header(self) -> str:
@@ -248,7 +252,7 @@ def _default_transport(req: PinnedRequest) -> RawResponse:
             conn.putheader("Content-Length", str(len(req.body)))
         conn.endheaders(req.body)
         resp = conn.getresponse()
-        body = resp.read(_MAX_BYTES)
+        body = resp.read(max(1, int(req.max_bytes)))
         return RawResponse(resp.status, body,
                            {k.lower(): v for k, v in resp.getheaders()})
     finally:
@@ -302,7 +306,8 @@ def safe_request(url: str, *, method: str = "POST", data: bytes | None = None,
             url=current, host=host, ip=ip, scheme=parsed.scheme,
             port=port if port is not None else (443 if parsed.scheme == "https" else 80),
             method=cur_method, path=path,
-            headers=dict(headers or {}), body=body, timeout_s=timeout_s)
+            headers=dict(headers or {}), body=body, timeout_s=timeout_s,
+            max_bytes=max_bytes)
         hops.append(current)
         try:
             raw = send(req)
