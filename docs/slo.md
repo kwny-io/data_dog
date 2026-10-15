@@ -205,6 +205,11 @@ loadgen 客户端实测能推 **997 req/s**，故客户端也不是瓶颈）。
 | `DataDogReplicationLagHigh` | `max by (from,to) (data_dog_replication_lag_seconds)` | > 60s 持续 10m | warning | §7：跨地域多活定位 **RPO>0**；单区域没有该 series，规则自然不触发 |
 | `DataDogPartitionHorizonLow` | `min(data_dog_partition_end_timestamp_seconds{kind="future"}) - time()` | < `prometheusRule.partitionHorizonSeconds`（默认 14 天）持续 10m | critical | A9 分区表：跨月没有分区 → 写入直接报 `no partition of relation ... found for row`。用**时间戳减 time()**，避免 Gauge 陈旧导致规则失灵 |
 | `DataDogPartitionHorizonUnknown` | `absent(data_dog_partition_end_timestamp_seconds{kind="future"})` | 持续 1h | warning | 该组只在 `partition.enabled=true` 时渲染；此时**没有样本**会让上面那条变成死规则（Prometheus 对空向量求值不报错）。比"有效期不足"更早的警报 |
+| `DataDogLlmLatencyP95High` | `histogram_quantile(0.95, sum by (le)(rate(data_dog_llm_request_duration_seconds_bucket[10m])))` | > `prometheusRule.llmLatencyP95Seconds`（默认 60s）持续 15m | warning | **工程阈值**：同步调查要等一次真 LLM；失败/超时**也计入**，只统计成功会把 P95 低估 |
+| `DataDogLlmFailureRateHigh` | 超时+不可用 的 rate / 全部 rate（clamp_min 防分母 0） | > `prometheusRule.llmFailureRate`（默认 5%）持续 15m | warning | 失败**fail-closed**（降级为 needs_human_review）→ 这条等于"人在替模型兜底" |
+| `DataDogOutboxBacklog` | `max(data_dog_db_rows{table="outbox_pending"})` | > `prometheusRule.outboxBacklogThreshold`（默认 100）持续 15m | warning | 告警产生了但没送出去；与 `DataDogAuditWriteFailed` 互补（一个写不进、一个送不出） |
+| `DataDogEvidenceResolveFailed` | `increase(data_dog_evidence_resolve_total{outcome="execution_failed"}[15m])` | > 0 | warning | 数据源没配好/不可达（如 rawlog 未配置）。此前只表现为"用户打不开原始日志" |
+| `DataDogEvidenceDeniedSpike` | `increase(data_dog_evidence_resolve_total{outcome="denied"}[15m])` | > `prometheusRule.evidenceDeniedThreshold`（默认 20） | warning | 正常应为 0；涨起来=越权探测信号。定位靠审计（指标刻意不带租户标签） |
 
 **诚实边界**：
 

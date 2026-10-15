@@ -135,6 +135,18 @@ spec:
             description: >-
               仅 DD_WRITE_BEHIND=1 时有意义。failed=写失败，rejected_full=队列满拒收；
               两者都是静默丢数据的证据，必须当事故处理。
+        - alert: DataDogOutboxBacklog
+          # 待投递（告警外发）队列积压：投递 worker 停了 / 下游持续失败时会一直涨。
+          expr: max(data_dog_db_rows{table="outbox_pending"})
+            > {{ .Values.prometheusRule.outboxBacklogThreshold }}
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "待投递队列积压 > 阈值（持续 15 分钟）"
+            description: >-
+              积压意味着"告警产生了但没送出去"。先看投递 worker 是否在跑（/readyz 的 checks），
+              再看目标端点是否在拒收（失败重试会把 pending 堆起来）。
         {{- if .Values.stream.enabled }}
         - alert: DataDogStreamDown
           # 只在**本 chart 开了消费者**的部署里断言：否则 API Pod 的 stream_up=0
@@ -165,6 +177,69 @@ spec:
           annotations:
             summary: "跨区域复制延迟 > 60s（from/to 见标签）"
             description: "RPO > 0 是应用层近似的已知边界；持续落后说明链路或上游写入压力异常。"
+    # ---- 模型调用：同步调查"是模型慢还是我们慢"（分开看）----
+    - name: data-dog.llm
+      rules:
+        - alert: DataDogLlmLatencyP95High
+          # 只按 le 聚合：vendor/model/outcome 的基数不进 PromQL（否则每加一个模型就多一条序列）。
+          # 失败与超时**也计入**——只统计成功样本会把 P95 系统性低估（慢请求常以超时收场）。
+          expr: |
+            histogram_quantile(
+              0.95,
+              sum by (le) (rate(data_dog_llm_request_duration_seconds_bucket[10m]))
+            ) > {{ .Values.prometheusRule.llmLatencyP95Seconds }}
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "LLM 请求 P95 > 60s（持续 15 分钟）"
+            description: >-
+              同步调查要等一次真 LLM。持续超标通常是上游限流或网络，而不是本服务；
+              先看 vendor/model 维度的 http 侧错误率，再看异步队列深度是否同步上涨。
+        - alert: DataDogLlmFailureRateHigh
+          # 超时 + 不可用 / 全部请求。clamp_min 防分母为 0（没流量时不该判成 100% 失败）。
+          expr: |
+            (
+              sum(rate(data_dog_llm_request_duration_seconds_count{outcome=~"timeout|unavailable"}[10m]))
+              /
+              clamp_min(sum(rate(data_dog_llm_request_duration_seconds_count[10m])), 0.001)
+            ) > {{ .Values.prometheusRule.llmFailureRate }}
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "LLM 超时/不可用占比 > 5%（持续 15 分钟）"
+            description: >-
+              失败会 **fail-closed**（判定降级为 needs_human_review），所以这条是"人在替模型兜底"。
+              先看上游额度/密钥是否过期，再看是不是网络策略变更。
+
+    # ---- 证据引用：失败与越权探测要能看见 ----
+    - name: data-dog.evidence
+      rules:
+        - alert: DataDogEvidenceResolveFailed
+          # execution_failed = 数据源抛异常或**没配好**（如 rawlog 未配置存放位置）。
+          # 这类失败对使用者表现为"打不开原始日志"，此前只能靠用户报障。
+          expr: increase(data_dog_evidence_resolve_total{outcome="execution_failed"}[15m]) > 0
+          for: 0m
+          labels:
+            severity: warning
+          annotations:
+            summary: "证据引用解析失败（execution_failed，15 分钟内）"
+            description: >-
+              常见根因：DD_RAWLOG_BASE_DIR / DD_RAWLOG_BASE_URL 没配或指错、对象存储不可达、
+              raw_log_ref 指向的键在受控目录里不存在（截断/清理）。
+        - alert: DataDogEvidenceDeniedSpike
+          # denied = 该租户读了不属于它的引用。**正常应为 0**；涨起来是越权探测信号。
+          expr: increase(data_dog_evidence_resolve_total{outcome="denied"}[15m])
+            > {{ .Values.prometheusRule.evidenceDeniedThreshold }}
+          for: 0m
+          labels:
+            severity: warning
+          annotations:
+            summary: "证据引用被拒次数异常（15 分钟内 > 阈值）"
+            description: >-
+              先用 GET /v1/audit 与访问日志定位是哪个租户/来源 IP，再判断是配置错还是探测。
+              指标本身**不带租户标签**（基数），所以定位要靠审计而不是这里。
     {{- if .Values.partition.enabled }}
     # ---- 存储结构：A9 分区有效期（只在声明了分区维护的部署里断言）----
     - name: data-dog.storage

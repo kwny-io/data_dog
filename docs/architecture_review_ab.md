@@ -192,6 +192,24 @@ A/B 各项的证据此前都是**例子测试**（"这几个路径被拒了"）�
 `../../`，想不到 NUL。已收敛：`rawlog.make_rawlog_source` 把 `OSError/ValueError/UnicodeError`
 统一映射成 `RawLogRefused`（附原因），不再让非法键冒成 500。
 
+## 可观测缺口补齐：告警别再"缺条腿"（不在 A/B 清单内）
+
+上一轮补了 LLM 延时直方图与分区有效期，但**告警侧没跟上**——指标有了、没人被叫醒等于没有。
+本轮按 `docs/slo.md` 自己的标准（"不会响的 SLO 只活在文档里"）查了一遍缺口，补 5 条：
+
+| 告警 | 指标 / 口径 | 为什么必须有 |
+|---|---|---|
+| `DataDogLlmLatencyP95High` | `histogram_quantile(0.95, sum by (le)(rate(llm_request_duration_seconds_bucket[10m])))` | 上一轮刚加的直方图此前**没有任何规则**；失败/超时也计入，只统计成功会把 P95 低估 |
+| `DataDogLlmFailureRateHigh` | 超时+不可用 rate / 全部 rate | LLM 失败会 **fail-closed**（判定降级为 needs_human_review），超标 = 人在替模型兜底 |
+| `DataDogOutboxBacklog` | `max(db_rows{table="outbox_pending"})` | "告警产生了但送不出去"此前无人知晓；与审计写失败互补 |
+| `DataDogEvidenceResolveFailed` | 新增计数器 `evidence_resolve_total{outcome="execution_failed"}` | 数据源没配好/挂了（如 rawlog 未配置）此前只表现为"用户打不开原始日志" |
+| `DataDogEvidenceDeniedSpike` | `evidence_resolve_total{outcome="denied"}` | 正常应为 0；涨起来是**越权探测**信号 |
+
+配套改动：`core/metrics.py` 新增 `data_dog_evidence_resolve_total{outcome}`，
+在解析器**唯一出口**观测（`EvidenceResolver.resolve` 包一层，内部逻辑一字未改）；
+计数器**永不抛**——观测不能成为链路的一环。新增 4 个阈值进 `values.yaml`，
+5 行进 `docs/slo.md` §9 表（既有不变量测试会强制"规则↔指标↔阈值↔文档"四向对齐）。
+
 ## 怎么复核
 
 ```bash

@@ -119,6 +119,17 @@ investigation_queue_depth = Gauge(
 # Gauge 会陈旧——进程启动时算成"还有 60 天"，过一个月它仍写着 60，告警就永久失灵。
 # 上报"最新分区上界的 epoch 秒"后，由 Prometheus 用 `- time()` 做减法：**时钟自己走**，
 # 即使应用再也不重算，告警也会随真实时间逼近而触发。
+# 证据引用解析结果。为什么要有：`/v1/candidates/{id}/refs` 的失败此前**只是响应里的一句话**——
+# 运维看不到 "execution_failed 在涨"（= rawlog 没配好/数据源崩），也看不到 "denied 在涨"
+# （= 有人在探测越权）。outcome ∈ {ok, invalid_input, not_found, denied, unavailable,
+# execution_failed, contract_mismatch}。
+evidence_resolve_total = Counter(
+    "data_dog_evidence_resolve_total",
+    "证据引用解析次数（按结果分类）",
+    labelnames=("outcome",),
+    registry=registry,
+)
+
 partition_end_timestamp_seconds = Gauge(
     "data_dog_partition_end_timestamp_seconds",
     "最新分区上界的 epoch 秒（label kind=future；与 time() 相减 = 还有多久覆盖到期）",

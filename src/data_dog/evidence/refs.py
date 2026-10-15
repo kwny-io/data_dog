@@ -133,6 +133,20 @@ def digest(payload: Any) -> str:
 SourceFn = Callable[[str, list[str]], tuple[bool, Any]]
 
 
+def _observe_resolve(out: dict[str, Any]) -> None:
+    """记录一次解析结果（按 outcome）。
+
+    **永不抛**：观测不能成为链路的一环——指标注册表/采集出问题时，解析该成功还是成功。
+    """
+    try:
+        from ..core import metrics
+
+        outcome = "ok" if out.get("ok") else str(out.get("error") or "unknown")
+        metrics.evidence_resolve_total.labels(outcome=outcome).inc()
+    except Exception:                                   # noqa: BLE001
+        pass
+
+
 class EvidenceResolver:
     """把 Evidence Ref 解析成可读证据，带权限/完整性/有效期校验。
 
@@ -175,7 +189,16 @@ class EvidenceResolver:
 
         Returns:
             ok:True + {ref, source, payload}，或 err(code, detail)。
+
+        每次调用都在**唯一出口**记一次结果指标（`data_dog_evidence_resolve_total{outcome}`）：
+        失败此前只活在响应体里，运维看不到"execution_failed / denied 在涨"。
         """
+        out = self._resolve_one(raw, issued_at=issued_at, expected_digest=expected_digest)
+        _observe_resolve(out)
+        return out
+
+    def _resolve_one(self, raw: str, *, issued_at: float | None = None,
+                     expected_digest: str | None = None) -> dict[str, Any]:
         try:
             ref = parse_ref(raw)
         except ValueError as e:

@@ -175,6 +175,14 @@ prometheusRule:
   # 分区有效期不足多少秒开始告警（默认 14 天）。
   # 只在 partition.enabled=true 的部署里生效：没有分区表就没有这个样本。
   partitionHorizonSeconds: 1209600
+  # LLM 请求 P95 延时阈值（秒）。同步调查要等一次真 LLM，这里只看"模型/链路是不是变慢了"。
+  llmLatencyP95Seconds: 60
+  # LLM 超时+不可用占全部请求的比例阈值（0.05 = 5%）。
+  llmFailureRate: 0.05
+  # 待投递队列积压阈值（同一条过阈值持续 15 分钟才告警）。
+  outboxBacklogThreshold: 100
+  # 15 分钟内"证据引用被拒"次数阈值：涨起来通常是有人在探测越权。
+  evidenceDeniedThreshold: 20
 
 
 # ---- 分区维护（A9）：分区表的"生产最后一公里" ----

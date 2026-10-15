@@ -179,6 +179,47 @@ def test_ttl_disabled_skips_expiry():
 
 # ---------- 5. 批量 ----------
 
+def test_resolve_outcomes_are_counted_for_alerting():
+    """每次解析都要上报结果指标——否则"execution_failed/denied 在涨"运维根本看不见。
+
+    对应告警：`DataDogEvidenceResolveFailed`（数据源没配好/挂了）与
+    `DataDogEvidenceDeniedSpike`（疑似越权探测）。
+    """
+    from prometheus_client import generate_latest
+
+    from data_dog.core import metrics
+
+    def _count(outcome: str) -> float:
+        total = 0.0
+        for line in generate_latest(metrics.registry).decode().splitlines():
+            if (line.startswith("data_dog_evidence_resolve_total{")
+                    and 'outcome="' + outcome + '"' in line):
+                total += float(line.rsplit(" ", 1)[1])
+        return total
+
+    before_ok = _count("ok")
+    default_resolver().resolve("vendordoc://motor-x2-thermal")
+    assert _count("ok") == before_ok + 1
+
+    before_invalid = _count("invalid_input")
+    default_resolver().resolve("not a ref")
+    assert _count("invalid_input") == before_invalid + 1
+
+    def _boom(authority, path):
+        raise RuntimeError("数据源挂了")
+
+    def _denied(authority, path):
+        raise PermissionError("不在授权范围")
+
+    before_failed = _count("execution_failed")
+    EvidenceResolver({"rawlog": _boom}).resolve("rawlog://e1")
+    assert _count("execution_failed") == before_failed + 1
+
+    before_denied = _count("denied")
+    EvidenceResolver({"metricwin": _denied}).resolve("metricwin://x")
+    assert _count("denied") == before_denied + 1
+
+
 def test_resolve_all_preserves_order_and_isolates_failures():
     res = default_resolver()
     res.replace_source("rawlog", _rawlog_stub)
