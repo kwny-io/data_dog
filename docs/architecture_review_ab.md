@@ -210,6 +210,49 @@ A/B 各项的证据此前都是**例子测试**（"这几个路径被拒了"）�
 计数器**永不抛**——观测不能成为链路的一环。新增 4 个阈值进 `values.yaml`，
 5 行进 `docs/slo.md` §9 表（既有不变量测试会强制"规则↔指标↔阈值↔文档"四向对齐）。
 
+## 覆盖率门禁：从"总分"到"分腿、分文件"（不在 A/B 清单内）
+
+问题有两层，第二层比第一层重要：
+
+1. **门槛松**：CI 是总分 `--cov-fail-under=85` + 单文件 `cov_gate.py --min 60`。
+   60% 对核心文件等于没门（实测最低文件 35.4%）。
+2. **口径错**：默认腿跑在 SQLite 上，PG-only 的主体在它眼里覆盖率极低——
+   `storage/partitioning.py` 在默认腿 **35.4%**、在 postgres 腿 **86.7%**（同一份代码、同一批测试）。
+   照着默认腿的数字调门槛，只会把"口径不对"误判成"没测"，逼人去写假的覆盖。
+
+**做法**：
+
+1. `cov_gate.py` 下限默认 60 → **70**，新增两个开关：
+   - `--only`：只检查匹配路径片段的文件（把 PG-only 文件划给 postgres 腿）；
+   - `--no-allow`：忽略 ALLOW 豁免——跨腿门禁**必须**用它，否则文件在两条腿上
+     都被豁免，等于没人看；
+   - 给 `storage/partitioning.py`、`state/pg.py` 写明豁免理由（口径不适用，附两条腿实测数字）。
+2. 分腿设门槛（本机真跑，数字如下）：
+
+| 腿 | 命令 | 结果 |
+|---|---|---|
+| 默认（SQLite） | `cov_gate --json coverage.json --min 70` | ✅ 通过（总覆盖 **87.94%**） |
+| postgres | `cov_gate --json coverage-pg.json --only storage/partitioning.py,state/pg.py --no-allow --min 80` | ✅ 通过（**86.7% / 98.5%**） |
+| 反证（门槛调 90） | 同上 | ✗ 红（86.7% < 90）——门禁确实咬得住，不是摆设 |
+
+3. `make cov-gate` / `make cov-gate-pg` 把两条命令固定下来（不靠记忆敲参数）。
+
+**未落地的一步（诚实标注）**：CI 里的调用**还没改**——`.github/workflows/ci.yml` 此刻正被
+另一个窗口编辑（Playwright e2e 腿，+40 行）；在同一个文件里只提交我这半边的改动，无法保证不夹带
+对方的在途改动。待该文件提交后接上这两处（postgres 腿本来就在 CI 里跑 `-m postgres`，加 `--cov` 即可）：
+
+```diff
+-      - name: 单模块覆盖率下限（60%）
+-        run: python scripts/cov_gate.py --json coverage.json --min 60
++      - name: 单模块覆盖率下限（70%）
++        run: python scripts/cov_gate.py --json coverage.json --min 70
++      - name: 单模块覆盖率下限（PG-only 文件，80%）
++        run: |
++          pytest -q -m postgres --cov=data_dog --cov-report=json:coverage-pg.json
++          python scripts/cov_gate.py --json coverage-pg.json \
++            --only storage/partitioning.py,state/pg.py --no-allow --min 80
+```
+
 ## 怎么复核
 
 ```bash

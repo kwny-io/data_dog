@@ -6,7 +6,7 @@ PY ?= $(shell if [ -x .venv/bin/python ]; then echo .venv/bin/python; \
               else echo python; fi)
 PORT ?= 8000
 
-.PHONY: help gates hooks numbers requirements format install test lint typecheck cov serve probe ingest e2e ui bench up up-prod down down-prod logs ps health clean helm-lint verify-chart k8s-e2e retention partition partition-check perf-probe config-check
+.PHONY: help gates hooks numbers requirements format install test lint typecheck cov serve probe ingest e2e ui bench up up-prod down down-prod logs ps health clean helm-lint verify-chart k8s-e2e retention partition partition-check cov-gate cov-gate-pg perf-probe config-check
 
 help:            ## 显示所有命令
 	@echo "make install  安装依赖(含服务)"
@@ -20,6 +20,8 @@ help:            ## 显示所有命令
 	@echo "make requirements  由 pyproject.toml 重新生成 requirements.txt"
 	@echo "make format   可选: ruff format(会重排大量文件, 慎用)"
 	@echo "make cov      带覆盖率跑测试"
+	@echo "make cov-gate 单模块覆盖率门禁(默认腿, 下限 70%)"
+	@echo "make cov-gate-pg PG 腿门禁(PG-only 文件, 下限 80%)"
 	@echo "make serve    本机起服务(不用 Docker)"
 	@echo "make probe    探存活/就绪/指标"
 	@echo "make bench    P4-8 软实时基准(起服务→压测→出报告)"
@@ -101,6 +103,12 @@ retention:       ## 数据保留清理（④）：默认 dry-run 只统计，FOR
 
 partition-check: ## 分区现状（A9，只读）：是否分区表 / 有哪些分区 / 转换阻塞项
 	$(PY) scripts/partition_telemetry.py --check
+
+cov-gate:        ## 单模块覆盖率门禁（默认腿；先 make cov 产出 coverage.json）
+	$(PY) scripts/cov_gate.py --json coverage.json --min 70
+
+cov-gate-pg:     ## PG 腿门禁：只查 SQLite 跑不到的 PG-only 文件（先跑 -m postgres --cov）
+	$(PY) scripts/cov_gate.py --json coverage-pg.json --only storage/partitioning.py,state/pg.py --no-allow --min 80
 
 partition:       ## 分区维护（A9）：确保未来 N 个月分区存在（幂等 DDL；MONTHS=3）
 	$(PY) scripts/partition_telemetry.py --ensure-months $(or $(MONTHS),3)
