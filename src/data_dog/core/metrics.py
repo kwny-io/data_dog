@@ -33,6 +33,12 @@ http_requests_total = Counter(
     registry=registry,
 )
 
+# 延迟直方图的桶是**契约**：谁把上限改小，长尾就重新不可观测。提成具名常量，
+# 让 `tests/test_metrics_buckets.py` 能直接断言覆盖范围（而不是只靠注释）。
+HTTP_LATENCY_BUCKETS = (0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5,
+                        5.0, 10.0, 30.0, 60.0, 120.0)
+JOB_DURATION_BUCKETS = (0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 30.0, 60.0, 120.0)
+
 http_request_duration_seconds = Histogram(
     "data_dog_http_request_duration_seconds",
     "HTTP 请求耗时（秒）",
@@ -40,8 +46,7 @@ http_request_duration_seconds = Histogram(
     # 覆盖 5ms ~ 120s。**长尾是必需的**：绝大多数端点几十毫秒，但 POST /v1/investigations
     # 的同步路径要等一次真 LLM（10–60s）；顶格只到 2.5s 时它们全落进 +Inf，
     # **那条路的 P95/P99 实际不可观测**（异步路径另有 investigation_job_duration_seconds）。
-    buckets=(0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5,
-             5.0, 10.0, 30.0, 60.0, 120.0),
+    buckets=HTTP_LATENCY_BUCKETS,
     registry=registry,
 )
 
@@ -114,8 +119,8 @@ investigation_queue_depth = Gauge(
 investigation_job_duration_seconds = Histogram(
     "data_dog_investigation_job_duration_seconds",
     "异步调查执行耗时（秒）",
-    # 覆盖离线毫秒级到真实 LLM 的分钟级
-    buckets=(0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 30.0, 60.0, 120.0),
+    # 覆盖离线毫秒级到真实 LLM 的分钟级（60s 硬超时 + 排队余量）
+    buckets=JOB_DURATION_BUCKETS,
     registry=registry,
 )
 

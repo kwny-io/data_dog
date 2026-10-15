@@ -31,7 +31,7 @@
 | # | 优化项 | 状态 | 提交 | 落地内容（一句话） |
 |---|---|---|---|---|
 | B1 | 同步路 histogram 顶格 2.5s → 全落 +Inf | ✅ | `51091f1` | 桶补到 120s（异步路另有 job 直方图），同步调查 P95/P99 重新可观测 |
-| B2 | 同步仍是默认 | ❌ | — | 见下"未落地项" |
+| B2 | 同步仍是默认 | ✅ | `d3b5f9d` `38751dc` `473a3d9` | 三步：① 异步结果一次取齐 `report/verdict/trace/usage`（同源 `_verdict_for`）；② 控制台改"提交→轮询→取结果"；③ `DD_INVESTIGATE_ASYNC` **默认 1**（测试用 conftest 钉成同步，默认值另有回归）；见下 |
 | B3 | 运行日志写放大（40 步 ≤160 KB/次） | ✅ | `8213327` | `DD_RUN_LOG_FULL_STEPS=auto`：成功且已判定只落**骨架**，失败/取消/`needs_human_review` 落全文；`steps_truncated` 如实标注 |
 | B4 | 配置治理：60+ `DD_*` 无启动期校验 | ✅ | `0e785fe` | `data-dog config check` / `make config-check`：未知键、非法取值（会静默回默认）、危险组合；不连库、有错即非零退出 |
 | B5 | meta 测试靠人记得跑 | ✅ | `17f775a` | `readme_counts.py --check` 挂进 pre-commit，且**无条件**跑（漂移常发生在没有 .py 变更的提交里） |
@@ -40,7 +40,7 @@
 
 ## 未落地项：边界与原因
 
-### B2 同步默认翻异步（`DD_INVESTIGATE_ASYNC`）——✅ 三步全部落地
+### B2 同步默认翻异步（`DD_INVESTIGATE_ASYNC`）——✅ 三步全部落地（`d3b5f9d` `38751dc` `473a3d9`）
 
 **第 1 步（后端补载荷）已完成**：新增 `GET /v1/investigations/jobs/{id}/result`，成功后就地取齐
 `report` + `verdict`/`verdict_detail` + `trace` + `usage`，口径与同步响应**同源**
