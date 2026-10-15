@@ -86,6 +86,23 @@ def test_symlink_escape_is_refused(tmp_path):
         src("link.log", [])
 
 
+@pytest.mark.skipif(not hasattr(os, "O_NOFOLLOW"),
+                    reason="POSIX 专用：Windows 无 O_NOFOLLOW，走 resolve 回落（见模块 docstring）")
+def test_posix_refuses_any_symlink_in_the_path(tmp_path):
+    """POSIX 逐段 `openat`+`O_NOFOLLOW`：**任何**符号链接都拒（比"逃逸检查"更严）。"""
+    (tmp_path / "real.log").write_bytes(b"body")
+    os.symlink(tmp_path / "real.log", tmp_path / "link.log")
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "deep.log").write_bytes(b"deep")
+    os.symlink(tmp_path / "sub", tmp_path / "sub_link")
+    src = rawlog.make_rawlog_source(config=_cfg(tmp_path))
+    assert src("real.log", [])[1]["content"] == "body"          # 普通路径照常
+    assert src("sub/deep.log", [])[1]["content"] == "deep"      # 多级普通路径照常
+    for key in ("link.log", "sub_link/deep.log"):
+        with pytest.raises(rawlog.RawLogRefused):
+            src(key, [])
+
+
 def test_oversize_local_is_truncated_and_labelled(tmp_path):
     (tmp_path / "big.log").write_text("x" * 5000, encoding="utf-8")
     out = _resolve(rawlog.make_rawlog_source(config=_cfg(tmp_path, max_bytes=100)),
@@ -171,10 +188,33 @@ def test_http_404_is_not_found(monkeypatch):
     assert out["ok"] is False and out["error"] == "not_found"
 
 
-def test_http_body_at_cap_is_conservatively_truncated(monkeypatch):
-    """取数层读满即止：无法区分"恰好等于上限"与"被截"，故保守标注为可能截断。"""
+def test_http_exactly_at_cap_is_complete(monkeypatch):
+    """恰好等于上限 = 完整（读取按「上限+1」取，拿不到第 cap+1 字节就说明到此为止）。"""
     monkeypatch.setattr("data_dog.data_plane.fetch.safe_request",
                         lambda url, **kw: _StubResp(True, body=b"y" * 100))
     out = _resolve(rawlog.make_rawlog_source(config=_http_cfg()), "rawlog://evt-1")
+    assert out["payload"]["truncated"] is False
+    assert out["payload"]["bytes"] == 100
+
+
+def test_http_over_cap_is_truncated_with_unknown_full_length(monkeypatch):
+    """拿到「上限+1」= 确定被截；对象存储没给完整长度，就如实说"完整长度未知"。"""
+    monkeypatch.setattr("data_dog.data_plane.fetch.safe_request",
+                        lambda url, **kw: _StubResp(True, body=b"y" * 101))
+    out = _resolve(rawlog.make_rawlog_source(config=_http_cfg()), "rawlog://evt-1")
     assert out["payload"]["truncated"] is True
-    assert "可能被截断" in out["payload"]["note"]
+    assert len(out["payload"]["content"]) == 100
+    assert "完整长度未知" in out["payload"]["note"]
+
+
+def test_http_reader_asks_for_one_byte_more_than_the_cap(monkeypatch):
+    """能不能判定截断，取决于读取时多要 1 字节；这条把该约定钉住。"""
+    seen: dict = {}
+
+    def _fake(url, **kw):
+        seen.update(kw)
+        return _StubResp(True, body=b"ok")
+
+    monkeypatch.setattr("data_dog.data_plane.fetch.safe_request", _fake)
+    _resolve(rawlog.make_rawlog_source(config=_http_cfg()), "rawlog://evt-1")
+    assert seen["max_bytes"] == 101

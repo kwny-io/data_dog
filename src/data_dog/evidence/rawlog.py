@@ -27,12 +27,15 @@
 ## 边界（如实写）
 
 - **大小上限** `DD_RAWLOG_MAX_BYTES`（默认 64 KiB）：
-  - 本地：多读 1 字节判断是否超限 → `truncated` 是**确定**的，并给出完整字节数；
-  - http：取数层自己也是"读满即止"，无法区分"恰好等于上限"与"被截断"，故到达上限即按
-    `truncated=True` **保守标注**（宁可说可能被截，不假装完整）。
-- **本地模式的 TOCTOU**：`resolve()` 与 `read` 之间有窗口，同卷上有人能换链就能换内容。
-  本读器假定受控目录**不可被非受信方写入**；要彻底关掉需 `O_NOFOLLOW`+`openat`
-  （POSIX 专用，Windows 上不可移植）——记为边界，不假装解决了。
+  - 两种模式都按「上限 + 1」字节去取 → `len(data) > 上限` 即**确定**被截断；
+    本地还能给出完整字节数，http 只能说"完整长度未知"。
+ - **本地模式的 TOCTOU（按平台分别处理）**：
+   - **POSIX**：逐段 `openat` + `O_NOFOLLOW`（从根 fd 出发，每段都在**已打开**的父目录里开）
+     → 路径上任何符号链接都被拒绝，`resolve()` 与 `read` 之间的换链窗口**关掉**。
+     代价是**比逃逸检查更严**：指向根目录内的符号链接也拒（证据读取这样更安全）。
+     已在 Linux 容器实测：普通/多级路径可读，symlink-final / symlink-escape / symlink-dir 全拒。
+   - **Windows**：没有 `O_NOFOLLOW`/`dir_fd`，退回"`resolve()` + 包含性检查"——
+     **仍有 TOCTOU 窗口**，假定受控目录不可被非受信方写入。平台边界，不假装平台无关。
 - **本模块不做鉴权**：权限来自调用方注入的 `lookup`（按租户查 `raw_log_ref`，配合 RLS）。
   本模块只负责"键 → 正文"。
 - `content_sha256` 是**返回内容**（可能已截断）的摘要，不是整份文件的摘要；
@@ -41,6 +44,8 @@
 from __future__ import annotations
 
 import hashlib
+import os
+import stat
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -91,6 +96,60 @@ def load_config() -> RawLogConfig:
     )
 
 
+def _open_beneath(root: Path, rel: Path):
+    """在受控根目录下打开文件，**尽量关掉 TOCTOU**。
+
+    - **POSIX**：从根 fd 出发逐段 `openat` + `O_NOFOLLOW`（目录段与文件段都不跟随符号链接），
+      路径每一段都是在**已打开**的父目录里打开的——中途把某一段换成符号链接不会生效，
+      `resolve()` 与 `read` 之间那个窗口因此关掉。
+    - **Windows**：没有 `O_NOFOLLOW` / `dir_fd`，退回"`resolve()` 后做包含性检查"。
+      仍有 TOCTOU 窗口——**记为边界**（见模块 docstring），不假装平台无关地解决了。
+
+    Returns: (已打开的文件对象 | None, 完整字节数 | None)；None 表示"这条不存在"。
+    """
+    parts = rel.parts
+    posix_walk = (hasattr(os, "O_NOFOLLOW") and hasattr(os, "O_DIRECTORY")
+                  and os.open in getattr(os, "supports_dir_fd", set()))
+    if posix_walk:
+        try:
+            dir_fd = os.open(str(root), os.O_RDONLY | os.O_DIRECTORY)
+        except FileNotFoundError:
+            return None, None
+        except OSError as e:
+            raise RawLogRefused("受控目录不可打开：" + str(e)) from e
+        try:
+            for part in parts[:-1]:
+                try:
+                    nxt = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                                  dir_fd=dir_fd)
+                except FileNotFoundError:
+                    return None, None
+                except OSError as e:
+                    raise RawLogRefused("路径段不可用（符号链接/权限）：" + repr(part)) from e
+                os.close(dir_fd)
+                dir_fd = nxt
+            try:
+                file_fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW, dir_fd=dir_fd)
+            except FileNotFoundError:
+                return None, None
+            except OSError as e:
+                raise RawLogRefused("存储键指向符号链接或不可读：" + repr(parts[-1])) from e
+            info = os.fstat(file_fd)
+            if not stat.S_ISREG(info.st_mode):      # 目录/设备文件一律不当"日志正文"
+                os.close(file_fd)
+                return None, None
+            return os.fdopen(file_fd, "rb"), info.st_size
+        finally:
+            os.close(dir_fd)
+
+    target = (root / rel).resolve()
+    if target != root and root not in target.parents:
+        raise RawLogRefused("存储键逃出受控目录：" + repr(str(rel)))
+    if not target.is_file():
+        return None, None
+    return target.open("rb"), target.stat().st_size
+
+
 def _read_local(cfg: RawLogConfig, key: str) -> tuple[bytes | None, dict[str, Any]]:
     """目录模式：容器化解析 + 读上限+1 字节（用来判定截断）。"""
     if cfg.base_dir is None:                                  # pragma: no cover - 由调用方保证
@@ -99,15 +158,12 @@ def _read_local(cfg: RawLogConfig, key: str) -> tuple[bytes | None, dict[str, An
     rel = Path(key)
     if rel.is_absolute() or not rel.parts or any(p in ("..", "") for p in rel.parts):
         raise RawLogRefused("非法存储键（拒绝绝对路径与路径穿越）：" + repr(key))
-    target = (root / rel).resolve()
-    if target != root and root not in target.parents:
-        raise RawLogRefused("存储键逃出受控目录：" + repr(key))
-    if not target.is_file():
+    fh, size = _open_beneath(root, rel)
+    if fh is None:
         return None, {}
-    size = target.stat().st_size
-    with target.open("rb") as fh:
+    with fh:
         data = fh.read(cfg.max_bytes + 1)
-    return data, {"source": "file", "bytes": size, "path": str(target)}
+    return data, {"source": "file", "bytes": size, "path": str(root / rel)}
 
 
 def _read_http(cfg: RawLogConfig, key: str) -> tuple[bytes | None, dict[str, Any]]:
@@ -127,13 +183,17 @@ def _read_http(cfg: RawLogConfig, key: str) -> tuple[bytes | None, dict[str, Any
 
 def _payload(event_id: str, key: str, data: bytes, meta: dict[str, Any],
              cfg: RawLogConfig) -> dict[str, Any]:
-    """把读到的字节装成可读证据（含截断标注与内容摘要）。"""
+    """把读到的字节装成可读证据（含截断标注与内容摘要）。
+
+    截断判定统一为 `len(data) > 上限`：读取时都按「上限 + 1」字节去取，所以
+    - 超过上限 → 拿到"上限+1"字节 → **确定**截断；
+    - 不超过 → 服务端/文件就这么多 → **确定**完整。
+    （此前 http 要"保守标注"，是因为传输层硬编码只读 64 KiB、无法区分；
+    `data_plane/fetch.py` 已把 `max_bytes` 贯通到传输层，这个不确定性没了。）
+    """
     truncated = len(data) > cfg.max_bytes
     body = data[: cfg.max_bytes]
     full = meta.get("bytes")
-    if full is None and len(body) >= cfg.max_bytes:
-        # http：取数层读满即止 → 无法区分"恰好等于上限"与"被截"，保守按可能截断处理
-        truncated = True
     out: dict[str, Any] = {
         "event_id": event_id,
         "key": key,
@@ -146,7 +206,7 @@ def _payload(event_id: str, key: str, data: bytes, meta: dict[str, Any],
     if truncated:
         out["note"] = ("正文超过上限 " + str(cfg.max_bytes) + " 字节，已截断（完整 "
                        + str(full) + " 字节）") if full is not None else (
-            "正文到达读取上限 " + str(cfg.max_bytes) + " 字节，可能被截断")
+            "正文超过上限 " + str(cfg.max_bytes) + " 字节，已截断（完整长度未知）")
     if meta.get("url"):
         out["url"] = meta["url"]
     return out
