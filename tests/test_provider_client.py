@@ -153,12 +153,17 @@ def test_llm_latency_histogram_counts_both_success_and_failure(monkeypatch):
     from data_dog.core import metrics
 
     def _count(outcome: str) -> float:
+        """按 vendor+outcome **求和**（同一 vendor 可能已有多个 model 序列——
+
+        取"第一条匹配行"会在全量跑时因序列顺序不同而随机失败，这里不依赖顺序）。
+        """
+        total = 0.0
         for line in generate_latest(metrics.registry).decode().splitlines():
             if (line.startswith("data_dog_llm_request_duration_seconds_count")
                     and 'vendor="deepseek"' in line
                     and f'outcome="{outcome}"' in line):
-                return float(line.rsplit(" ", 1)[1])
-        return 0.0
+                total += float(line.rsplit(" ", 1)[1])
+        return total
 
     ok0, timeout0 = _count("ok"), _count("timeout")
 
