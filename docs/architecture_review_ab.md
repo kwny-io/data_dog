@@ -237,21 +237,15 @@ A/B 各项的证据此前都是**例子测试**（"这几个路径被拒了"）�
 
 3. `make cov-gate` / `make cov-gate-pg` 把两条命令固定下来（不靠记忆敲参数）。
 
-**未落地的一步（诚实标注）**：CI 里的调用**还没改**——`.github/workflows/ci.yml` 此刻正被
-另一个窗口编辑（Playwright e2e 腿，+40 行）；在同一个文件里只提交我这半边的改动，无法保证不夹带
-对方的在途改动。待该文件提交后接上这两处（postgres 腿本来就在 CI 里跑 `-m postgres`，加 `--cov` 即可）：
+**已接线**（`211c5a6`）：默认腿 `--min 70`；postgres 腿加 `--cov` 并新增 PG-only 文件门禁
+（`--only storage/partitioning.py,state/pg.py --no-allow --min 80`）。
 
-```diff
--      - name: 单模块覆盖率下限（60%）
--        run: python scripts/cov_gate.py --json coverage.json --min 60
-+      - name: 单模块覆盖率下限（70%）
-+        run: python scripts/cov_gate.py --json coverage.json --min 70
-+      - name: 单模块覆盖率下限（PG-only 文件，80%）
-+        run: |
-+          pytest -q -m postgres --cov=data_dog --cov-report=json:coverage-pg.json
-+          python scripts/cov_gate.py --json coverage-pg.json \
-+            --only storage/partitioning.py,state/pg.py --no-allow --min 80
-```
+提交方式值得记一笔：`.github/workflows/ci.yml` 当时**正被另一个窗口编辑**（Playwright e2e 腿，
++40 行），直接提交该文件会夹带对方在途改动；于是用 git plumbing
+（`read-tree` / `update-index` / `commit-tree` / `update-ref`，带旧值 CAS）构造
+"HEAD + 仅本补丁"的提交，全程不碰工作区与真实 index，事后把同样补丁叠加回工作区文件。
+验收：`git diff -- .github/workflows/ci.yml` 只剩对方那 40 行新增、**零删除**（我的补丁没被顶掉），
+对方的暂存文件也原样保留。
 
 ## 怎么复核
 
