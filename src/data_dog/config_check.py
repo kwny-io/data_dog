@@ -141,6 +141,12 @@ def check(environ: dict[str, str] | None = None) -> dict[str, Any]:
         warn("DD_API_KEY", "鉴权完全没配：端口可达 = 任何人可读写（数据面与运维面都裸奔）",
              "配 DD_API_KEY（全局）或 DD_TENANT_KEYS（租户绑定）")
 
+    if (env.get("DD_RAWLOG_BASE_DIR", "").strip()
+            and env.get("DD_RAWLOG_BASE_URL", "").strip()):
+        err("DD_RAWLOG_BASE_DIR",
+            "与 DD_RAWLOG_BASE_URL **同时配置**：rawlog 正文存放位置必须二选一",
+            "只留一个（本地受控目录 或 对象存储前缀）；同时配会让读取直接失败关闭")
+
     async_on = _truthy(env, "DD_INVESTIGATE_ASYNC")
     backend = env.get("DD_STATE_BACKEND", "").strip().lower()
     if async_on and backend in ("", "memory"):

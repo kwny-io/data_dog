@@ -9,7 +9,8 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from ... import settings
+from ... import audit, settings
+from ...evidence.rawlog import make_rawlog_source
 from ...evidence.refs import EvidenceResolver, make_candidate_metricwin_source
 from ...storage import models as M
 from ...storage import repository as repo
@@ -19,6 +20,25 @@ from ..evidence import RepoEvidenceBridge
 from ..runtime import _DEFAULT_PAGE_SIZE, _MAX_PAGE_SIZE, _STARTED_AT, _state
 
 router = APIRouter()
+
+
+def _audit_rawlog_reads(tenant: str, candidate_id: str, out: dict[str, Any]) -> None:
+    """读**原始日志正文**必须留痕：谁、什么时候、读了哪几条事件。
+
+    只在真的读到正文时记一条（解析失败的尝试不记，否则审计会被噪音灌满）；
+    审计写失败不影响业务（`audit.record` 自身不抛）。actor 指纹拿不到——本端点用的是
+    `require_tenant`（只给租户），没换成 ops 作用域就是为了**不扩大**这个端点的读取权限；
+    request_id / trace_id 由审计层自动带上，可回到访问日志对账。
+    """
+    event_ids = [str((r.get("ref") or {}).get("authority", ""))
+                 for r in out.get("results", [])
+                 if r.get("ok") and r.get("source") == "rawlog"]
+    event_ids = [e for e in event_ids if e]
+    if not event_ids:
+        return
+    audit.record(action="rawlog.read", outcome="ok", tenant_id=tenant,
+                 target=f"/v1/candidates/{candidate_id}/refs",
+                 detail={"candidate_id": candidate_id, "event_ids": event_ids})
 
 
 @router.get("/v1/summary", tags=["query"])
@@ -154,14 +174,31 @@ def resolve_candidate_refs(
         def _lookup(cid: str) -> dict[str, Any] | None:
             return repo.get_candidate(s, cid, tenant_id=tenant)
 
+        def _rawlog_lookup(event_id: str) -> str | None:
+            """`rawlog://<event_id>` → 本租户该事件的 `raw_log_ref`。
+
+            按 (tenant_id, event_id) 查，跨租户查不到 → `not_found`（**不泄露存在性**）；
+            引用为空也按"没有这条"处理，不猜路径。
+            """
+            row = (s.query(M.TelemetryEventRow)
+                    .filter(M.TelemetryEventRow.tenant_id == tenant,
+                            M.TelemetryEventRow.event_id == event_id)
+                    .order_by(M.TelemetryEventRow.created_day.desc())
+                    .first())
+            return (row.raw_log_ref or None) if row is not None else None
+
         resolver = EvidenceResolver()
         resolver.replace_source(
             "metricwin", make_candidate_metricwin_source(_lookup))
+        # rawlog：默认源是**真读正文**（evidence/rawlog.py，未配置则失败关闭）；
+        # 这里只换"去哪找存储键"——解析/权限/完整性/有效期逻辑完全不变。
+        resolver.replace_source("rawlog", make_rawlog_source(_rawlog_lookup))
         refs = list(cand.get("evidence_refs", [])) or [
             f"metricwin://{candidate_id}"]
         out = resolver.resolve_all(refs)
 
     out["candidate_id"] = candidate_id
+    _audit_rawlog_reads(tenant, candidate_id, out)
     return out
 @router.get("/v1/reports", tags=["query"])
 def list_reports(

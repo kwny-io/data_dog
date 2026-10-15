@@ -28,7 +28,7 @@
 | `/v1/candidates` | GET | 查已落库候选（可按设备/部件过滤） |
 | `/v1/candidates/{id}` | GET | 候选项详情 |
 | `/v1/candidates/{id}/evidence` | GET | Agent 所见证据 |
-| `/v1/candidates/{id}/refs` | GET | 结论所挂证据引用 |
+| `/v1/candidates/{id}/refs` | GET | 结论所挂证据引用（解析成**可读证据**；`rawlog://` 真读正文，见下） |
 | `/v1/alerts` | GET | 查告警 |
 | `/v1/outbox` | GET | 查待投递队列 |
 | `/v1/reports` | GET | 分页列历史报告 |
@@ -40,6 +40,34 @@
 | `/v1/knowledge/documents` | POST/GET | 导入 / 列出用户厂商文档 |
 | `/v1/knowledge/search` | GET | 词法检索文档切片 |
 | `/v1/knowledge/documents/{id}` | DELETE | 删除文档及切片 |
+
+### 原始日志正文读取（`rawlog://`）
+
+`GET /v1/candidates/{id}/refs` 会把 `evidence_refs` 里的不透明引用解析成可读证据；其中
+`rawlog://<event_id>` 以前是**mock 摘要**（`digest: sha256:mock`）——ref 能解析、内容却是假的。
+现在它**真读**：按 `(tenant_id, event_id)` 查出该事件的 `raw_log_ref`，再按下面的配置取正文。
+
+| 环境变量 | 含义 | 默认 |
+|---|---|---|
+| `DD_RAWLOG_BASE_DIR` | 正文存放的**受控目录**（与下一项**互斥**） | 空 = 不启用 |
+| `DD_RAWLOG_BASE_URL` | 正文存放的 http(s) 对象存储前缀（互斥） | 空 = 不启用 |
+| `DD_RAWLOG_MAX_BYTES` | 单条正文读取上限（超限**截断并标注**） | 65536 |
+| `DD_RAWLOG_TIMEOUT_S` | http 取数超时 | 5.0 |
+| `DD_RAWLOG_ALLOW_PRIVATE` | 是否允许取数指向私网/本机 | `0`（失败关闭） |
+
+**边界（如实写）**：
+
+- **两者都不配 = 失败关闭**：解析返回 `execution_failed`，不退回 mock、不猜路径；
+  两者同时配 → 同样失败关闭，且 `data-dog config check` 会报错；
+- 目录模式做**容器化校验**（拒绝绝对路径、`..`、符号链接逃逸）；但 `resolve()` 与 `read` 之间
+  仍有 TOCTOU 窗口——假定该目录**不可被非受信方写入**；
+- http 模式走 `data_plane.fetch.safe_request`（逐跳复验重定向 + 连接钉在已校验 IP），
+  默认**不允许私网**；取数层自身"读满即止"，故到达上限时按**可能被截断**保守标注；
+- **读正文留痕**：每成功读到正文记一条审计（`action=rawlog.read`，含候选与事件 id），
+  可用 `GET /v1/audit?action=rawlog.read` 查；actor 指纹为空（该端点用的是租户作用域，
+  没有换成 ops 作用域就是为了不扩大它的读取权限），可用 request_id/trace_id 回到访问日志对账；
+- `content_sha256` 是**返回内容**（可能已截断）的摘要；`EvidenceResolver` 的 `expected_digest`
+  校验的是整个 payload，两者互补、不要混用。
 
 ### 存活 vs 就绪，为什么要分开
 

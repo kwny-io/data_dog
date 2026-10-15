@@ -101,7 +101,12 @@ def parse_ref(raw: str) -> ParsedRef:
     # 本模块不做路径拼接，这里再挡一道是为了让"看起来像路径"的输入不被误当成合法引用。
     if any(seg in (".", "..") for seg in path):
         raise ValueError(f"evidence ref 含非法路径段（穿越）: {raw!r}")
-    return ParsedRef(scheme=scheme, authority=m.group("authority"), path=path)
+    # authority 也挡住 . / ..：`rawlog://../x` 的 authority 就是 "../" 的起点。
+    # 数据源侧还有容器化校验（见 evidence/rawlog.py），这里是**语法层**的第一道闸。
+    authority = m.group("authority")
+    if authority in (".", ".."):
+        raise ValueError(f"evidence ref 的 authority 非法（穿越）: {raw!r}")
+    return ParsedRef(scheme=scheme, authority=authority, path=path)
 
 
 def is_valid_ref(raw: str) -> bool:
@@ -144,7 +149,7 @@ class EvidenceResolver:
         # 应返回 unavailable，而不是悄悄回退到内置源。
         self._sources: dict[str, SourceFn] = sources if sources is not None else {
             "metricwin": _metricwin_source,
-            "rawlog": _rawlog_source,
+            "rawlog": _default_rawlog_source(),
             "vendordoc": _vendordoc_source,
             "replay": _replay_source,
         }
@@ -272,13 +277,16 @@ def make_candidate_metricwin_source(
     return _src
 
 
-def _rawlog_source(authority: str, path: list[str]) -> tuple[bool, Any]:
-    """`rawlog://<event_id>` —— 原始日志正文（外置）最小摘要。"""
-    known = {"opaque-ref", "e1", "e2", "e3", "e4"}
-    if authority not in known:
-        return False, None
-    return True, {"event_id": authority, "digest": "sha256:mock",
-                  "note": "原始日志正文外置（mock 摘要）"}
+def _default_rawlog_source() -> SourceFn:
+    """默认 `rawlog://` 源 = **真实读取**（见 `evidence/rawlog.py`）。
+
+    这里曾经是 mock（固定 authority 白名单 + `digest: "sha256:mock"`）：ref 能解析、权限能校验，
+    **内容却是假的**。现在改成真实源，且"没配存放位置"是**失败关闭**（`execution_failed`），
+    不再悄悄退回假数据。
+    """
+    from .rawlog import make_rawlog_source
+
+    return make_rawlog_source()
 
 
 def _vendordoc_source(authority: str, path: list[str]) -> tuple[bool, Any]:

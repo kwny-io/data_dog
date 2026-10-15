@@ -64,8 +64,29 @@ def test_parsed_ref_roundtrip():
 
 # ---------- 2. 受控解析 ----------
 
+def _rawlog_stub(authority: str, path: list[str]):
+    """rawlog 解析用的桩。
+
+    `rawlog://` 的**默认源现在是真读正文**（`evidence/rawlog.py`），没配存放位置就失败关闭；
+    本文件测的是**解析器机制**（有效期/完整性/批量），所以显式注入桩，
+    不再依赖"默认源恰好返回 mock 内容"。默认源自身的真实读取与失败关闭由
+    `tests/test_rawlog_source.py` 单独钉住。
+    """
+    return True, {"event_id": authority}
+
+
+def test_default_rawlog_source_fails_closed_when_unconfigured(monkeypatch):
+    """默认 rawlog 源是**真读**：没配存放位置 → execution_failed，**不再返回 mock 内容**。"""
+    monkeypatch.delenv("DD_RAWLOG_BASE_DIR", raising=False)
+    monkeypatch.delenv("DD_RAWLOG_BASE_URL", raising=False)
+    out = default_resolver().resolve("rawlog://e1")
+    assert out["ok"] is False and out["error"] == "execution_failed"
+    assert "未配置" in str(out.get("detail", ""))
+
+
 def test_resolve_ok_and_payload():
     res = default_resolver()
+    res.replace_source("rawlog", _rawlog_stub)
     out = res.resolve("rawlog://e1")
     assert out["ok"] is True
     assert out["source"] == "rawlog"
@@ -139,7 +160,7 @@ def test_digest_mismatch_is_contract_mismatch():
 # ---------- 4. 有效期（注入时钟） ----------
 
 def test_not_expired_passes():
-    res = EvidenceResolver(ttl_seconds=100, clock=lambda: 1000.0)
+    res = EvidenceResolver({"rawlog": _rawlog_stub}, ttl_seconds=100, clock=lambda: 1000.0)
     out = res.resolve("rawlog://e1", issued_at=950.0)      # 50s 前签发
     assert out["ok"] is True
 
@@ -151,7 +172,7 @@ def test_expired_is_not_found():
 
 
 def test_ttl_disabled_skips_expiry():
-    res = EvidenceResolver(ttl_seconds=0, clock=lambda: 10**9)
+    res = EvidenceResolver({"rawlog": _rawlog_stub}, ttl_seconds=0, clock=lambda: 10**9)
     out = res.resolve("rawlog://e1", issued_at=0.0)
     assert out["ok"] is True
 
@@ -160,6 +181,7 @@ def test_ttl_disabled_skips_expiry():
 
 def test_resolve_all_preserves_order_and_isolates_failures():
     res = default_resolver()
+    res.replace_source("rawlog", _rawlog_stub)
     out = res.resolve_all(["rawlog://e1", "bogus", "vendordoc://motor-x2-thermal"])
     assert out["ok"] is True
     assert out["total"] == 3

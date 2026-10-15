@@ -902,6 +902,49 @@ def run_log_full_steps() -> str:
     return v if v in ("auto", "always", "never") else "auto"
 
 
+# ---------------------------------------------------------------- 原始日志正文读取
+# `rawlog://<event_id>` 的正文存放位置：**目录**与**对象存储**二选一（互斥，由
+# `evidence/rawlog.py` 与 `data-dog config check` 双向把关）。两者都不配 = 失败关闭，
+# 不会退回到任何 mock 数据。
+
+
+def rawlog_base_dir() -> str:
+    """原始日志正文的**受控目录**（DD_RAWLOG_BASE_DIR，默认空 = 不启用本地读取）。
+
+    目录内的相对键由 `telemetry_events.raw_log_ref` 给出；键在目录内解析（拒绝绝对路径、
+    `..`、符号链接逃逸）。假定该目录**不可被非受信方写入**（本地 TOCTOU 见 rawlog.py 边界）。
+    """
+    return _get("DD_RAWLOG_BASE_DIR", default="").strip()
+
+
+def rawlog_base_url() -> str:
+    """原始日志正文的 http(s) 对象存储前缀（DD_RAWLOG_BASE_URL，默认空）。
+
+    取数走 `data_plane.fetch.safe_request`（逐跳复验重定向 + 连接钉在已校验 IP 上），
+    默认**不允许私网地址**——要指内网对象存储得显式开 DD_RAWLOG_ALLOW_PRIVATE=1。
+    """
+    return _get("DD_RAWLOG_BASE_URL", default="").strip()
+
+
+def rawlog_max_bytes() -> int:
+    """单条原始日志正文的读取上限（DD_RAWLOG_MAX_BYTES，默认 64 KiB）。
+
+    默认与取数层 `_MAX_BYTES` 同量级：http 模式下取数层自身读满即止，配得比它大也只是
+    "可能被截断"的保守标注（见 rawlog.py）。超限**截断并显式标注**，不是静默丢弃。
+    """
+    return max(1, _get_int("DD_RAWLOG_MAX_BYTES", default=65536))
+
+
+def rawlog_timeout_s() -> float:
+    """原始日志正文取数超时（DD_RAWLOG_TIMEOUT_S，默认 5s）。"""
+    return max(0.1, _get_float("DD_RAWLOG_TIMEOUT_S", default=5.0))
+
+
+def rawlog_allow_private() -> bool:
+    """是否允许 rawlog 取数指向私网/本机（DD_RAWLOG_ALLOW_PRIVATE，默认 False）。"""
+    return _get_bool("DD_RAWLOG_ALLOW_PRIVATE", default=False)
+
+
 def investigate_workers() -> int:
     """异步调查 worker 池大小（进程内线程数）。"""
     return max(1, _get_int("DD_INVESTIGATE_WORKERS", default=4))

@@ -56,6 +56,19 @@ def test_dangerous_combinations_are_warnings_not_errors():
     assert report["ok"], "危险组合不该是 error"
 
 
+def test_rawlog_two_locations_at_once_is_an_error():
+    """rawlog 正文存放位置必须二选一：同时配 = 读取失败关闭 → 部署前就该红灯。"""
+    report = check({"DD_RAWLOG_BASE_DIR": "/data/rawlog",
+                    "DD_RAWLOG_BASE_URL": "https://cdn.example.com/logs"})
+    assert not report["ok"]
+    assert "DD_RAWLOG_BASE_DIR" in _keys(report, "errors")
+
+
+def test_rawlog_single_location_is_clean():
+    report = check({"DD_RAWLOG_BASE_DIR": "/data/rawlog"})
+    assert report["ok"], report
+
+
 def test_clean_config_has_no_findings():
     report = check({"DD_API_KEY": "k", "DD_SERVICE_PORT": "8000",
                     "DD_STATE_BACKEND": "postgres",
