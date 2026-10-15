@@ -239,8 +239,18 @@ def make_rawlog_source(lookup: Lookup | None = None, *,
         if key is None or not str(key).strip():
             return False, None
         key = str(key).strip()
-        data, meta = (_read_local(cfg, key) if cfg.base_dir is not None
-                      else _read_http(cfg, key))
+        try:
+            data, meta = (_read_local(cfg, key) if cfg.base_dir is not None
+                          else _read_http(cfg, key))
+        except RawLogRefused:
+            raise
+        except (OSError, ValueError, UnicodeError) as e:
+            # **性质测试抓到的真缺口**：含 NUL（和孤立代理项、超长路径）的键在文件系统层抛的是
+            # `ValueError: stat: embedded null character in path` 之类——不是我们约定的
+            # RawLogRefused。手写用例想得到 `../../`，想不到 `"\x00"`。
+            # 统一收敛：调用方只认"键不可用"这一种失败，别让它冒成 500 / execution_failed。
+            raise RawLogRefused(
+                "存储键无法用于读取（" + type(e).__name__ + ": " + str(e) + "）") from e
         if data is None:
             return False, None
         return True, _payload(authority, key, data, meta, cfg)

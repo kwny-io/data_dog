@@ -38,6 +38,9 @@ dev = [
     # pyproject 的解析用它（scripts/gen_requirements.py、scripts/readme_counts.py、
     # tests/test_project_meta.py），故在 3.10 上补 tomli 兜底。
     "tomli>=2.0; python_version < '3.11'",
+    # 性质测试（hypothesis）：把安全边界的断言从"我举了几个例子"换成"对所有输入都成立"。
+    # 同一份代码每次跑同一批输入（用例里 derandomize=True），不破坏"全离线确定性"。
+    "hypothesis>=6.100",
     # 内存版 Redis：让 redis 后端的用例**离线**可跑（不装则那 1 项 skip）。
     # 项目主打"全离线确定性"，测试依赖也一并给全，别让默认套件留残缺。
     "fakeredis>=2.0",

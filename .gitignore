@@ -27,6 +27,8 @@ __pycache__/
 build/
 dist/
 .pytest_cache/
+# hypothesis 的性质测试缓存/失败案例库（本地生成，不提交）
+.hypothesis/
 .venv/
 venv/
 

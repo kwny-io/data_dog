@@ -172,6 +172,26 @@ retention 自动分流到 `DROP PARTITION`。测试含 `-m postgres` 真库往�
 | `cdb13fd` | 控制台没消费 `/refs`（引用只是字符串数组） | 候选详情加「证据引用」面板：**懒解析**（点按钮才请求，因读正文会留审计）、展开看正文/截断/摘要、失败显示错误码；devmock/fixtures 的 `evidence://` 换成真 scheme |
 | `e434e91` | knowledge flake 只有一句"无响应"，无法定位 | 握手改用独立启动预算（`initialize` 180s，其余 60s——负载重时的冷启动此前会被误判挂起并 kill）；stderr 落临时文件；报错带上"看门狗 kill/自行退出 + 退出码 + stderr 尾巴"。**未能复现**原 flake，故只声称"可诊断 + 消除负载敏感性" |
 
+## 性质测试：安全边界的"全称命题"（不在 A/B 清单内）
+
+A/B 各项的证据此前都是**例子测试**（"这几个路径被拒了"）。例子能证明"有防护"，证明不了
+"没有缺口"——攻击面恰好是没人想到的输入。故给四处安全边界补了性质测试
+（`tests/test_properties_security.py`，hypothesis，`derandomize=True` 保持确定性与离线）：
+
+| 性质（全称命题） | 覆盖的边界 |
+|---|---|
+| 任意文本 → 解析器**永不抛**，失败必须收敛成结构化错误码 | 引用解析对外契约 |
+| `is_valid_ref` 与 `parse_ref` 完全同口径；白名单外 scheme 一律不合法 | 引用语法（防绕过） |
+| 任意存储键 → rawlog 目录读取器：或读到**根内**文件、或被显式拒绝；**根外哨兵内容永不出现** | 容器化（防路径穿越） |
+| 任意环境变量字典 → 配置体检与渲染都**不抛**，结构始终成立 | 部署前体检（崩了没人用） |
+| 任意浮点时间 → `day_of` 单调且 `[d*86400,(d+1)*86400)` 恰好包住输入 | 分区键算术（差一就落错分区） |
+| 任意标识符 → 分区 DDL 要么被白名单接受、要么 `ValueError`，**绝不**拼进 SQL | DDL 注入 |
+
+**当场抓到一个真缺口**（这正是补它的理由）：存储键里含 NUL 字节（`"\x00"`）时，文件系统层抛的是
+`ValueError: stat: embedded null character in path`，不是约定的 `RawLogRefused`——手写用例想得到
+`../../`，想不到 NUL。已收敛：`rawlog.make_rawlog_source` 把 `OSError/ValueError/UnicodeError`
+统一映射成 `RawLogRefused`（附原因），不再让非法键冒成 500。
+
 ## 怎么复核
 
 ```bash
