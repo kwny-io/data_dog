@@ -1,0 +1,60 @@
+{{- /*
+  数据保留清理 CronJob（④）——与分区维护**刻意分开**。
+  为什么分开：分区维护是**结构变更（DDL）**，保留清理是**删数据**。塞进同一个定时任务，
+  出问题时没法只暂停其中一个（scripts/partition_telemetry.py 的模块注释写了同一理由）。
+
+  **默认 dry-run**：定时任务里"默认删数据"是不可接受的默认值——要让集群真删，必须把
+  `retention.dryRun` 显式改成 false。这条不变量有测试盯着（tests/test_helm_partition.py）。
+*/ -}}
+{{- if .Values.retention.enabled }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "data-dog.fullname" . }}-retention
+  labels:
+    {{- include "data-dog.labels" . | nindent 4 }}
+    app.kubernetes.io/component: retention
+spec:
+  schedule: {{ .Values.retention.schedule | quote }}
+  concurrencyPolicy: {{ .Values.retention.concurrencyPolicy }}
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: {{ .Values.retention.backoffLimit }}
+      template:
+        metadata:
+          labels:
+            {{- include "data-dog.selectorLabels" . | nindent 12 }}
+            app.kubernetes.io/component: retention
+        spec:
+          restartPolicy: Never
+          serviceAccountName: {{ include "data-dog.serviceAccountName" . }}
+          {{- with .Values.imagePullSecrets }}
+          imagePullSecrets:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            fsGroup: 10001
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: retention
+              image: {{ include "data-dog.image" . }}
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              command: ["python", "-m", "data_dog.retention"]
+              args:
+                {{- if .Values.retention.dryRun }}
+                - "--dry-run"
+                {{- end }}
+              envFrom:
+                {{- include "data-dog.envFrom" . | nindent 16 }}
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop: ["ALL"]
+              resources:
+                {{- toYaml .Values.retention.resources | nindent 16 }}
+{{- end }}

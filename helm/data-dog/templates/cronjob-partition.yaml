@@ -1,0 +1,63 @@
+{{- /*
+  分区维护 CronJob（A9）——分区表的"生产最后一公里"。
+  为什么必须有它：以日桶为分区键时，跨月那一刻若没有对应分区，写入直接报
+  `no partition of relation ... found for row`，**在出错前没有任何信号**。
+  CLI（scripts/partition_telemetry.py）能做这件事，但它得**有人按时运行**。
+  幂等：已存在的分区不会被重建（CREATE TABLE IF NOT EXISTS ... PARTITION OF）。
+
+  为什么不塞进 apply 时的 Helm hook：DDL 要在**稳态**每天跑，不是每次发布跑一次。
+  与应用侧的 DD_PARTITION_AUTO_ENSURE 也不重叠：那个是"副本启动时补一次"，这个是集群层兜底，
+  两边都关掉才会出现跨月无分区。
+*/ -}}
+{{- if .Values.partition.enabled }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "data-dog.fullname" . }}-partition
+  labels:
+    {{- include "data-dog.labels" . | nindent 4 }}
+    app.kubernetes.io/component: partition
+spec:
+  schedule: {{ .Values.partition.schedule | quote }}
+  concurrencyPolicy: {{ .Values.partition.concurrencyPolicy }}
+  startingDeadlineSeconds: {{ .Values.partition.startingDeadlineSeconds }}
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: {{ .Values.partition.backoffLimit }}
+      template:
+        metadata:
+          labels:
+            {{- include "data-dog.selectorLabels" . | nindent 12 }}
+            app.kubernetes.io/component: partition
+        spec:
+          restartPolicy: Never
+          serviceAccountName: {{ include "data-dog.serviceAccountName" . }}
+          {{- with .Values.imagePullSecrets }}
+          imagePullSecrets:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            fsGroup: 10001
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: partition
+              image: {{ include "data-dog.image" . }}
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              command: ["python", "scripts/partition_telemetry.py"]
+              args:
+                - "--ensure-months"
+                - {{ .Values.partition.ensureMonths | quote }}
+              envFrom:
+                {{- include "data-dog.envFrom" . | nindent 16 }}
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop: ["ALL"]
+              resources:
+                {{- toYaml .Values.partition.resources | nindent 16 }}
+{{- end }}

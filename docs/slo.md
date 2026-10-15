@@ -203,6 +203,8 @@ loadgen 客户端实测能推 **997 req/s**，故客户端也不是瓶颈）。
 | `DataDogStreamDown` | `max(data_dog_stream_up)` | = 0 持续 5m | critical | 仅当 `stream.enabled=true` 才渲染（否则 API 的 `stream_up=0` 会永久误报） |
 | `DataDogStreamDropped` | `data_dog_stream_dropped_total` 的 10m 增量 | > 0 | warning | 背压证据：丢的是**消息**，不是延迟 |
 | `DataDogReplicationLagHigh` | `max by (from,to) (data_dog_replication_lag_seconds)` | > 60s 持续 10m | warning | §7：跨地域多活定位 **RPO>0**；单区域没有该 series，规则自然不触发 |
+| `DataDogPartitionHorizonLow` | `min(data_dog_partition_end_timestamp_seconds{kind="future"}) - time()` | < `prometheusRule.partitionHorizonSeconds`（默认 14 天）持续 10m | critical | A9 分区表：跨月没有分区 → 写入直接报 `no partition of relation ... found for row`。用**时间戳减 time()**，避免 Gauge 陈旧导致规则失灵 |
+| `DataDogPartitionHorizonUnknown` | `absent(data_dog_partition_end_timestamp_seconds{kind="future"})` | 持续 1h | warning | 该组只在 `partition.enabled=true` 时渲染；此时**没有样本**会让上面那条变成死规则（Prometheus 对空向量求值不报错）。比"有效期不足"更早的警报 |
 
 **诚实边界**：
 
@@ -210,6 +212,8 @@ loadgen 客户端实测能推 **997 req/s**，故客户端也不是瓶颈）。
   **工程阈值**（防"文档没写、但线上确实会出事"的那类）。**没有任何一条规则能替代容量规划。**
 - **规则不带租户标签**：所有表达式都是全局聚合（避免标签基数爆炸）。要定位"是哪个租户"，
   得查安全审计与调查运行日志（`GET /v1/audit`、`GET /v1/investigations/runs`），不在指标里。
+- **分区组按部署形态渲染**：`DataDogPartitionHorizonLow/Unknown` 只在 `partition.enabled=true`
+  的部署里渲染——没有分区表的部署（SQLite、未转换的普通表）根本没有这个样本，渲染出来就是永久误报。
 - **渲染校验需要 `helm`**：本仓不内置 helm 二进制，`make helm-lint` / `make verify-chart`
   需要本机或 CI 安装（CI 由 `azure/setup-helm` 提供）。另有一条**不依赖 helm** 的 meta 测试
   [`tests/test_helm_alerts.py`](../tests/test_helm_alerts.py)：规则里出现的每个 `data_dog_*`

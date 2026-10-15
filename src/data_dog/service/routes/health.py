@@ -17,6 +17,7 @@ from ...storage import migrations
 from ...storage import models as M
 from ...storage import repository as repo
 from ...storage.db import session_scope
+from ..partition_maintenance import report_horizon as _report_partition_horizon
 from ..runtime import (
     _STARTED_AT,
     _VERSION,
@@ -146,6 +147,9 @@ def metrics_endpoint() -> Response:
                 repo.count_rows(s, M.InvestigationJobRow, status="running"))
             metrics.db_rows.labels(table="audit_log").set(
                 repo.count_rows(s, M.AuditLogRow))
+            # A9：分区覆盖到什么时候。**每次抓取都重算**——Gauge 会陈旧，而"还有多久到期"
+            # 这件事必须随真实时间走（Prometheus 侧用 - time()，见 metrics.py）。
+            _report_partition_horizon(s)
     except Exception as e:                        # noqa: BLE001
         _log.warning("采集库内行数失败", extra={
             "error": f"{type(e).__name__}: {e}"})

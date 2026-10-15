@@ -228,7 +228,9 @@ def session_scope(url: str | None = None, *, tenant_id: str | None = None,
     故这里给出一条**显式、可审计**的系统扫描通道：`system=True` 时置
     `app.system_scan='on'`（同样事务作用域），策略侧多一个 `OR` 分支放行。
     三条纪律：
-      - **只给后台扫描用**（请求路径绝不传 `system=True`；全仓仅 2 处调用，可 grep）；
+      - **只给后台/系统级动作用**（请求路径绝不传 `system=True`）——全仓调用点可 grep
+        `session_scope(system=True)`，每一处都应能说清"为什么这里没有租户"（后台扫描、
+        保留清理、租户数据删除、分区维护、探针里的运维口径计数）；
       - 扫描**只负责找出"哪条要处理"**，逐条处理仍走 `session_scope(tenant_id=...)`，
         写入也照旧带该行的 tenant_id；
       - 不设上下文时**默认仍然是零行**（失败关闭不放松）。

@@ -38,6 +38,7 @@ from ..state import get_state_store
 from ..storage import migrations
 from ..storage.db import reset_tenant_context, set_tenant_context
 from .deps import _api_key_ok, _error_body, _extract_api_key
+from .partition_maintenance import ensure_if_enabled as _ensure_partitions_if_enabled
 from .routes import all_routers
 from .runtime import (
     _PUBLIC_PATHS,
@@ -75,6 +76,13 @@ async def _lifespan(app: FastAPI):
     except Exception as e:                           # noqa: BLE001
         # 迁移失败不阻止启动：由 /readyz 报未就绪，编排层据此摘流量
         _log.error("迁移失败（服务仍启动，/readyz 将报未就绪）",
+                   extra={"error": f"{type(e).__name__}: {e}"})
+    try:
+        # A9：分区有效期。默认关（结构变更由集群 CronJob 做）；开了就先补齐未来 N 个月。
+        # 失败不阻止启动，但必须记 error——跨月写入会直接报 no partition of relation。
+        _ensure_partitions_if_enabled()
+    except Exception as e:                           # noqa: BLE001
+        _log.error("分区有效期补齐失败（跨月写入可能报 no partition of relation）",
                    extra={"error": f"{type(e).__name__}: {e}"})
     try:
         _start_stream_if_enabled()

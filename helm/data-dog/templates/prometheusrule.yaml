@@ -165,4 +165,38 @@ spec:
           annotations:
             summary: "跨区域复制延迟 > 60s（from/to 见标签）"
             description: "RPO > 0 是应用层近似的已知边界；持续落后说明链路或上游写入压力异常。"
+    {{- if .Values.partition.enabled }}
+    # ---- 存储结构：A9 分区有效期（只在声明了分区维护的部署里断言）----
+    - name: data-dog.storage
+      rules:
+        - alert: DataDogPartitionHorizonLow
+          # 用**时间戳减 time()**，而不是应用上报的"还剩几天"：Gauge 会陈旧，
+          # 时间戳由 Prometheus 自己推进，应用不再重算也照样会响（见 core/metrics.py）。
+          expr: |
+            (min(data_dog_partition_end_timestamp_seconds{kind="future"}) - time())
+              < {{ .Values.prometheusRule.partitionHorizonSeconds }}
+          for: 10m
+          labels:
+            severity: critical
+          annotations:
+            summary: "telemetry_events 分区有效期不足（< 14 天）"
+            description: >-
+              分区覆盖的最远上界已不足 14 天。到期后**写入会直接失败**：
+              no partition of relation "telemetry_events" found for row。
+              处置：跑 python scripts/partition_telemetry.py --ensure-months 3（幂等），
+              并检查 partition CronJob 是否被停用/失败。
+        - alert: DataDogPartitionHorizonUnknown
+          # 比"有效期不足"更早的警报：分区开着，却一个样本都没有。
+          # 此时上面的规则对空向量求值**永不触发**——Prometheus 不会告诉你"规则瞎了"。
+          expr: absent(data_dog_partition_end_timestamp_seconds{kind="future"})
+          for: 1h
+          labels:
+            severity: warning
+          annotations:
+            summary: "分区有效期指标缺失（absent 超过 1 小时）"
+            description: >-
+              该规则组只在 partition.enabled=true 时渲染；此时没有样本说明
+              /metrics 没刷新到（抓取失败？）或 telemetry_events 并不是分区表。
+              两种都会让"有效期不足"那条变成死规则。
+    {{- end }}
 {{- end }}

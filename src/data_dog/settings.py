@@ -945,6 +945,23 @@ def rawlog_allow_private() -> bool:
     return _get_bool("DD_RAWLOG_ALLOW_PRIVATE", default=False)
 
 
+# ---- 分区维护（A9）
+
+def partition_auto_ensure() -> bool:
+    """启动时是否自动补齐未来分区（DD_PARTITION_AUTO_ENSURE，默认 **False**）。
+
+    默认关：分区是**结构变更（DDL）**，生产应由集群层面的定时任务做（helm 的
+    `partition.enabled` CronJob），不该由应用副本在启动时偷偷改结构。开了只是多一层保险，
+    且失败不阻止启动（由 `data_dog_partition_end_timestamp_seconds` + 告警兜底）。
+    """
+    return _get_bool("DD_PARTITION_AUTO_ENSURE", default=False)
+
+
+def partition_ensure_months() -> int:
+    """自动补齐时"本月起往后建几个月"（DD_PARTITION_ENSURE_MONTHS，默认 3）。"""
+    return max(1, _get_int("DD_PARTITION_ENSURE_MONTHS", default=3))
+
+
 def investigate_workers() -> int:
     """异步调查 worker 池大小（进程内线程数）。"""
     return max(1, _get_int("DD_INVESTIGATE_WORKERS", default=4))

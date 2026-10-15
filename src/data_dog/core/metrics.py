@@ -115,6 +115,17 @@ investigation_queue_depth = Gauge(
     registry=registry,
 )
 
+# 分区有效期（A9）：**上报时间戳而不是"还剩几天"**。
+# Gauge 会陈旧——进程启动时算成"还有 60 天"，过一个月它仍写着 60，告警就永久失灵。
+# 上报"最新分区上界的 epoch 秒"后，由 Prometheus 用 `- time()` 做减法：**时钟自己走**，
+# 即使应用再也不重算，告警也会随真实时间逼近而触发。
+partition_end_timestamp_seconds = Gauge(
+    "data_dog_partition_end_timestamp_seconds",
+    "最新分区上界的 epoch 秒（label kind=future；与 time() 相减 = 还有多久覆盖到期）",
+    labelnames=("kind",),
+    registry=registry,
+)
+
 # 单次异步调查的执行耗时（从 worker 领取到落终态）
 investigation_job_duration_seconds = Histogram(
     "data_dog_investigation_job_duration_seconds",

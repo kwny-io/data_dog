@@ -158,6 +158,19 @@ def list_partitions(session: Any, table: str = PARTITION_TABLE) -> list[str]:
     return [str(r[0]) for r in rows]
 
 
+def horizon_epoch(session: Any, table: str = PARTITION_TABLE) -> float | None:
+    """现有分区覆盖到的最远上界（epoch 秒）；没有分区 / 非 PG → None。
+
+    这是分区表**唯一的提前预警量**：值为 `T` 意味着"到 `T` 之前写入都有地方落"，
+    而以日桶为分区键时，越界写入会直接报 `no partition of relation ... found for row`。
+    返回 None 表示**无法判断**（非 PG / 分区名不合规），**不是** 0——不要把"不知道"当成"到期了"。
+    """
+    ends = [partition_end(name) for name in list_partitions(session, table)]
+    known = [e for e in ends if e is not None]
+    return max(known) if known else None
+
+
+
 def ensure_partitions(session: Any, table: str = PARTITION_TABLE, *,
                       months: int = 3, now: datetime | None = None,
                       since: datetime | None = None) -> list[str]:

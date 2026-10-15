@@ -172,3 +172,34 @@ prometheusRule:
   queueDepthThreshold: 50
   # 30 分钟内失败调查数阈值
   failureCountThreshold: 5
+  # 分区有效期不足多少秒开始告警（默认 14 天）。
+  # 只在 partition.enabled=true 的部署里生效：没有分区表就没有这个样本。
+  partitionHorizonSeconds: 1209600
+
+
+# ---- 分区维护（A9）：分区表的"生产最后一公里" ----
+# 为什么必须有定时任务：以日桶为分区键时，跨月那一刻若没有对应分区，写入直接报
+# `no partition of relation ... found for row`，而在这之前**没有任何信号**。
+# CLI（scripts/partition_telemetry.py）能做，但它得有人按时运行。
+# 与应用侧 DD_PARTITION_AUTO_ENSURE 不重叠：那个是"副本启动时补一次"，这里是集群层每天兜底。
+partition:
+  enabled: false
+  # 每天 03:23（避开整点，减少与其它任务撞峰）。幂等：已存在的分区不会被重建。
+  schedule: "23 3 * * *"
+  # 本月起往后保证几个月存在。>1 是留给"任务连挂几天/发布阻塞"的余量。
+  ensureMonths: 3
+  concurrencyPolicy: Forbid
+  # 超过这个时间没被调度就不再补跑（避免发布后一次性补一堆过期任务）。
+  startingDeadlineSeconds: 600
+  backoffLimit: 3
+  resources: {}
+
+# ---- 数据保留清理（④）：删过期数据。与分区维护**刻意分开**（结构变更 vs 删数据）----
+retention:
+  enabled: false
+  schedule: "41 3 * * *"
+  # ⚠ **默认 dry-run**：定时任务里"默认删数据"是不可接受的默认值。要真删必须显式改这里。
+  dryRun: true
+  concurrencyPolicy: Forbid
+  backoffLimit: 3
+  resources: {}

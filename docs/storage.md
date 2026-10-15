@@ -146,8 +146,13 @@ python scripts/partition_telemetry.py --ensure-months 3        # 建"本月起�
 python scripts/partition_telemetry.py --drop-before 2026-08    # 删"整段早于 2026-08"的分区
 ```
 
-- `--ensure-months` 建议挂**每月定时任务**：分区表最容易踩的坑就是"忘了建下月分区 → 写入直接
-  报 `no partition of relation ... found for row`"。
+- `--ensure-months` **必须挂定时任务**：分区表最容易踩的坑就是"忘了建下月分区 → 写入直接
+  报 `no partition of relation ... found for row`"。**现在真的挂上了**（见 8.4）：
+  - 集群层：helm `partition.enabled=true` 渲染 CronJob（每天 `partition.schedule`，默认 03:23，
+    调 `--ensure-months {{ partition.ensureMonths }}`，幂等）；
+  - 本机/部署脚本：`make partition`（`MONTHS=3` 可覆盖）与 `make partition-check`（只读）；
+  - 应用侧兜底：`DD_PARTITION_AUTO_ENSURE=1` 时启动补一次（默认**关**——结构变更不该由应用
+    副本偷偷做，生产交给集群 CronJob）。
 - `--drop-before` 只删**整段过期**的分区（上界 ≤ 截止时间）；边界月里可能还有要留的数据，
   宁可少删（保数据），留给下一轮。
 - 一旦确认是分区表，`retention` 的 `telemetry_events` 规则会**自动**改走 `DROP PARTITION`
@@ -258,7 +263,28 @@ python scripts/partition_telemetry.py --check              # 应为"分区表，
 **回填历史数据注意**：新写路径把 `created_day` 记为**摄取日**。若你要灌历史事件并希望它们按
 事件时间分区，必须先手工建好对应月份的分区，否则会撞 `no partition of relation ... found for row`。
 
-### 8.4 诚实边界
+### 8.4 有效期信号与调度（"跨月无分区"必须会响）
+
+分区维护此前是**能力齐全但没人调用**：CLI 得人工跑，helm 里没有定时任务，应用启动也不碰。
+而"忘了建下月分区"这件事在**出错前没有任何信号**——跨月那一刻写入才开始报错。现在两层都补上：
+
+| 信号 | 口径 | 在哪 |
+|---|---|---|
+| `data_dog_partition_end_timestamp_seconds{kind="future"}` | 现有分区**最远上界的 epoch 秒** | `/metrics` **每次抓取**重算（`storage/partitioning.report_horizon`） |
+| `DataDogPartitionHorizonLow` | `(该值 - time()) < 14 天` 持续 10m → critical | helm 告警组 `data-dog.storage`（仅 `partition.enabled=true` 渲染） |
+| `DataDogPartitionHorizonUnknown` | `absent(...)` 持续 1h → warning | 同上；**没有样本**会让上一条变成死规则，这条专门抓"规则瞎了" |
+
+为什么上报**时间戳**而不是"还剩几天"：Gauge 会陈旧——进程启动时算成"还有 60 天"，过一个月它
+仍写着 60，告警永久失灵。上报时间戳后由 Prometheus 用 `- time()` 做减法，**时钟自己走**。
+
+为什么 `Unknown` 那条必要：Prometheus 对**空向量求值不报错**，缺样本时"有效期不足"那条会静默
+永不触发。这正是 `tests/test_helm_alerts.py` 开头写的那类"死规则"。
+
+**调度**：分区维护（DDL）与保留清理（删数据）是**两个** CronJob/命令，刻意分开——出问题时
+得能只暂停其中一个（`cronjob-partition.yaml` / `cronjob-retention.yaml`）。保留清理的
+`retention.dryRun` **默认 true**：定时任务里"默认删数据"是不可接受的默认值，要真删必须显式改。
+
+### 8.5 诚实边界
 
 - **只在 PostgreSQL 上有效**；SQLite（测试/单机演示）走原路径。非 PG 上执行维护 CLI 会明确
   拒绝（退出码 2），不会假装成功。

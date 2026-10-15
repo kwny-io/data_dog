@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 import pytest
 
 from data_dog import retention
+from data_dog.core import metrics
 from data_dog.storage import partitioning
 from data_dog.storage.db import init_db, reset_engine
 
@@ -95,6 +96,36 @@ def test_partition_end_parses_suffix_and_rejects_odd_names():
     assert end == 20758 * 86400.0 == datetime(2026, 11, 1, tzinfo=timezone.utc).timestamp()
     assert partitioning.partition_end("telemetry_events_default") is None
     assert partitioning.partition_end("telemetry_events_202613") is None
+
+
+# ------------------------------------------------- 分区有效期（A9 的提前预警量）
+
+def test_horizon_is_none_when_nothing_is_partitioned(url):
+    """没有分区 / 非 PG → None（**不是 0**：不要把"不知道"当成"到期了"）。"""
+    from data_dog.storage.db import session_scope
+
+    with session_scope(system=True) as s:
+        assert partitioning.horizon_epoch(s) is None
+
+
+def test_horizon_takes_the_farthest_upper_bound(monkeypatch):
+    """多分区取**最远**上界（"覆盖到哪" = 最远的那个），名字不合规的忽略。"""
+    monkeypatch.setattr(
+        partitioning, "list_partitions",
+        lambda _s, _t=partitioning.PARTITION_TABLE: [
+            "telemetry_events_202609", "junk", "telemetry_events_202611"])
+    assert partitioning.horizon_epoch(object()) == datetime(
+        2026, 12, 1, tzinfo=timezone.utc).timestamp()
+
+
+def test_report_horizon_lives_in_the_service_layer():
+    """上报指标的动作归 service（`storage` 是叶子层，不得 import core）。"""
+    import importlib
+
+    pm = importlib.import_module("data_dog.service.partition_maintenance")
+    assert callable(pm.report_horizon)
+    assert not hasattr(partitioning, "report_horizon")
+
 
 
 # ---------------------------------------------------------------- 非 PG 边界
@@ -264,6 +295,47 @@ def test_partition_roundtrip_on_postgres():
     finally:
         with eng.begin() as c:
             c.execute(text(f"DROP TABLE IF EXISTS {table} CASCADE"))
+
+
+@pytest.mark.postgres
+@pytest.mark.skipif(not _PG_URL, reason="未设 DD_TEST_PG_URL，跳过 PG 分区集成测试")
+def test_postgres_horizon_advances_with_ensured_partitions():
+    """真库：horizon = 最远分区上界；ensure 之后它必须**前进**，且被上报成 Gauge。"""
+    from prometheus_client import generate_latest
+    from sqlalchemy import create_engine, text
+    from sqlalchemy.orm import Session
+
+    table = "horizon_probe"
+    eng = create_engine(_PG_URL, future=True)
+    with eng.begin() as c:
+        c.execute(text(f"DROP TABLE IF EXISTS {table} CASCADE"))
+        c.execute(text(
+            f"CREATE TABLE {table} (created_day bigint NOT NULL, v int, "
+            "PRIMARY KEY (created_day)) PARTITION BY RANGE (created_day)"))
+    try:
+        with Session(eng) as s:
+            assert partitioning.horizon_epoch(s, table) is None
+            now = datetime(2026, 10, 1, tzinfo=timezone.utc)
+            partitioning.ensure_partitions(s, table, months=1, now=now)
+            s.commit()
+            first = partitioning.horizon_epoch(s, table)
+            assert first == datetime(2026, 11, 1, tzinfo=timezone.utc).timestamp()
+
+            partitioning.ensure_partitions(s, table, months=3, now=now)
+            s.commit()
+            from data_dog.service.partition_maintenance import report_horizon
+
+            second = report_horizon(s, table)
+            assert second is not None and first < second      # 补齐后有效期**前进**
+            assert second == datetime(2027, 1, 1, tzinfo=timezone.utc).timestamp()
+    finally:
+        with eng.begin() as c:
+            c.execute(text(f"DROP TABLE IF EXISTS {table} CASCADE"))
+
+    line = next(ln for ln in generate_latest(metrics.registry).decode().splitlines()
+                if ln.startswith("data_dog_partition_end_timestamp_seconds{")
+                and 'kind="future"' in ln)
+    assert float(line.rsplit(" ", 1)[1]) == second
 
 
 @pytest.mark.postgres

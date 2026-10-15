@@ -6,7 +6,7 @@ PY ?= $(shell if [ -x .venv/bin/python ]; then echo .venv/bin/python; \
               else echo python; fi)
 PORT ?= 8000
 
-.PHONY: help gates hooks numbers requirements format install test lint typecheck cov serve probe ingest e2e ui bench up up-prod down down-prod logs ps health clean helm-lint verify-chart k8s-e2e retention perf-probe config-check
+.PHONY: help gates hooks numbers requirements format install test lint typecheck cov serve probe ingest e2e ui bench up up-prod down down-prod logs ps health clean helm-lint verify-chart k8s-e2e retention partition partition-check perf-probe config-check
 
 help:            ## 显示所有命令
 	@echo "make install  安装依赖(含服务)"
@@ -24,6 +24,8 @@ help:            ## 显示所有命令
 	@echo "make probe    探存活/就绪/指标"
 	@echo "make bench    P4-8 软实时基准(起服务→压测→出报告)"
 	@echo "make retention 数据保留清理(默认 dry-run; FORCE=1 真删)"
+	@echo "make partition 确保未来 N 个月分区存在(A9; MONTHS=3)"
+	@echo "make partition-check 分区现状(只读, 非 PG 明确说不可用)"
 	@echo "make perf-probe 写路径进程内性能探针(不压测)"
 	@echo "make ingest   发一条演示日志(过温)"
 	@echo "make up       Docker 起整套(应用+PostgreSQL)"
@@ -96,6 +98,12 @@ bench:           ## P4-8 软实时基准（一键：起服务→loadgen→报告
 
 retention:       ## 数据保留清理（④）：默认 dry-run 只统计，FORCE=1 才真删
 	$(PY) -m data_dog.retention $(if $(FORCE),,--dry-run)
+
+partition-check: ## 分区现状（A9，只读）：是否分区表 / 有哪些分区 / 转换阻塞项
+	$(PY) scripts/partition_telemetry.py --check
+
+partition:       ## 分区维护（A9）：确保未来 N 个月分区存在（幂等 DDL；MONTHS=3）
+	$(PY) scripts/partition_telemetry.py --ensure-months $(or $(MONTHS),3)
 
 redteam:         ## 提示注入红队（A3）：默认打真模型（需 key）；OFFLINE=1 只自检管道
 	$(PY) scripts/redteam_injection.py $(if $(OFFLINE),--offline) --runs $(or $(RUNS),3)
