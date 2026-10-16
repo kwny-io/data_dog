@@ -343,7 +343,7 @@ memory"直接报警。
 - **分区键边界是 epoch 秒数值**（`created_at` 是 `double precision`）。上一版生成的时间戳字面量
   在真库上会报 `invalid input syntax for type double precision`——已修，并有真库用例钉住。
 - **真库验证已在本机完成**：起 `postgres:16-alpine`（端口 55432）后，`-m postgres` 用例
-  **24 passed**（含建分区→插入→删过期分区往返，以及"该表被主键阻塞"的回归）。
+  **28 passed**（含建分区→插入→删过期分区往返，以及"该表被主键阻塞"的回归）。
 - **`telemetry_events` 的转换已实现并真库验证**（探针表 + 真表都跑通）：`--convert` 转换真表后，
   `save_telemetry` 的行确实落进**当月分区**，过期分区被整段 DROP。**多副本并发下的协调已补上**
   （§8.4：`partition:ddl` 单持有者租约，抢不到就跳过并如实标注、**退出码 3**；但租约只防"并发"。

@@ -815,3 +815,44 @@ def test_script_convert_dry_run_reports_quiet_without_refusing(url, clean_state,
     assert code == 0
     assert payload["quiet_ok"] is False, "dry-run 不该因为静默窗口不满足而拒绝"
     assert payload["quiet"]["reason"] == "not_quiet"
+
+@pytest.mark.postgres
+@pytest.mark.skipif(not _PG_URL, reason="未设 DD_TEST_PG_URL，跳过 PG 分区集成测试")
+def test_convert_busy_on_real_pg_does_not_queue():
+    """真 PG：另一个事务持着转换咨询锁时，**立刻**抛 ConversionBusy（不阻塞到 statement_timeout）。"""
+    from sqlalchemy import create_engine, text
+    from sqlalchemy.orm import Session
+
+    from data_dog.storage import pg_locks
+    from data_dog.storage.models import day_of
+
+    table = "busy_probe"
+    day = day_of(datetime(2026, 10, 15, tzinfo=timezone.utc).timestamp())
+    eng = create_engine(_PG_URL, future=True)
+    with eng.begin() as c:
+        for name in (table, f"{table}_old", f"{table}_new"):
+            c.execute(text(f"DROP TABLE IF EXISTS {name} CASCADE"))
+        c.execute(text(
+            f"CREATE TABLE {table} (tenant_id varchar(80) NOT NULL, event_id varchar(80) NOT NULL, "
+            "created_day bigint NOT NULL, created_at double precision NOT NULL, "
+            "PRIMARY KEY (tenant_id, event_id, created_day))"))
+        c.execute(text(f"INSERT INTO {table} VALUES ('t1','e1',{day},1.0)"))
+    try:
+        with Session(eng) as a:
+            assert pg_locks.acquire_xact_lock(a, pg_locks.PARTITION_CONVERT_LOCK_KEY) is True
+            with Session(eng) as b:
+                with pytest.raises(partitioning.ConversionBusy):
+                    partitioning.convert_to_partitioned(
+                        b, table, now=datetime(2026, 12, 1, tzinfo=timezone.utc), confirm=table)
+                b.rollback()
+            a.commit()                       # 释放锁
+        with Session(eng) as c:
+            out = partitioning.convert_to_partitioned(
+                c, table, now=datetime(2026, 12, 1, tzinfo=timezone.utc), confirm=table)
+            c.commit()
+            assert out["converted"] is True and partitioning.is_partitioned(c, table)
+    finally:
+        with eng.begin() as c:
+            for name in (table, f"{table}_old", f"{table}_new"):
+                c.execute(text(f"DROP TABLE IF EXISTS {name} CASCADE"))
+        eng.dispose()
