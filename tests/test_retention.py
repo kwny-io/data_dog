@@ -230,7 +230,10 @@ def test_not_capped_when_drained(url):
 
 
 @pytest.mark.parametrize("kw", [{"batch_size": 0}, {"max_batches": 0},
-                                {"batch_size": -1}])
+                                {"batch_size": -1},
+                                # 上限也归这里：batch 不是能随便调大的旋钮
+                                # （实测 20000 撞 PG 栈深限制，见 storage/repository.py）
+                                {"batch_size": 3000}])
 def test_invalid_batch_params_are_rejected(url, kw):
     with pytest.raises(ValueError):
         retention.run_once(now=NOW, **kw)

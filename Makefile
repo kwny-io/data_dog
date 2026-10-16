@@ -72,9 +72,9 @@ requirements:    ## 由 pyproject.toml 重新生成 requirements.txt（单一事
 format:          ## 可选：ruff format（仓库当前未统一格式，会重排约 170 个文件）
 	$(PY) -m ruff format src tests
 
-cov:             ## 带覆盖率跑测试（阈值与 CI 一致：总分 85% + 单模块 60%）
+cov:             ## 带覆盖率跑测试（阈值与 CI 一致：总分 85% + 单模块 70%）
 	$(PY) -m pytest -q --cov=src/data_dog --cov-report=term-missing --cov-report=json:coverage.json --cov-fail-under=85
-	$(PY) scripts/cov_gate.py --json coverage.json --min 60
+	$(PY) scripts/cov_gate.py --json coverage.json --min 70
 
 serve:           ## 本机起服务
 	$(PY) -m data_dog.service

@@ -560,7 +560,7 @@ memory"直接报警。
 - **分区键边界是 epoch 秒数值**（`created_at` 是 `double precision`）。上一版生成的时间戳字面量
   在真库上会报 `invalid input syntax for type double precision`——已修，并有真库用例钉住。
 - **真库验证已在本机完成**：起 `postgres:16-alpine`（端口 55432）后，`-m postgres` 用例
-  **35 passed**（含建分区→插入→删过期分区往返、"该表被主键阻塞"的回归、反向恢复往返、
+  **37 passed**（含建分区→插入→删过期分区往返、"该表被主键阻塞"的回归、反向恢复往返、
   内容指纹与等长改写检出）。
 - **`telemetry_events` 的转换已实现并真库验证**（探针表 + 真表都跑通）：`--convert` 转换真表后，
   `save_telemetry` 的行确实落进**当月分区**，过期分区被整段 DROP。**多副本并发下的协调已补上**
@@ -569,3 +569,30 @@ memory"直接报警。
   变成"实测停了"，**不能阻止静默窗口之后新到的写入**；转换本身仍是停机窗口操作）。仍**未做**：
   亿级表的分批回填已有工具（`scripts/backfill_created_day.py` + `docs/partition_backfill.md`），
   但**转换路径本身的分批实现**仍是单条 `INSERT ... SELECT`。
+### 8.6 `batch_size` 不是能随便调大的旋钮（真 PG 实测）
+
+保留清理（④）与租户级删除（⑤）共用 `storage/repository.py::delete_in_batches`，它按主键
+**先查后删**：每批先 `SELECT pk ... LIMIT batch_size`，再用 `tuple_(*pk).in_(keys)` 删掉这批。
+那个 `IN` 会被 SQLAlchemy 展开成 **n 条 OR 分支**的表达式树，深度随 `batch_size` 线性增长。
+
+`batch_size` 一路从 CLI 的 `--batch-size`（`retention.py`）透传进来，而原先只校验 `>= 1`。
+在真 PG 16.15（`dd-pg-a9`，10 万行、双列主键、`created_at` 有单列索引、按 `created_at` 条件）实测：
+
+| `batch_size` | 耗时 | 吞吐 | 相对 500 |
+|---|---|---|---|
+| 500（默认） | 20.3 s | 4,937 行/秒 | 1.0× |
+| 1000 | 32.4 s | 3,089 行/秒 | 1.6× 慢 |
+| 2000 | 59.1 s | 1,691 行/秒 | 2.9× 慢 |
+| 4000 | 109.8 s | 910 行/秒 | 5.4× 慢 |
+| 5000 | 138.4 s | 722 行/秒 | 6.8× 慢 |
+| 20000 | **失败** | — | `psycopg.errors.StatementTooComplex: stack depth limit exceeded` |
+
+所以现在 `delete_in_batches` 里钉了 `MAX_DELETE_BATCH = 2000`，超过就抛 `ValueError`（和
+`batch_size < 1` 一样是**明确拒绝**，不静默夹取——夹取会把调用方的错配置藏起来）。上限只
+负责**防炸**；默认 500 才是实测最优点。`tests/test_delete_in_batches.py` 是这个函数的第一批
+直接用例（此前只有 retention/tenant 的间接覆盖）。
+
+**边界**：以上是本机 PG 的实测，不是生产集群；只测到 10 万行，**没有**在亿级表上重复这条曲线。
+另：早先 100 万行排练时观察到「10 万行删了 124 s（806 行/秒）」，后续两种形状（普通表、分区父表）
+各测一遍都**没能复现**（分区父表 4,299 行/秒，与普通表同一量级）——那个数字的成因至今不明，
+不要拿它做容量规划。

@@ -16,7 +16,7 @@
 | # | 缺口 | 状态 | 提交 | 落地内容（一句话） |
 |---|---|---|---|---|
 | A1 | LLM 花费/额度无硬约束 | ✅ | `b0142c8` | per-tenant 日/月 token+USD 硬熔断，调用前后各一次检查；超限 429 + `error_code=budget_exceeded` |
-| A2 | 队列无准入/背压 | ✅ | `b0142c8` | 共享队列深度 + `DD_INVESTIG@E_QUEUE_MAX`；超限 **落 job 之前** 429 + `Retry-After`（不做假受理） |
+| A2 | 队列无准入/背压 | ✅ | `b0142c8` | 共享队列深度 + `DD_INVESTIGATE_QUEUE_MAX`；超限 **落 job 之前** 429 + `Retry-After`（不做假受理） |
 | A3 | Prompt 注入只有 mock 回归 | ✅ | `afd62f4` `49bd1d0` | 不可信文本包成数据块 + 系统提示声明指令层级 + 注入特征进 trace；红队入口 `make redteam`。后续修掉数据块导致的**评测静默失效**（`unwrap` 剥壳） |
 | A4 | 提交侧无幂等 | ✅ | `b0142c8` | `Idempotency-Key`：窗口内同 (租户,key) 只真跑一次；重放带 `idempotent_replay`；进行中 409 + `Retry-After` |
 | A5 | PG 上 JSON 列是 `json` 不是 `jsonb` | ✅ | `51091f1` | 方言变体 + 迁移 `f2a3b4c5d6e7` ALTER 既有库；真 PG 16 验证 24/24 列 `jsonb`、可逆 |
@@ -31,7 +31,7 @@
 | # | 优化项 | 状态 | 提交 | 落地内容（一句话） |
 |---|---|---|---|---|
 | B1 | 同步路 histogram 顶格 2.5s → 全落 +Inf | ✅ | `51091f1` | 桶补到 120s（异步路另有 job 直方图），同步调查 P95/P99 重新可观测 |
-| B2 | 同步仍是默认 | ✅ | `d3b5f9d` `38751dc` `473a3d9` | 三步：① 异步结果一次取齐 `report/verdict/trace/usage`（同源 `_verdict_for`）；② 控制台改"提交→轮询→取结果"；③ `DD_INVESTIG@E_ASYNC` **默认 1**（测试用 conftest 钉成同步，默认值另有回归）；见下 |
+| B2 | 同步仍是默认 | ✅ | `d3b5f9d` `38751dc` `473a3d9` | 三步：① 异步结果一次取齐 `report/verdict/trace/usage`（同源 `_verdict_for`）；② 控制台改"提交→轮询→取结果"；③ `DD_INVESTIGATE_ASYNC` **默认 1**（测试用 conftest 钉成同步，默认值另有回归）；见下 |
 | B3 | 运行日志写放大（40 步 ≤160 KB/次） | ✅ | `8213327` | `DD_RUN_LOG_FULL_STEPS=auto`：成功且已判定只落**骨架**，失败/取消/`needs_human_review` 落全文；`steps_truncated` 如实标注 |
 | B4 | 配置治理：60+ `DD_*` 无启动期校验 | ✅ | `0e785fe` | `data-dog config check` / `make config-check`：未知键、非法取值（会静默回默认）、危险组合；不连库、有错即非零退出 |
 | B5 | meta 测试靠人记得跑 | ✅ | `17f775a` | `readme_counts.py --check` 挂进 pre-commit，且**无条件**跑（漂移常发生在没有 .py 变更的提交里） |
@@ -40,7 +40,7 @@
 
 ## 未落地项：边界与原因
 
-### B2 同步默认翻异步（`DD_INVESTIG@E_ASYNC`）——✅ 三步全部落地（`d3b5f9d` `38751dc` `473a3d9`）
+### B2 同步默认翻异步（`DD_INVESTIGATE_ASYNC`）——✅ 三步全部落地（`d3b5f9d` `38751dc` `473a3d9`）
 
 **第 1 步（后端补载荷）已完成**：新增 `GET /v1/investigations/jobs/{id}/result`，成功后就地取齐
 `report` + `verdict`/`verdict_detail` + `trace` + `usage`，口径与同步响应**同源**
@@ -72,8 +72,8 @@
 3. ~~再翻默认~~ ✅（默认 1；`?sync=1` 或 `=0` 退回同步；测试夹具钉同步 + 默认值回归测试）。
 
 - 默认异步意味着**每个应用实例**都会起 worker 线程池 + 队列轮询线程（纯 API / 单副本实例可置
-  `DD_INVESTIG@E_ASYNC=0`）；
-- 多副本必须配 `DD_ST@E_BACKEND=postgres`（memory 后端的队列只在进程内）——`data-dog config check`
+  `DD_INVESTIGATE_ASYNC=0`）；
+- 多副本必须配 `DD_STATE_BACKEND=postgres`（memory 后端的队列只在进程内）——`data-dog config check`
   会对"异步 + memory"报警告。
 
 ### A9 `telemetry_events` 分区 —— ✅ 走「摄取日桶」，三段全部落地并在**真 PG** 验证
@@ -112,7 +112,7 @@ retention 自动分流到 `DROP PARTITION`。测试含 `-m postgres` 真库往�
 - PG 规则：**分区表的唯一约束必须包含全部分区键**。实测报错原文：
   `FeatureNotSupported: unique constraint on partitioned table must include all partitioning columns`；
 - 而 `telemetry_events` 的主键是 `(tenant_id, event_id)`——它正是写入路径
-  `INSERT ... ON CONFLICT DO UPD@E` 的**去重键**（`repository.py`）。所以"按 `created_at` 做
+  `INSERT ... ON CONFLICT DO UPDATE` 的**去重键**（`repository.py`）。所以"按 `created_at` 做
   范围分区 + 保留原主键"在 PG 上**不可能**；换 `PRIMARY KEY (tenant_id, event_id, created_at)`
   会让重复上报（同一 `event_id` 不同 `created_at`）不再被去重——**数据完整性代价**；
 - 实测另一条路：`PARTITION BY HASH (tenant_id, event_id)` 可以保留该唯一约束，但**哈希分区
@@ -126,9 +126,14 @@ retention 自动分流到 `DROP PARTITION`。测试含 `-m postgres` 真库往�
 在阻塞项存在时直接拒绝。真库回归用例 `test_real_telemetry_shape_is_blocked_by_its_primary_key`
 用与 `telemetry_events` 同形的探针把"不行 + 被谁挡住"钉死。
 
-**因此 A9 的正确表述**：分区**基础设施**可用且已真库验证；`telemetry_events` 的**转换需要一个
-数据模型决策**（去重键怎么改、或接受哈希分区不省删除、或维持现状只靠 DELETE）——这不是工程
-实现问题，是"重复上报去重"与"按年龄删分区"二选一的产品决策，不该由实现者替用户选。
+**因此 A9 的正确表述**：分区**基础设施**可用且已真库验证；`telemetry_events` 的**数据模型决策已收口
+（决策：维持现状）**——保留 `PRIMARY KEY (tenant_id, event_id, created_day)`（模型侧 `models.py:59-65`
+早已如此声明，写入路径的 `ON CONFLICT` 目标随之变成三列），用**跨日重复上报不被去重**换取
+**按天分区剪枝**。这笔交换不是免费的：同一 `event_id` 跨日重报会留下两行，所以 `repository.
+count_cross_day_duplicates` 作为**探测器**保留（口径是"至少两个完整日桶"，回填窗口内是下界）。
+**重新打开的条件**：一旦出现"跨日必须去重"的业务要求，就得重新选（代价仍是二选一：哈希分区
+保留唯一键但不省删除；或改用 `(tenant_id, event_id, created_at)` 并承担存量清洗）——在那之前
+它不再是待办。
 
 **多副本收口（本轮）**：上面第 3 步的 `--convert` / `--ensure-months` / `--drop-before` 此前只有
 "单事务 + 文档化的维护窗"。现在三个动作与"应用启动自动补齐"共用 `state/lease.py` 的

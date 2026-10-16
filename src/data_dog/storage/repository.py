@@ -19,6 +19,22 @@ from sqlalchemy.orm import Session
 
 from . import models as M
 
+#: `delete_in_batches` 的 `batch_size` 上限。**不是拍脑袋定的**：真 PG 16.15 实测
+#: （10 万行、双列主键、按时间列条件；见 `docs/storage.md` §8.6）——
+#:
+#:   batch=500   → 20.3s（4,937 行/秒，实测最优点，也是默认值）
+#:   batch=1000  → 32.4s（3,089 行/秒）
+#:   batch=2000  → 59.1s（1,691 行/秒）
+#:   batch=4000  → 109.8s（910 行/秒）
+#:   batch=5000  → 138.4s（722 行/秒，慢 6.8×）
+#:   batch=20000 → **直接失败**：psycopg.errors.StatementTooComplex: stack depth limit exceeded
+#:
+#: 原因：`tuple_(*pk).in_(keys)` 会被 SQLAlchemy 展开成 n 条 OR 分支的表达式树，深度随
+#: `batch_size` 线性增长；PG 的 `max_stack_depth`（默认 2048kB）会拦住「炸」，拦不住
+#: 「越来越慢」。所以上限只负责**防炸**（钉在实测仍可用的 2000），默认 500 才是推荐值；
+#: 超过上限明确报错，而不是让保留清理任务在半夜随机失败。
+MAX_DELETE_BATCH = 2000
+
 
 def delete_in_batches(session: Session, table: Any, cond: Any, *,
                       batch_size: int = 500, max_batches: int = 200
@@ -36,12 +52,21 @@ def delete_in_batches(session: Session, table: Any, cond: Any, *,
 
     两个调用方共用同一处：④ 的保留清理（按时间列）与 ⑥ 的租户级删除（按 `tenant_id`）。
     `cond` 由调用方用**表达式构造器**拼出（本模块不拼 SQL 字符串），值走绑定参数。
+
+    `batch_size` 有**上限**（`MAX_DELETE_BATCH`）：它不是可以随便调大的旋钮——实测
+    batch 每翻一倍，每行成本就上升 1.6~2.9 倍，到 20000 直接撞 PG 栈深限制。超过上限
+    抛 `ValueError`（与 `< 1` 一样是**明确拒绝**，不静默夹取，免得掩盖调用方的错配置）。
     """
     from sqlalchemy import delete, select, tuple_
 
     pk = list(table.primary_key.columns)
     if not pk:                                    # pragma: no cover - 本仓表都有主键
         raise RuntimeError(f"{table.name} 没有主键，无法分批删除")
+    if batch_size > MAX_DELETE_BATCH:
+        raise ValueError(
+            f"batch_size={batch_size} 超过上限 {MAX_DELETE_BATCH}："
+            "tuple IN 列表会展开成同数量的 OR 分支，batch 越大越慢，且实测 batch=20000 "
+            "会撞 PostgreSQL 栈深限制直接失败（StatementTooComplex）")
 
     deleted = 0
     batches = 0

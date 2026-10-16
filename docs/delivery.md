@@ -10,7 +10,7 @@
 | L1 | CLI | `data-dog run` | ✅ |
 | L2 | 演示脚本 | `python -m data_dog.e2e.replay_demo` | ✅ |
 | L3 | **HTTP 服务** | `python -m data_dog.service` / `docker compose up` | ✅ 本文 |
-| L4 | 编排部署 | K8s / 云托管 | ⬜ 未做（超范围） |
+| L4 | 编排部署 | K8s / 云托管 | 🟡 有 Helm chart（14 模板）+ CI helm 腿；本机无 helm，未渲染验证；多区域仅骨架（RPO>0） |
 
 **L3 是"能交付"的门槛**：有了固定的服务地址与探针，别人才敢把流量接进来。
 

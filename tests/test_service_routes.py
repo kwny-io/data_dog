@@ -125,7 +125,7 @@ def _dependency_calls(route: APIRoute) -> set:
 
 
 def test_route_table_matches_snapshot():
-    """42 条端点一条不多、一条不少，且**注册顺序**与快照一致。"""
+    """50 条端点一条不多、一条不少，且**注册顺序**与快照一致。"""
     actual = _route_pairs()
     expected = list(ROUTES)
     if actual != expected:

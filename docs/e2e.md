@@ -21,7 +21,7 @@ pytest tests/test_e2e.py -q                 # 5 项
 ```
 [P1] 算子 local.joint_motor-motorstate-detector（7 字段 / 2 规则）
 [P2] 收到 4 条 → 绑定 3 → 失败关闭 1 → 候选 1
-       ▸ cand_b654abdb3269 [critical] joint_motor.front_left_hip
+       ▸ cand_d3296d6ea7b9 [critical] joint_motor.front_left_hip
 [Agent] ▸ inv_...: confirmed (conf 0.90)  温度峰值 98.0°C，判为明确热故障
 [P3] ▸ ✅ 上报 severity=critical  命中: 条件①严重码; 条件③confirmed+置信度
      SaaS 已接收 1 条正式事件；人工反馈 1 条
@@ -62,5 +62,5 @@ pytest tests/test_e2e.py -q                 # 5 项
 | 架构 | 状态 |
 |---|---|
 | §19.3 真实回放验收路径（文档→…→SaaS→反馈） | ✅ 本地确定性回放贯通 |
-| §6.5 反馈闭环 | 🟡 Adapter 已收反馈；回灌到 Agent/评估待接 |
+| §6.5 反馈闭环 | 🟡 回灌本身已实现于服务侧（`service/routes/feedback.py` false_positive→rejected / repaired→closed；`/v1/eval/feedback` 评估闭环）；但**回放链路里的假 SaaS 只记录、不触发回灌**——“接进回放”待做 |
 | 真实脱敏 Fixture 回放（§19.3 要求"只用合成数据不能上线验收"） | ❌ 待真实硬件 Fixture |
