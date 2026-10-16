@@ -340,6 +340,34 @@ npm run e2e                       # 两个 webServer（devmock:8100 / next dev:3
 构建期差异不在覆盖内（生产版 `node server.js` 的手测记录见上面的实测段落）；
 "取消调查"仍只有单测覆盖——devmock 的 job 很快 `succeeded`，浏览器里点取消是竞态。
 
+##### 真后端腿：`E2E_REAL_BACKEND=1`（可重复，不再靠手工）
+
+默认腿的上游是 devmock，它**不校验密钥**——所以它能证明"链路通"，证明不了"代理把服务端
+那把密钥正确带给了真实服务"。需要后者时打开这个开关，上游换成**真实的 Python 服务**，
+只跑真后端规格：
+
+```bash
+cd web
+E2E_REAL_BACKEND=1 npm run e2e      # 上游 = python -m data_dog.service（独立 SQLite：web/.e2e-real/）
+```
+
+它跨过三段：**浏览器（无凭据）→ Next 服务端代理（加密钥）→ 真实 FastAPI 服务（校验密钥）**。
+断言：同一把密钥直连真服务 200（且自报 `auth_enabled:true`）、**不带密钥直连 401**、
+经代理 200；租户 cookie 在允许清单内 200、清单外 **403**（代理在转发前就拒绝）；
+devmock 专属探针 `/v1/whoami` 不存在（确认没悄悄跑回 devmock）。
+
+> **首次手工编排踩到的坑（写在这里，别再踩）**
+> 1. **起 console 要用独立 dist 目录**：真后端腿用 `.next-e2e-real`，**不能复用** devmock 腿的
+>    `.next-e2e`——两个 dev server 抢同一份编译缓存会偶发编译错乱，看起来像"代理坏了"。
+> 2. **探 cookie 必须用 `curl.exe`（或 `-WebSession`）**：PowerShell 的 `Invoke-WebRequest`
+>    在你塞原始 `Cookie` 头时会自作处理，测出来的不是浏览器真实行为。
+> 3. **`.env.local` 可能把 `DD_WEB_*` / `NEXT_PUBLIC_API_BASE_URL` 指向直连后端**，绕过
+>    服务端代理。两条腿都在 webServer `env` 里显式覆盖这几个键，就是这个原因；
+>    `DD_SERVICE_PORT` 必须在子进程启动前设好（端口是启动时读的）。
+
+当时带鉴权接口全 401 被误判成产品缺陷，查清后是**验证编排**（端口/env 没对齐）——这条腿把
+那次的结论钉成了可重复的门禁。
+
 ##### 这条腿第一次跑就抓到的真实 bug（已修）
 
 **现象**：`web/e2e/investigate.spec.ts` 点击候选行超时，Playwright 报

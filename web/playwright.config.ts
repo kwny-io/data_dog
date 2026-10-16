@@ -1,8 +1,15 @@
+import { existsSync, mkdirSync } from "node:fs";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+
 import { defineConfig, devices } from "@playwright/test";
 
 import {
   BASE_URL,
   MOCK_PORT,
+  REAL_BACKEND,
+  REAL_BASE_URL,
+  REAL_PORT,
   SERVER_TENANT,
   ALLOWED_TENANT,
   UPSTREAM_KEY,
@@ -32,9 +39,32 @@ import {
  *  - 这里跑的是 `next dev`，不是生产产物：证明的是链路与交互，不覆盖构建期差异
  *    （生产版 `node server.js` 的实测记录仍留在 docs/delivery.md §6）；
  *  - 上游是 devmock（`web/devmock/mock-backend.mjs`），不是真实 data_dog 服务：
- *    它按真实端点的**形状**作答，但语义是自己写的；
+ *    它按真实端点的**形状**作答，但语义是自己写的，**且不校验密钥**；
+ *  - 需要"`浏览器 → Next 代理 → 真实服务`"这一段时用 `E2E_REAL_BACKEND=1`（见下），
+ *    它会把上游换成真实的 `python -m data_dog.service`；
  *  - "取消调查"仍只有单测覆盖：devmock 的 job 很快就 succeeded，浏览器里点取消是竞态。
  */
+
+/** 配置目录（web/）与仓库根：真后端腿要按绝对路径起真服务。 */
+const WEB_DIR = fileURLToPath(new URL(".", import.meta.url));
+const REPO_ROOT = join(WEB_DIR, "..");
+
+/**
+ * 真后端腿（`E2E_REAL_BACKEND=1`）：
+ *  - 上游换成**真实 Python 服务**（`.venv` 优先，可用 `E2E_REAL_PYTHON` 覆盖解释器）；
+ *  - 独立 SQLite（`web/.e2e-real/`）——不碰开发者本机的 data_dog.db，也不复用 devmock 腿的库；
+ *  - 独立构建目录 `.next-e2e-real`——**绝不复用 devmock 腿的 `.next-e2e`**：两个 dev server
+ *    抢同一份编译缓存会偶发编译错乱，看起来像"代理坏了"（首次手工编排踩的坑之一）。
+ */
+const REAL_DATA_DIR = join(WEB_DIR, ".e2e-real");
+if (REAL_BACKEND) mkdirSync(REAL_DATA_DIR, { recursive: true });
+const REAL_DB_URL = `sqlite:///${join(REAL_DATA_DIR, "data_dog.db").replace(/\\/g, "/")}`;
+const REAL_PYTHON =
+  process.env.E2E_REAL_PYTHON ??
+  (existsSync(join(REPO_ROOT, ".venv", "Scripts", "python.exe"))
+    ? join(REPO_ROOT, ".venv", "Scripts", "python.exe")
+    : "python");
+
 export default defineConfig({
   testDir: "./e2e",
   // 一个 devmock 实例 + 内存 job 台账是共享状态，串行最省心也最好读日志。
@@ -53,30 +83,59 @@ export default defineConfig({
     screenshot: "only-on-failure",
     navigationTimeout: 60_000,
   },
-  projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
-  webServer: [
+  projects: [
     {
-      // 上游：devmock。ASYNC=1 → 调查走 202 + 轮询，覆盖客户端异步链路。
-      command: "node devmock/mock-backend.mjs",
-      env: { PORT: String(MOCK_PORT), ASYNC: "1" },
-      url: `http://127.0.0.1:${MOCK_PORT}/healthz`,
-      reuseExistingServer: !process.env.CI,
-      timeout: 30_000,
-      stdout: "pipe",
+      name: "chromium",
+      use: { ...devices["Desktop Chrome"] },
+      // 真后端腿只跑真后端规格：devmock 专属规格（whoami / 202 轮询）在真服务上没有对应端点。
+      testMatch: REAL_BACKEND ? /real-backend\.spec\.ts/ : undefined,
     },
+  ],
+  webServer: [
+    REAL_BACKEND
+      ? {
+          // 真上游：python -m data_dog.service。密钥与 console 用同一把，这样"代理有没有把
+          // 服务端密钥正确带给真实服务"才是可重复的门禁，而不是一次手工结论。
+          // 必须在**进程启动前**把 env 设好（DD_SERVICE_PORT 要在启动时就读到）——首次手工
+          // 编排的第二个坑。
+          command: `"${REAL_PYTHON}" -m data_dog.service`,
+          cwd: REPO_ROOT,
+          env: {
+            DD_SERVICE_PORT: String(REAL_PORT),
+            DD_API_KEY: UPSTREAM_KEY,
+            DD_DATABASE_URL: REAL_DB_URL,
+            DD_AUTO_MIGRATE: "1",
+          },
+          url: `${REAL_BASE_URL}/healthz`,
+          // 真服务每次都要按本次 env 重启，不复用别处可能残留的 8200。
+          reuseExistingServer: false,
+          timeout: 120_000,
+          stdout: "pipe",
+          stderr: "pipe",
+        }
+      : {
+          // 上游：devmock。ASYNC=1 → 调查走 202 + 轮询，覆盖客户端异步链路。
+          command: "node devmock/mock-backend.mjs",
+          env: { PORT: String(MOCK_PORT), ASYNC: "1" },
+          url: `http://127.0.0.1:${MOCK_PORT}/healthz`,
+          reuseExistingServer: !process.env.CI,
+          timeout: 30_000,
+          stdout: "pipe",
+        },
     {
       command: `npx next dev -p ${WEB_PORT}`,
       env: {
         // 独立构建目录：本地可能正有另一个 dev server 占着 .next（next.config.ts
         // 的 NEXT_DIST_DIR 注释就是为这个留的），别让两个进程抢同一份编译缓存。
-        NEXT_DIST_DIR: ".next-e2e",
+        // 真后端腿再换一个：devmock 腿的 .next-e2e 缓存里冻着"上游 = devmock"的旧编译。
+        NEXT_DIST_DIR: REAL_BACKEND ? ".next-e2e-real" : ".next-e2e",
         // 走同源代理。必须显式给：仓库里可能有 .env.local 指向直连后端的旧写法，
         // 那会绕过服务端代理——而代理正是这条腿要测的东西。
         NEXT_PUBLIC_API_BASE_URL: "/api/dd",
         // 轮询间隔压到 150ms，让"提交→轮询→取结果"在秒级内走完。
         NEXT_PUBLIC_INVESTIGATE_POLL_MS: "150",
         // 服务端（浏览器看不到）：
-        DD_WEB_API_BASE_URL: `http://127.0.0.1:${MOCK_PORT}`,
+        DD_WEB_API_BASE_URL: REAL_BACKEND ? REAL_BASE_URL : `http://127.0.0.1:${MOCK_PORT}`,
         DD_WEB_TENANT: SERVER_TENANT,
         // 允许清单：浏览器可以用 dd_web_tenant cookie 在**这两个**里选，别的 403。
         DD_WEB_TENANTS: `${SERVER_TENANT},${ALLOWED_TENANT}`,

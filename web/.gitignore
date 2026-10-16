@@ -11,6 +11,9 @@ coverage
 
 # E2E（playwright.config.ts）：独立构建目录与运行产物
 /.next-e2e
+# 真后端腿（E2E_REAL_BACKEND=1）：独立构建目录 + 独立 SQLite（不碰开发者本机的 data_dog.db）
+/.next-e2e-real
+/.e2e-real
 /test-results
 /playwright-report
 /blob-report

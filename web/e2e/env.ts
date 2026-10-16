@@ -23,3 +23,16 @@ export const TENANT_COOKIE = "dd_web_tenant";
 export const SERVER_TENANT = "tenant-demo";
 export const ALLOWED_TENANT = "tenant-alt";
 export const DISALLOWED_TENANT = "tenant-evil";
+
+/**
+ * 真后端腿开关（`E2E_REAL_BACKEND=1`）。
+ *
+ * 默认腿用 devmock：它按真实端点的**形状**作答，覆盖交互与链路，但它**不校验密钥**，
+ * 所以"代理到底有没有把服务端密钥正确带给真实服务"它证明不了。打开这个开关，上游换成
+ * **真实的 `python -m data_dog.service`**（独立 SQLite 在 `web/.e2e-real/`），由
+ * `e2e/real-backend.spec.ts` 把那次手工结论钉成可重复的门禁。见 docs/delivery.md §6。
+ */
+export const REAL_BACKEND = process.env.E2E_REAL_BACKEND === "1";
+/** 真后端监听端口（刻意避开 8000：本机很可能正跑着开发用的真服务）。 */
+export const REAL_PORT = Number(process.env.E2E_REAL_PORT ?? 8200);
+export const REAL_BASE_URL = `http://127.0.0.1:${REAL_PORT}`;
