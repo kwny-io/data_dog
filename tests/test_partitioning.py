@@ -945,3 +945,80 @@ def test_script_ddl_busy_maps_to_exit_3(url, clean_state, monkeypatch, capsys):
     assert code == 3
     assert payload["skipped"] == "ddl_busy"
     assert payload["actions"] == []
+
+# ---------------------------------------------------------------- 恢复路径 CLI
+
+def test_recover_script_refuses_without_confirm_token(url, clean_state, monkeypatch, capsys):
+    """恢复 CLI：缺少确认令牌 → 退出码 2（不可逆动作前必须复述表名）。"""
+    mod = _load_script("unpartition_telemetry")
+    _pretend_partitioned_pg(monkeypatch)
+    called: list[dict] = []
+    monkeypatch.setattr(partitioning, "unpartition",
+                        lambda _s, _t=partitioning.PARTITION_TABLE, **kw: called.append(kw) or {})
+    code = mod.main(["--unpartition", "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 2
+    assert payload["error"] and "前置条件" in payload["error"]
+    assert called == [], "确认门没拦住：库层被调用了"
+
+
+def test_recover_script_dry_run_executes_nothing(url, clean_state, monkeypatch, capsys):
+    """`--dry-run` 是只读：打印计划，一个 DDL 都不执行。"""
+    mod = _load_script("unpartition_telemetry")
+    _pretend_partitioned_pg(monkeypatch)
+    called: list[dict] = []
+    monkeypatch.setattr(partitioning, "unpartition",
+                        lambda _s, _t=partitioning.PARTITION_TABLE, **kw: called.append(kw) or {})
+    code = mod.main(["--unpartition", "--dry-run", "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 0 and called == []
+    assert payload["actions"][0]["unpartition"]
+
+
+@pytest.mark.postgres
+@pytest.mark.skipif(not _PG_URL, reason="未设 DD_TEST_PG_URL，跳过 PG 恢复 CLI 集成测试")
+def test_recover_script_end_to_end_on_real_pg():
+    """真 PG：转换后跑恢复 CLI，表回到普通表且主键/行数不变。"""
+    import subprocess
+    import sys
+
+    from sqlalchemy import create_engine, text
+    from sqlalchemy.orm import Session
+
+    from data_dog.storage.models import day_of
+
+    table = partitioning.PARTITION_TABLE
+    day = day_of(datetime(2026, 11, 15, tzinfo=timezone.utc).timestamp())
+    env = dict(os.environ, DD_DATABASE_URL=_PG_URL)
+    eng = create_engine(_PG_URL, future=True)
+    with eng.begin() as c:
+        c.execute(text(f"DROP TABLE IF EXISTS {table} CASCADE"))
+        c.execute(text(
+            f"CREATE TABLE {table} (tenant_id varchar(80) NOT NULL, event_id varchar(80) NOT NULL, "
+            "created_day bigint NOT NULL, created_at double precision NOT NULL, "
+            f"CONSTRAINT pk_{table} PRIMARY KEY (tenant_id, event_id, created_day))"))
+        c.execute(text(f"INSERT INTO {table} VALUES ('t1','e1',{day},1.0)"))
+    try:
+        with Session(eng) as s:
+            partitioning.convert_to_partitioned(
+                s, table, months=2, now=datetime(2027, 1, 5, tzinfo=timezone.utc), confirm=table)
+            s.commit()
+            assert partitioning.is_partitioned(s, table) is True
+        p = subprocess.run(
+            [sys.executable, str(ROOT / "scripts" / "unpartition_telemetry.py"),
+             "--unpartition", "--confirm-table", table, "--json"],
+            cwd=str(ROOT), capture_output=True, text=True, encoding="utf-8", env=env)
+        assert p.returncode == 0, (p.stdout, p.stderr)
+        out = json.loads(p.stdout)
+        assert out["partitioned"] is False and out["rows"] == 1
+        with Session(eng) as s:
+            assert partitioning.is_partitioned(s, table) is False
+            pk = s.execute(text(
+                "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+                "WHERE conrelid = to_regclass(:t) AND contype = 'p'"), {"t": table}).scalar()
+            assert pk == "PRIMARY KEY (tenant_id, event_id)", pk
+            assert s.execute(text(f"SELECT count(*) FROM {table}")).scalar() == 1
+    finally:
+        with eng.begin() as c:
+            c.execute(text(f"DROP TABLE IF EXISTS {table} CASCADE"))
+        eng.dispose()

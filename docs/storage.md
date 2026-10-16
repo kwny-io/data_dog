@@ -311,7 +311,54 @@ python scripts/partition_telemetry.py --check              # 应为"分区表，
 "排队"最终是 15 秒后抛一个看不懂的 `QueryCanceled`（也分不清是谁占着）。失败关闭但不排队，语义与租约
 那条腿对齐。（对照：迁移 `migration_lock` 仍然**排队等待**——迁移是不可分割的一次性任务，排队比并行乱跑好。）
 
-### 8.4 有效期信号与调度（"跨月无分区"必须会响）
+
+### 8.3.2 反向恢复：分区表 → 普通表（转换的退路，**已脚本化**）
+
+转换是**不可逆设计**的：默认 `keep_old=False` 会删掉旧表。所以退路有两条，按「什么时候想到要退」分：
+
+| 情形 | 用什么 | 代价 / 边界 |
+|---|---|---|
+| 转换**前**就想留后路 | `--convert --keep-old` | 旧表原封不动留成 `<表>_old`，占一份空间；已真 PG 验证 |
+| 已经转了才**要退** | `scripts/unpartition_telemetry.py` | 停服窗口内一次事务完成；主键回到转换前形状 |
+
+```bash
+# 1) 先只读：能不能退、有没有阻塞项（跨天重复会让旧主键建不起来）
+python scripts/unpartition_telemetry.py --check
+# 2) 看计划，不动结构
+python scripts/unpartition_telemetry.py --unpartition --dry-run
+# 3) 停接入后真执行（确认令牌 + 静默窗口，与转换同一套硬门）
+python scripts/unpartition_telemetry.py --unpartition --confirm-table telemetry_events --require-quiet 30
+```
+
+**它是怎么做的**（顺序是**真 PG 实测定的**，不是想当然）：
+
+1. **卸旧主键**——它占着 schema 级的 `pk_<表>`；而且 `DROP CONSTRAINT` 会**级联**删掉子分区的同名约束
+   （实测），所以在建普通表之前卸。
+2. `CREATE TABLE <表>_plain (LIKE <表> INCLUDING ALL)`——对分区源表它只带出**列 + 普通索引**
+   （索引名是自动派生的 `<普通表>_<列>_idx`），**不带主键**。派生索引删掉，搬完数据后按**源索引定义**
+   用规范名重建（不猜 PG 的自动命名规则）。
+3. 主键形状**推导**：从当前主键里去掉分区键列（转换加的就是它）。若有人把别的列也放进了主键，
+   推导就会错——所以库层留了 `old_primary_key=` 显式参数，且只剩分区键时**拒绝执行**而不是瞎猜。
+4. 复制 RLS/策略/非属主授权 → 核对行数 → 改名切换 → （默认）删掉原分区表。
+
+**跨天重复会挡住恢复**（如实写）：旧主键 `(tenant_id, event_id)` 建不起来。`--check` 会点名是哪几组，
+清理原则是**每组只留最小 `created_day` 的那行**（保留首次摄取时间，与 `keep_old` 的语义一致）：
+
+```sql
+DELETE FROM telemetry_events t USING telemetry_events d
+ WHERE t.tenant_id = d.tenant_id AND t.event_id = d.event_id
+   AND t.created_day > d.created_day;   -- 每组只留最小日桶
+```
+
+**它保证什么、不保证什么**：保证「退回去之后表结构与转换前等价（主键、索引名、RLS、授权、行数）」；
+**不保证**能退回「没有 `created_day` 列」的更早形态——那是 alembic `downgrade` 的事（已真 PG 验证：
+正常升级/降级往返可用；有跨天重复时降级**失败关闭**、不静默丢行）。
+
+**边界**：迁移级 `downgrade` 只处理主键与列，**不管分区**；反向恢复只管分区→普通表，**不动列**。
+两者配合才是完整退路。仍是**停机窗口**操作（`INSERT ... SELECT` 是读快照 + `RENAME` 要 ACCESS EXCLUSIVE）。
+
+**真 PG 验证**：`tests/test_partition_unpartition.py`（往返 / 跨天重复被拦 / 确认令牌）+
+`tests/test_partitioning.py` 的恢复 CLI 三条（缺令牌退出码 2 / dry-run 不执行 / 真实端到端）。### 8.4 有效期信号与调度（"跨月无分区"必须会响）
 
 分区维护此前是**能力齐全但没人调用**：CLI 得人工跑，helm 里没有定时任务，应用启动也不碰。
 而"忘了建下月分区"这件事在**出错前没有任何信号**——跨月那一刻写入才开始报错。现在两层都补上：
@@ -373,7 +420,7 @@ memory"直接报警。
 
 | 指标 | 类型 | 口径 | 在哪刷新 |
 |---|---|---|---|
-| `data_dog_partition_ddl_skipped_total{reason}` | counter | 本轮被让路的次数；`reason` ∈ `{lease_held, convert_busy}` | 启动路径 + CLI |
+| `data_dog_partition_ddl_skipped_total{reason}` | counter | 本轮被让路的次数；`reason` ∈ `{lease_held, convert_busy, ddl_busy, unpartition_busy}` | 启动路径 + 两个 CLI |
 | `data_dog_partition_ddl_lease_held` | gauge | 此刻租约是否有主（1/0） | `/metrics` 每次抓取 |
 | `data_dog_partition_ddl_lease_age_seconds` | gauge | 从上次获取/续期算起的秒数（无主 = 0） | 同上 |
 

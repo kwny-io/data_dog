@@ -34,6 +34,7 @@ from .models import day_of
 from .pg_locks import (
     PARTITION_CONVERT_LOCK_KEY,
     PARTITION_ENSURE_LOCK_KEY,
+    PARTITION_UNPARTITION_LOCK_KEY,
     acquire_xact_lock,
     try_xact_lock,
 )
@@ -762,3 +763,160 @@ def convert_to_partitioned(session: Any, table: str = PARTITION_TABLE, *,
             "partitions": [table + n[len(new):] for n in names],
             "notes": notes, "old_table": old_table if keep_old else None,
             "quiet": quiet}
+
+def check_unpartition_confirm(table: str, confirm: str | None) -> None:
+    """反向操作（分区表 → 普通表）的确认令牌——与 `check_convert_confirm` 同一规矩。
+
+    方向相反但**同样不可逆**：改的是主键形状与表的物理组织，弄错表一样是事故。
+    """
+    check_convert_confirm(table, confirm)
+
+
+def _parent_indexes(session: Any, table: str) -> list[tuple[str, bool, bool, list[str]]]:
+    """分区父表上的索引：`(索引名, 是否唯一, 是否主键, 列名)`（按索引名排序）。
+
+    与 `_index_signatures` 的区别：后者以**签名**为键（用来配对父子索引名），这里要的是
+    「按名字重建」所需的原始信息，所以要保序、保名。
+    """
+    rows = session.execute(text(
+        "SELECT c.relname, i.indisunique, i.indisprimary, "
+        "       (SELECT array_agg(a.attname ORDER BY k.ord) "
+        "          FROM unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord) "
+        "          JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.attnum) "
+        "FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid "
+        "WHERE i.indrelid = to_regclass(:t) ORDER BY c.relname"),
+        {"t": _check_name(table)}).all()
+    return [(str(n), bool(u), bool(p), [str(x) for x in (cols or [])]) for n, u, p, cols in rows]
+
+
+def unpartition_blockers(session: Any, table: str = PARTITION_TABLE) -> list[str]:
+    """反向转换的**前置条件**：返回阻塞项（空 = 可以退回去）。
+
+    核心一条：**跨天重复行会让旧主键 `(tenant_id, event_id)` 建不起来**。与其等到 DDL 里报一个
+    缺上下文的 SQLAlchemy 异常，不如在这里点名它。
+    """
+    if not is_postgres(session):
+        return ["只有 PostgreSQL 支持分区；本例无需反向转换"]
+    if not is_partitioned(session, table):
+        return [f"{table} 不是分区表，无需反向转换"]
+    rows = session.execute(text(
+        "SELECT tenant_id, event_id, count(*), count(DISTINCT created_day) "
+        f"FROM {_check_name(table)} GROUP BY tenant_id, event_id "
+        "HAVING count(DISTINCT created_day) > 1 ORDER BY 3 DESC LIMIT 20")).all()
+    if not rows:
+        return []
+    sample = ", ".join(f"{t}/{e}({int(n)}行/{int(d)}天)" for t, e, n, d in rows[:5])
+    return [f"存在 {len(rows)} 组跨天重复：{sample}——旧主键 (tenant_id, event_id) 建不起来。"
+            "先清重复（每组只留最小 created_day）或改用 --keep-old 方案回退；"
+            "清理与恢复步骤见 docs/storage.md"]
+
+
+def unpartition(session: Any, table: str = PARTITION_TABLE, *,
+                old_primary_key: str = "", keep_partitioned: bool = False,
+                now: datetime | None = None,
+                confirm: str = "", require_quiet: float | None = None) -> dict[str, Any]:
+    """把**分区表转回普通表**（`convert_to_partitioned` 的反向；单事务，失败全回滚）。
+
+    为什么需要它（真实缺口）：`convert_to_partitioned` 默认路径（`keep_old=False`）会删掉旧表，
+    而此前**没有反向脚本**——转换一旦提交，想退回普通表只能人工 `INSERT SELECT + 改名`。
+    它与 `--keep-old` 互补：转换前想到留后路用 `--keep-old`；已经转了才要退，用本函数。
+
+    顺序是**真 PG 实测定的**（`DROP CONSTRAINT` 会级联删掉子分区的同名约束，而约束名是
+    schema 级唯一——不先卸掉，普通表就拿不到 `pk_<表>` 这个规范名）：
+    ① 卸旧主键 → ② 建普通表（主键显式命名）→ ③ 搬数据 + 复制 RLS/授权 + 普通索引改名
+    → ④ 核对行数 → ⑤ 改名切换。
+
+    仍是**停机窗口**操作：`INSERT ... SELECT` 拿的是读快照，期间的并发写入不会进新表；
+    `RENAME` 还要 ACCESS EXCLUSIVE。**执行前停止接入**（`require_quiet` 是硬门）。
+    """
+    if not is_postgres(session):
+        raise PartitioningUnsupported("只有 PostgreSQL 支持分区")
+    if not is_partitioned(session, table):
+        raise ConversionRefused([f"{table} 不是分区表，无需反向转换"])
+
+    check_unpartition_confirm(table, confirm)
+    if not try_xact_lock(session, PARTITION_UNPARTITION_LOCK_KEY):
+        raise PartitioningBusy(
+            "另一个入口正在做分区→普通表的反向转换（咨询锁 partition:ddup 被持有）")
+
+    quiet: dict[str, Any] | None = None
+    if require_quiet is not None:
+        quiet = dict(check_convert_quiet(session, table, seconds=require_quiet, now=now))
+        quiet["ok"] = True
+    blockers = unpartition_blockers(session, table)
+    if blockers:
+        raise ConversionRefused(blockers, details={"reason": "unpartition_blockers"})
+
+    plain = f"{table}_plain"
+    old_table = f"{table}_old"
+    pk = f"pk_{table}"
+    # **旧主键形状必须推导或显式给**：分区表现在的主键含分区键（`created_day`），不能照抄。
+    # 推导 = 从当前主键里去掉分区键列（`convert_to_partitioned` 加的就是它）；
+    # 但如果有人把别的列也放进了主键，推导就错了——所以显式参数优先，并加护栏。
+    if old_primary_key:
+        old_pk = old_primary_key
+    else:
+        cols = [r[0] for r in session.execute(text(
+            "SELECT a.attname FROM pg_index i "
+            "JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey) "
+            "WHERE i.indrelid = to_regclass(:t) AND i.indisprimary ORDER BY a.attnum"),
+            {"t": _check_name(table)})]
+        remaining = [c for c in cols if c != PARTITION_KEY]
+        if not remaining:
+            raise ConversionRefused(
+                [f"{table} 的主键只剩分区键 {PARTITION_KEY!r}，无法推导旧主键；"
+                 "请用 old_primary_key 显式给出（如 \"(tenant_id, event_id)\"）"])
+        old_pk = "(" + ", ".join(remaining) + ")"
+
+    notes: list[str] = []
+    source_indexes = _parent_indexes(session, table)
+    # 源索引定义要**现在**抓（改名切换后 `to_regclass` 会指向新表，抓不到原定义）。
+    # indexdef 形如 `CREATE INDEX <名> ON ONLY public.<表> USING ...`：`ON ONLY` 与
+    # schema 限定都要一起处理。
+    source_defs: list[tuple[str, str]] = []
+    for name, _unique, primary, cols in source_indexes:
+        if primary or not cols:
+            continue                       # 主键另行 ADD CONSTRAINT
+        ddl = session.execute(text(
+            "SELECT pg_get_indexdef(to_regclass(:n))"), {"n": name}).scalar()
+        source_defs.append((name, str(ddl)))
+    session.execute(text(f"ALTER TABLE {_check_name(table)} DROP CONSTRAINT {_q(pk)}"))
+    notes.append(f"卸下旧主键 {pk}（连带子分区约束）")
+    # `LIKE ... INCLUDING ALL` 对分区源表会带出**列 + 普通索引**（索引名是自动派生的
+    # `<普通表>_<列>_idx`），但**不带主键**（源表的主键已被上一步卸掉）。真 PG 实测。
+    session.execute(text(
+        f"CREATE TABLE {_check_name(plain)} (LIKE {_check_name(table)} INCLUDING ALL)"))
+    for (copied,) in session.execute(text(
+        "SELECT indexname FROM pg_indexes WHERE tablename = :t"),
+        {"t": plain}).all():
+        session.execute(text(f"DROP INDEX {_q(str(copied))}"))
+    session.execute(text(
+        f"ALTER TABLE {_check_name(plain)} ADD CONSTRAINT {_q(pk)} PRIMARY KEY {old_pk}"))
+    notes.append(f"建普通表 {plain}（主键 {old_pk}）")
+    session.execute(text(f"INSERT INTO {_check_name(plain)} SELECT * FROM {_check_name(table)}"))
+    notes += _copy_rls(session, table, plain)
+    notes += _copy_grants(session, table, plain)
+    old_rows = int(session.execute(text(f"SELECT count(*) FROM {_check_name(table)}")).scalar() or 0)
+    new_rows = int(session.execute(text(f"SELECT count(*) FROM {_check_name(plain)}")).scalar() or 0)
+    if old_rows != new_rows:
+        raise ConversionRefused(
+            [f"行数核对失败（{table}={old_rows}, {plain}={new_rows}），已回滚"])
+    notes.append(f"行数核对通过：{new_rows}")
+    session.execute(text(f"ALTER TABLE {_check_name(table)} RENAME TO {_check_name(old_table)}"))
+    session.execute(text(f"ALTER TABLE {_check_name(plain)} RENAME TO {_check_name(table)}"))
+    if keep_partitioned:
+        notes.append(f"保留原分区表为 {old_table}")
+    else:
+        # **必须先删原分区表**：它（作为分区父表）还占着 `ix_<表>_*` 这些 schema 级唯一名。
+        session.execute(text(f"DROP TABLE {_check_name(old_table)}"))
+        notes.append(f"删掉原分区表 {old_table}")
+    # 普通索引用规范名重建（源定义已在前面抓好；此刻名字才腾出来）。
+    for name, ddl in source_defs:
+        sql = (ddl.replace(f"ONLY public.{table} ", f"{_q(table)} ", 1)
+               .replace(f"ONLY {table} ", f"{_q(table)} ", 1)
+               .replace(f" ON {table} USING", f" ON {_q(table)} USING", 1))
+        session.execute(text(sql))
+        notes.append(f"重建索引 {name}")
+    return {"unpartitioned": True, "rows": new_rows,
+            "old_table": old_table if keep_partitioned else None,
+            "primary_key": f"PRIMARY KEY {old_pk}", "notes": notes, "quiet": quiet}
