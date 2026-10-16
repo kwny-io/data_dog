@@ -41,6 +41,7 @@ from sqlalchemy import create_engine, text
 MIGRATION_LOCK_KEY = 0x64646D67           # "ddmg"：alembic upgrade head
 PARTITION_CONVERT_LOCK_KEY = 0x64647063   # "ddpc"：分区就地转换
 PARTITION_BACKFILL_LOCK_KEY = 0x64647062  # "ddpb"：created_day 分批回填
+PARTITION_ENSURE_LOCK_KEY = 0x64647065    # "ddpe"：ensure/drop 的库层兜底（租约关掉时）
 
 
 def is_postgres(session_or_bind: Any) -> bool:

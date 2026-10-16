@@ -862,3 +862,38 @@ def test_convert_busy_on_real_pg_does_not_queue():
             for name in (table, f"{table}_old", f"{table}_new"):
                 c.execute(text(f"DROP TABLE IF EXISTS {name} CASCADE"))
         eng.dispose()
+
+
+# ---------------------------------------------------------------- ensure/drop 的库层兜底（--no-lease）
+
+def test_script_passes_lease_off_to_ensure_and_drop(url, clean_state, monkeypatch):
+    """--no-lease 时 CLI 要把 lease_off=True 传下去，库层才知道该走兜底锁。"""
+    mod = _load_script("partition_telemetry")
+    _pretend_partitioned_pg(monkeypatch)
+    seen: list[dict] = []
+    monkeypatch.setattr(
+        partitioning, "ensure_partitions",
+        lambda _s, _t=partitioning.PARTITION_TABLE, **kw: seen.append(kw) or [])
+    monkeypatch.setattr(
+        partitioning, "drop_partitions_before",
+        lambda _s, _c, _t=partitioning.PARTITION_TABLE, **kw: seen.append(kw) or [])
+
+    assert mod.main(["--ensure-months", "2", "--no-lease"]) == 0
+    assert mod.main(["--drop-before", "2026-01", "--no-lease"]) == 0
+    assert seen and all(kw.get("lease_off") is True for kw in seen), seen
+
+
+def test_script_ddl_busy_maps_to_exit_3(url, clean_state, monkeypatch, capsys):
+    """兜底锁被占 → skipped=ddl_busy + 退出码 3（与 convert_busy 同语义，不是错误）。"""
+    mod = _load_script("partition_telemetry")
+    _pretend_partitioned_pg(monkeypatch)
+
+    def busy(*_a, **_kw):
+        raise partitioning.PartitioningBusy("另一个入口正在做分区 ensure/drop")
+
+    monkeypatch.setattr(partitioning, "ensure_partitions", busy)
+    code = mod.main(["--ensure-months", "2", "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 3
+    assert payload["skipped"] == "ddl_busy"
+    assert payload["actions"] == []

@@ -305,6 +305,49 @@ def test_report_lease_exposes_hold_age_while_held(clean_state):
     assert _gauge_value("data_dog_partition_ddl_lease_age_seconds") == pytest.approx(age, abs=0.01)
 
 
+def test_startup_ensure_passes_lease_off_when_the_lease_is_disabled(monkeypatch):
+    """租约关掉时，启动补齐要把 lease_off=True 传给 ensure（让它自己走库层兜底锁）。"""
+    seen: dict = {}
+    monkeypatch.setenv("DD_PARTITION_AUTO_ENSURE", "1")
+    monkeypatch.setenv("DD_PARTITION_DDL_LEASE", "0")
+    monkeypatch.setattr(pm, "session_scope", _fake_scope)
+    monkeypatch.setattr(pm.partitioning, "is_partitioned",
+                        lambda _s, _t=pm.partitioning.PARTITION_TABLE: True)
+    monkeypatch.setattr(pm, "report_horizon",
+                        lambda _s, _t=pm.partitioning.PARTITION_TABLE: None)
+
+    def _ensure(_s, months=3, **kw):
+        seen.update(kw)
+        return []
+
+    monkeypatch.setattr(pm.partitioning, "ensure_partitions", _ensure)
+    assert pm.ensure_if_enabled() == []
+    assert seen.get("lease_off") is True
+
+
+def test_startup_ensure_quietly_skips_when_the_fallback_lock_is_held(monkeypatch):
+    """兜底锁被另一个副本占 → 启动路径**安静跳过**（不崩启动），并把 ddl_busy 记进 counter。"""
+    from data_dog.core import metrics
+
+    rec = _RecordingLog()
+    before = metrics.partition_ddl_skipped_total.labels(reason="ddl_busy")._value.get()
+    monkeypatch.setenv("DD_PARTITION_AUTO_ENSURE", "1")
+    monkeypatch.setenv("DD_PARTITION_DDL_LEASE", "0")
+    monkeypatch.setattr(pm, "_log", rec)
+    monkeypatch.setattr(pm, "session_scope", _fake_scope)
+    monkeypatch.setattr(pm.partitioning, "is_partitioned",
+                        lambda _s, _t=pm.partitioning.PARTITION_TABLE: True)
+
+    def _busy(*_a, **_kw):
+        raise pm.partitioning.PartitioningBusy("另一个入口正在做分区 ensure/drop")
+
+    monkeypatch.setattr(pm.partitioning, "ensure_partitions", _busy)
+    assert pm.ensure_if_enabled() == []
+    after = metrics.partition_ddl_skipped_total.labels(reason="ddl_busy")._value.get()
+    assert after - before == 1
+    assert any("跳过" in m for m in rec.infos), rec.infos
+
+
 def test_startup_skip_is_counted(monkeypatch, clean_state):
     """被别的副本挡住 → 启动跳过要**计数**（“今天补分区被跳过了”必须能被 Prometheus 看见）。"""
     from data_dog.core import metrics

@@ -31,7 +31,12 @@ from typing import Any
 from sqlalchemy import text
 
 from .models import day_of
-from .pg_locks import PARTITION_CONVERT_LOCK_KEY, acquire_xact_lock, try_xact_lock
+from .pg_locks import (
+    PARTITION_CONVERT_LOCK_KEY,
+    PARTITION_ENSURE_LOCK_KEY,
+    acquire_xact_lock,
+    try_xact_lock,
+)
 
 PARTITION_TABLE = "telemetry_events"
 # 分区键是**摄取日桶** `created_day`（= floor(created_at/86400)），不是 `created_at` 本身：
@@ -51,6 +56,16 @@ class PartitioningUnsupported(RuntimeError):
     这是**能力边界**而不是配置错误：调用方（如 retention）应当把它当"走原路径"的信号，
     而不是当失败重试。
     """
+
+
+class PartitioningBusy(RuntimeError):
+    """ensure/drop 的**库层兜底锁**被别的会话持有——本轮跳过（不是错误）。
+
+    只在跨入口租约被**显式关掉**（--no-lease / DD_PARTITION_DDL_LEASE=0）时才会走到
+    这里：那时 ensure/drop 没有任何协作式互斥，只能靠 PG 咨询锁硬挡。
+    语义与 ConversionBusy 对齐：失败关闭但不排队，调用方报 skipped、退出码 3。
+    """
+
 
 
 def _dialect(session: Any) -> str:
@@ -228,19 +243,42 @@ def backfill_created_day(session: Any, table: str = PARTITION_TABLE, *, batch: i
             "dialect": dialect, "batch": size}
 
 
+def _ensure_fallback_lock(session: Any, lease_off: bool) -> None:
+    """租约被显式关掉时的**库层兜底**：非阻塞抢 ensure/drop 的咨询锁，抢不到就抛 PartitioningBusy。
+
+    为什么需要它：多副本 + DD_PARTITION_AUTO_ENSURE=1 + 关租约时，每个副本都会并发执行
+    CREATE TABLE IF NOT EXISTS ... PARTITION OF。IF NOT EXISTS **不是并发安全的**：两个会话都通过
+    存在性检查后会争 pg_class 的唯一性并让其中一个报错。锁是事务级、随本事务结束释放。
+
+    为什么不复用 PARTITION_CONVERT_LOCK_KEY：转换事务**已经持有**它，而 PG 里同一事务对
+    同一把咨询锁再 try 仍返回 False——那会让转换自己判成 busy 而放弃。所以 ensure/drop 有自己的
+    钥匙；与转换的冲突由 PG 的表锁兜底（撞上只会被挡、不会坏数据）。
+    """
+    if not lease_off:
+        return                       # 协作式租约还在管事：默认行为逐字不变
+    if not is_postgres(session) or try_xact_lock(session, PARTITION_ENSURE_LOCK_KEY):
+        return
+    raise PartitioningBusy(
+        "另一个入口正在做分区 ensure/drop（咨询锁 partition:ddpe 被持有）——本轮跳过")
+
+
 def ensure_partitions(session: Any, table: str = PARTITION_TABLE, *,
                       months: int = 3, now: datetime | None = None,
-                      since: datetime | None = None) -> list[str]:
+                      since: datetime | None = None,
+                      lease_off: bool = False) -> list[str]:
     """确保"本月起未来 `months` 个月"的分区都存在（幂等）。返回分区名列表。
 
     为什么是**未来** N 个月：分区表最大的坑是"忘了建下月分区 → 写入直接报错
     `no partition of relation ... found for row`"。每月维护任务跑这个即可。
+
+    `lease_off=True`（跨入口租约被显式关掉时）额外走库层兜底锁：见 `_ensure_fallback_lock`。
     """
     if not is_postgres(session):
         raise PartitioningUnsupported("只有 PostgreSQL 支持分区")
     if not is_partitioned(session, table):
         raise PartitioningUnsupported(
             f"{table} 还不是分区表——先按 docs/storage.md 的 runbook 转换/初次建表")
+    _ensure_fallback_lock(session, lease_off)
     base = datetime.now(timezone.utc) if now is None else now
     out: list[str] = []
     for start in planned_partition_months(since, base, months):
@@ -251,14 +289,16 @@ def ensure_partitions(session: Any, table: str = PARTITION_TABLE, *,
 
 
 def drop_partitions_before(session: Any, cutoff: float,
-                           table: str = PARTITION_TABLE) -> list[str]:
+                           table: str = PARTITION_TABLE, *,
+                           lease_off: bool = False) -> list[str]:
     """删掉**整段都早于 `cutoff`** 的分区（上界 ≤ cutoff）。返回被删的分区名。
 
     只删"整段过期"的分区：边界月里可能还有要留的数据，宁可少删（保数据），留给下一轮
-    或普通删除处理。这正是分区表"删数据"与"删表"的分界。
+    或普通删除处理。这正是分区表"删数据"与"删表"的分界。`lease_off=True` 同 `ensure_partitions`。
     """
     if not is_postgres(session):
         raise PartitioningUnsupported("只有 PostgreSQL 支持分区")
+    _ensure_fallback_lock(session, lease_off)
     dropped: list[str] = []
     for name in list_partitions(session, table):
         end = partition_end(name)

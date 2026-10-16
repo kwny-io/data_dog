@@ -119,6 +119,11 @@ def main(argv: list[str] | None = None) -> int:
         record_skip("convert_busy", metrics.partition_ddl_skipped_total)
         out["skipped"] = "convert_busy"
         out["busy"] = str(exc)
+    except partitioning.PartitioningBusy as exc:
+        # ensure/drop 的库层兜底锁被占（只在 --no-lease 时可能）：语义同 convert_busy。
+        record_skip("ddl_busy", metrics.partition_ddl_skipped_total)
+        out["skipped"] = "ddl_busy"
+        out["busy"] = str(exc)
 
     if out.get("error"):
         exit_code = 2
@@ -172,7 +177,8 @@ def _run(args, s: Any, out: dict[str, Any], lease_blocker: str, partitioning: An
                 out["actions"].append({"ensure": planned, "executed": False})
             elif not lease_blocker:
                 done = partitioning.ensure_partitions(
-                    s, partitioning.PARTITION_TABLE, months=args.ensure_months)
+                    s, partitioning.PARTITION_TABLE, months=args.ensure_months,
+                    lease_off=args.no_lease)
                 out["actions"].append({"ensure": done, "executed": True})
 
     if args.drop_before:
@@ -184,7 +190,7 @@ def _run(args, s: Any, out: dict[str, Any], lease_blocker: str, partitioning: An
                 out["actions"].append({"drop": candidates, "executed": False})
             elif not lease_blocker:
                 done = partitioning.drop_partitions_before(
-                    s, cutoff, partitioning.PARTITION_TABLE)
+                    s, cutoff, partitioning.PARTITION_TABLE, lease_off=args.no_lease)
                 out["actions"].append({"drop": done, "executed": True})
 
 

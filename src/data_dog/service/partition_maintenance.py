@@ -93,7 +93,17 @@ def ensure_if_enabled() -> list[str]:
                     "DD_PARTITION_AUTO_ENSURE=1，但 %s 不是分区表（非 PostgreSQL 或尚未转换），跳过",
                     partitioning.PARTITION_TABLE)
                 return []
-            created = partitioning.ensure_partitions(s, months=months)
+            try:
+                # 租约被显式关掉时，ensure 自己走库层兜底锁（多副本 + 自动补分区 + 关租约是危险组合：
+                # CREATE TABLE IF NOT EXISTS 不是并发安全的，两个会话会争 pg_class 唯一性）。
+                created = partitioning.ensure_partitions(
+                    s, months=months, lease_off=not settings.partition_ddl_lease())
+            except partitioning.PartitioningBusy as exc:
+                # 兜底锁被占 = 另一个副本正在做同样的事：跳过不是失败（有指标 + 告警兜底）。
+                partition_ddl.record_skip("ddl_busy", metrics.partition_ddl_skipped_total)
+                report_lease()
+                _log.info("分区自动补齐跳过：%s", exc)
+                return []
             # 顺便报一次：刚补完的进程不该等到下一次抓取才有"有效期"这个信号。
             report_horizon(s)
         _log.info("分区有效期已补齐到未来 %d 个月：%s", months, ", ".join(created) or "(无变化)")
