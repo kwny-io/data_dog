@@ -152,7 +152,7 @@ CLI 报 `skipped=lease_held` + `lease_owner` + **退出码 3**（不是 0 成功
 
 **互斥的可见性（本轮）**：租约与「跳过」此前只在共享状态/日志里，Prometheus 侧完全缺席。补三条：`data_dog_partition_ddl_skipped_total{reason}`（区别 lease_held / convert_busy）、`..._lease_held`（0/1）与 `..._lease_age_seconds`（从上次续期算起），后两条在 `/metrics` 每次抓取时重算；两条告警 `DataDogPartitionDdlSkipped`（24h 内有跳过）与 `DataDogPartitionDdlLeaseStuck`（持有 > 2×TTL）落在 helm `data-dog.storage` 组、仅在 `partition.enabled=true` 时渲染。**刻意不给 owner 打标签**：是 host:pid，基数随滚动发布无限增长（同 LLM 额度那条纪律）；「被谁挡的」看日志/共享状态。**age 从 `expires_at - TTL` 反推**，不改共享状态格式。
 
-### A10 控制台收敛 + 多租户身份（已落地：收敛 + 租户选择 + 用户级授权最小步；OIDC 为边界）
+### A10 控制台收敛 + 多租户身份（已落地：收敛 + 租户选择 + 用户级授权最小步 + 启动护栏 + 防伪造回归；**身份层为边界**）
 
 **已落地（本轮）**：
 
@@ -167,15 +167,30 @@ CLI 报 `skipped=lease_held` + `lease_owner` + **退出码 3**（不是 0 成功
    ——可信反代注入用户头（默认 `x-auth-request-user`，可配），控制台强制"用户只能碰自己的租户"：
    缺头 / 未知用户 / cookie 越权**一律 403**（失败关闭，不给默认权限）。前端测试再 +7。
 
+4. **失败关闭的启动护栏**（`web/lib/api/proxy.ts::trustProxyAuthGuard` + `web/instrumentation.ts`）：
+   开了信任、却既没有 Basic 门（`DD_WEB_BASIC_AUTH`）、也没有显式承担责任的确认
+   （`DD_WEB_TRUST_PROXY_ACK=1`）时**拒绝启动**，并说明"要剥的是哪个头"，而不是静默信任一个
+   谁都能写的头。判定表 5 条单测钉死（`web/tests/startup-guard.test.ts`）。
+
+5. **防伪造回归**（`web/tests/api-proxy.test.ts`）：信任**关闭**时，客户端自带的 `x-auth-request-user`
+   必须被完全忽略——不参与选租户，也不被转发给上游（两条断言）。这是该模式最真实的风险面。
+
+6. **真后端腿**（`E2E_REAL_BACKEND=1`，`web/e2e/real-backend.spec.ts`）：把"浏览器 → Next 代理 →
+   **真实** FastAPI 服务"的三段连携钉成可重复门禁（同一把密钥直连 200 / 不带密钥直连 401 / 经代理 200；
+   租户清单外 403）。此前这条链只有一次**手工**结论，且一度因端口/env 没对齐被误判成产品缺陷。
+
 **仍是人工边界（不假装做完）**：
 
-- **没有登录页 / 用户目录 / OIDC**：身份完全由反代注入（`DD_WEB_TRUST_PROXY_AUTH`），控制台
-  不做登录、不改密码、不管用户生命周期；`DD_WEB_USER_TENANTS` 是**配置文件里的静态映射**，不是
-  授权数据库。
+- **身份（"谁是我"）由外部认证代理提供，本仓不实现**：没有登录页 / 用户目录 / OIDC；控制台不做
+  登录、不改密码、不管用户生命周期；`DD_WEB_USER_TENANTS` 是**配置文件里的静态映射**，不是授权
+  数据库。能做、也已做的是**控制台层授权**（租户选择 + 用户级租户约束 + 缺头/越权 403），外加启动
+  护栏与防伪造回归兜住"信任一个头"的风险；**不假装**这等于身份层。
 - **服务端仍无用户级授权**：后端只认服务端强制的 `X-Tenant-Id`（没有"用户"概念）。所以用户级
   约束是**控制台这一层**的，直连后端（绕过控制台）不受它约束——生产必须保证后端不可被绕过访问。
-- **反代必须剥离客户端伪造的用户头**：这是启用该开关的**硬前提**，写进了 CLI 无法检查的部署项里
-  （`web/lib/api/proxy.ts` 的 `resolveIdentity` docstring 与 `docs/delivery.md` 都写明）。
+- **反代必须剥离客户端伪造的用户头**：这是启用该开关的**硬前提**。它已从"注释里的部署项"变成
+  **启动期硬门**（`trustProxyAuthGuard`：既无 Basic 门、又无 `DD_WEB_TRUST_PROXY_ACK=1` 即拒绝
+  启动），并有防伪造回归钉住"信任关闭时该头不生效、也不转发"。但护栏只能保证"要么有门、要么有人
+  明确确认并读过原因"，**仍无法验证反代真的剥了头**——这是身份不在本仓的必然代价。
 - 因此控制台的租户隔离**目前仍依赖"受信网关 + 服务端配置"**（与 `docs/delivery.md` 的多租户
   行一致）。
 
