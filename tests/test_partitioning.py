@@ -457,6 +457,54 @@ def test_convert_existing_table_to_day_bucket_partitions():
 
 @pytest.mark.postgres
 @pytest.mark.skipif(not _PG_URL, reason="未设 DD_TEST_PG_URL，跳过 PG 分区集成测试")
+def test_converted_partitions_do_not_keep_the_new_infix_in_index_names():
+    """真 PG：转换后**子分区索引名**也不能留中间态 `_new` 中缀。
+
+    为什么单独立一条：上一个用例只查**父表**的 `pg_indexes`，而父表那两处恰好是改对的
+    （索引 DDL 名字不变、主键改了**约束**名），于是它对"分区被改名、其**索引**没跟着改"
+    是结构性盲区。子索引不会被任何现有代码路径改名，会永久停在
+    `<table>_new_<YYYYMM>_<col>_idx`——每个分区 6 条、生产上就是上百条常驻垃圾名。
+    """
+    from sqlalchemy import create_engine, text
+    from sqlalchemy.orm import Session
+
+    from data_dog.storage.models import day_of
+
+    table = "conv_idx_probe"
+    now = datetime(2026, 12, 1, tzinfo=timezone.utc)
+    day = day_of(datetime(2026, 11, 15, tzinfo=timezone.utc).timestamp())
+    eng = create_engine(_PG_URL, future=True)
+    with eng.begin() as c:
+        for name in (table, f"{table}_old", f"{table}_new"):
+            c.execute(text(f"DROP TABLE IF EXISTS {name} CASCADE"))
+        c.execute(text(
+            f"CREATE TABLE {table} (tenant_id varchar(80) NOT NULL, event_id varchar(80) NOT NULL, "
+            "created_day bigint NOT NULL, created_at double precision NOT NULL, "
+            "PRIMARY KEY (tenant_id, event_id, created_day))"))
+        c.execute(text(f"CREATE INDEX ix_{table}_tenant_created ON {table} (tenant_id, created_at)"))
+        c.execute(text(f"CREATE INDEX ix_{table}_created ON {table} (created_at)"))
+        c.execute(text(f"INSERT INTO {table} VALUES ('t1','e1',{day},1.0)"))
+    try:
+        with Session(eng) as s:
+            partitioning.convert_to_partitioned(s, table, months=2, now=now, confirm=table)
+            s.commit()
+            assert partitioning.is_partitioned(s, table) is True
+            rows = [r[0] for r in s.execute(text(
+                "SELECT indexname FROM pg_indexes WHERE schemaname = 'public' "
+                "AND (tablename = :t OR tablename LIKE :p)"), {"t": table, "p": table + "\_2%"})]
+            bad = [n for n in rows if "_new_" in n]
+            assert not bad, f"子分区索引名仍带 _new 中缀：{bad}"
+            # 子分区索引本身必须存在且被规划器使用（不是"删掉名字清爽了"）
+            assert sum(1 for n in rows if n.startswith(table + "_")) >= 3, rows
+    finally:
+        with eng.begin() as c:
+            for name in (table, f"{table}_old", f"{table}_new"):
+                c.execute(text(f"DROP TABLE IF EXISTS {name} CASCADE"))
+        eng.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.skipif(not _PG_URL, reason="未设 DD_TEST_PG_URL，跳过 PG 分区集成测试")
 def test_real_table_writes_land_in_partition_and_retention_drops(monkeypatch):
     """真 PG + 真迁移 + 真写路径：`save_telemetry` 落进当月分区；过期分区被整段 DROP。
 

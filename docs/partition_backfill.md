@@ -39,6 +39,11 @@ alembic upgrade head
 | **与迁移公式一致**：`_backfill_expr` 逐字相同，有测试钉住 | 不为你判断"现在能不能停服"——那是人的决定 |
 | **并发保护**：`partition:backfill` 会话级锁（协作式，抢不到就退出码 3） | 协作式：绕过它直接跑不会坏数据，只是白干一遍 |
 
+**回填窗口内量「跨天重复」注意口径**：`repository.count_cross_day_duplicates()` 只统计
+`created_day IS NOT NULL` 的行，所以它在回填**没跑完**时给的是**下界**（重复行里还有没回填的那组
+会被漏掉）。别拿它的返回值推断进度——进度单独用
+`SELECT count(*) FROM telemetry_events WHERE created_day IS NULL` 核对。
+
 ## 真库验证（本机）
 
 `tests/test_backfill_created_day.py`：离线腿 4 passed（SQLite `rowid` 分页、幂等、`commit_each`

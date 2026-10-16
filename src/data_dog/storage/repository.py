@@ -592,9 +592,19 @@ def count_cross_day_duplicates(session: Session, *, tenant_id: str | None = None
 
     成本：`GROUP BY` 扫描（分区表上 `since` 能触发分区裁剪）。**刻意不挂在 `/metrics` 或
     retention 的每次运行上**（那是热路径/后台热路径），由运维按需/定期跑。
+
+    只统计 `created_day IS NOT NULL` 的行，因此**回填窗口内它给的是下界**——实测三态：
+    全量未回填 → 本函数返回 []；已回填完 → 返回真实重复组；**混合态**下若某组的重复行里
+    还有未回填的（NULL），该组会被排除（漏报）。必须记账：**不**把 NULL 当成一个"日桶"，
+    否则同一次写入会被虚构成额外的日桶——实测把 1 条真重复组虚报成 `n=2` 的天数，
+    而"看总数"的人会以为有两组。所以口径是"**至少两个完整日桶**"，不是"至少两行"；
+    回填进度请用 `SELECT count(*) FROM telemetry_events WHERE created_day IS NULL` 另行核对
+    （不要拿本函数的返回去推断进度）。
     """
     q = session.query(M.TelemetryEventRow.tenant_id, M.TelemetryEventRow.event_id,
                       func.count().label("n"))
+    # 迁移前/回填窗口内 created_day 为 NULL 的行不算"日桶"，否则同一行会被虚构成重复（见 docstring）。
+    q = q.filter(M.TelemetryEventRow.created_day.isnot(None))
     if tenant_id is not None:
         q = q.filter(M.TelemetryEventRow.tenant_id == tenant_id)
     if since is not None:

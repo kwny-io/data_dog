@@ -602,6 +602,52 @@ def plan_conversion(session: Any, table: str = PARTITION_TABLE, *,
     return plan
 
 
+def _reprefix_partition_indexes(session: Any, table: str, new: str,
+                                partitions: list[str]) -> None:
+    """把**子分区索引/约束**名里的中间态前缀 `<表>_new` 去掉，回到 `<表>`。
+
+    为什么必须有这一步（真 PG 实测）：分区被 `ALTER TABLE ... RENAME` 改名后，**它自己的索引
+    和约束不会跟着改**，而且**没有任何现有代码路径会去改它们**——于是名字永久停在
+    `<表>_new_<YYYYMM>_<列>_idx` / `<表>_new_<YYYYMM>_pkey`（10 个分区 × 6 条 = 60 条）。
+    只影响命名与依赖名字的运维脚本/自动化，不影响规划器用这些索引；但生产上就是上百条常驻
+    垃圾名，转换既然自称"就地转成规范形态"，就该收干净。
+
+    约束与索引**分两类处理**（与上面父表那两处的理由相同）：`conname` 与索引名是两个命名空间，
+    对唯一/主键背后的索引直接 `ALTER INDEX` 会被 PG 挡下（它是约束的索引），必须先
+    `ALTER TABLE ... RENAME CONSTRAINT` 改约束名——约束名一改，其底层索引名自动跟着变。
+    只反向改名（`new→table`）、不正向撞名，所以不会与父表占用的规范名冲突。
+    """
+    old_prefix = f"{new}_"
+    new_prefix = f"{table}_"
+    # **只取这些分区自己的索引**（按 indrelid 限定），不按名字 LIKE 全库扫：后者会撞上
+    # 别的表残留的同类名字（真 PG 实测报 relation already exists）。
+    rows = session.execute(text(
+        "SELECT n.nspname, c.relname, con.conname, con.conrelid::regclass::text "
+        "FROM pg_class c "
+        "JOIN pg_namespace n ON n.oid = c.relnamespace "
+        "JOIN pg_index i ON i.indexrelid = c.oid "
+        "LEFT JOIN pg_constraint con ON con.conindid = c.oid "
+        "WHERE i.indrelid IN (SELECT i2.inhrelid FROM pg_inherits i2 "
+        "                     WHERE i2.inhparent = to_regclass(:parent))"),
+        {"parent": f"public.{_check_name(table)}"}).all()
+    done: set[tuple[str, str]] = set()
+    for schema, old_name, con_name, con_table in rows:
+        old_name = str(old_name)
+        if not old_name.startswith(old_prefix):
+            continue
+        target = new_prefix + old_name[len(old_prefix):]
+        if (str(schema), target) in done:
+            continue
+        done.add((str(schema), target))
+        if con_name is not None:
+            # 主键/唯一背后的索引：改**约束**名，其底层索引名自动跟着变（直接 ALTER INDEX 会被挡）。
+            session.execute(text(f"ALTER TABLE {_q(con_table)} "
+                                 f"RENAME CONSTRAINT {_q(con_name)} TO {_q(target)}"))
+        else:
+            session.execute(text(f"ALTER INDEX {_q(schema)}.{_q(old_name)} "
+                                 f"RENAME TO {_q(target)}"))
+
+
 def convert_to_partitioned(session: Any, table: str = PARTITION_TABLE, *,
                            months: int = 3, keep_old: bool = False,
                            now: datetime | None = None, confirm: str = "",
@@ -694,6 +740,7 @@ def convert_to_partitioned(session: Any, table: str = PARTITION_TABLE, *,
         suffix = name[len(new):]
         session.execute(text(f"ALTER TABLE {_check_name(name)} "
                              f"RENAME TO {_check_name(table + suffix)}"))
+    _reprefix_partition_indexes(session, table, new, names)
     if not keep_old:
         # **必须先删旧表**：索引名是 schema 级唯一，旧表还占着 `pk_telemetry_events` 这类规范名，
         # 不改名就撞 `relation ... already exists`（真 PG 实测）。

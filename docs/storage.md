@@ -212,7 +212,10 @@ FeatureNotSupported: unique constraint on partitioned table must include all par
   的 double→int 四舍五入）。
 - **代价可观测**：`repository.count_cross_day_duplicates()` 找出同一 `(tenant_id, event_id)` 落在
   多个日桶的行。它**刻意不挂 `/metrics` 或 retention 热路径**（`GROUP BY` 扫描不便宜），由运维
-  按需/定期跑；`since` 传保留窗口起点可在分区表上触发分区裁剪。
+  按需/定期跑；`since` 传保留窗口起点可在分区表上触发分区裁剪。口径是"**至少两个完整日桶**"
+  （只统计 `created_day IS NOT NULL`）：回填窗口内它给的是**下界**——真 PG 实测，若把 NULL 当
+  一个"日桶"，1 条真重复会被虚报成 `n=2` 的天数；而排除 NULL 又会漏掉"重复行里还有没回填的"
+  那一组。回填进度请单独用 `count(*) WHERE created_day IS NULL` 核对，别拿它的返回值推断进度。
 - **分区模块已改日粒度（第 2/3 步已落地）**：分区键 `created_day`，分区粒度仍是**自然月**
   （一个分区覆盖该月所有日桶），DDL 边界是**日序号整数**（`FOR VALUES FROM (20727) TO (20758)`）；
   `partition_end()` 仍返回 epoch 秒（20758 × 86400），因此 retention 的 `cutoff` 比较逻辑一行未改。
@@ -225,6 +228,16 @@ FeatureNotSupported: unique constraint on partitioned table must include all par
   改名切换 → 删旧表。失败整体回滚。真库实测的两处坑已修：① 索引名是 schema 级唯一，**必须先删
   旧表**再改回规范索引名，否则 `relation pk_... already exists`；② 主键要改**约束**名（改索引名
   不动约束名）。
+  真库实测的第三处坑（本次全流程跑通时才暴露）：**分区被 `ALTER TABLE ... RENAME` 改名后，它自己的
+  索引和约束不会跟着改**，而父表那两处恰好是改对的，于是名字永久停在 `<表>_new_<YYYYMM>_*_idx`
+  / `<表>_new_<YYYYMM>_pkey`（10 分区 × 6 条 = **60 条**），且没有任何代码路径会去改它们。
+  查询仍照常走这些索引（不是性能问题），但"就地转成规范形态"名不副实，生产上就是上百条常驻垃圾名。
+  已修：分区改名后按 `pg_inherits` **只取这些分区的索引**逐条去中缀——约束背后的索引（主键/唯一）
+  走 `ALTER TABLE ... RENAME CONSTRAINT`（直接 `ALTER INDEX` 会被 PG 挡），普通索引走
+  `ALTER INDEX ... RENAME`。**不要按名字 `LIKE '<表>_new_%'` 全库扫**：会撞上别的表残留的同类
+  名字（实测报 `relation "<表>_pkey" already exists`）。回归用例：
+  `test_converted_partitions_do_not_keep_the_new_infix_in_index_names`——原来的转换用例只查**父表**
+  的 `pg_indexes`，对这条是结构性盲区。
 
 **一个必须知道的限制**：`created_day` **不能是生成列**——PG 16 明确拒绝"生成列做分区键"（实测报错
 `Column "created_day" is a generated column.`），PG 17 才允许。所以 D 要有一个**普通列 + 写路径显式
@@ -235,6 +248,11 @@ FeatureNotSupported: unique constraint on partitioned table must include all par
 0.5 KB 偏小）：分批 DELETE（500/批）**≈52,000 行/秒** → 默认一轮（`max_batches=200`，最多 10 万行）
 约 **1.9 s**；整段过期分区 `DROP TABLE` **0.03 s**（与行数无关、不产生死元组）。即：**在百万行量级
 DELETE 还不是问题**——所以先定触发线，而不是先动表结构。
+
+**同规模对照（本次转换真跑后的实测，PG 16.15 / 5,000 行，两者都不含"因大表而失真"的推测）**：
+分批 DELETE（500/批、10 批）**461 ms ≈ 10,855 行/秒**；整段 `DROP PARTITION`（该分区正是这 5,000 行）
+**13.7 ms**——**34×**。注意这个 DELETE 速率明显低于上面百万行那次的 52k/s，因为它逐行删还要维护
+主键索引与产生死元组；而 DROP 的成本基本只与**分区数**有关，与分区内行数无关。
 
 **已有防护**：`partitioning.check_partitionable()` 会逐条点名阻塞项（非 PG / 表不存在 / 分区键
 类型不支持 / **唯一约束不含分区键** / 入向外键），`--check` 会打印，转换类操作在阻塞项存在时
