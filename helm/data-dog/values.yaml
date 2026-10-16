@@ -199,6 +199,10 @@ partition:
   concurrencyPolicy: Forbid
   # 超过这个时间没被调度就不再补跑（避免发布后一次性补一堆过期任务）。
   startingDeadlineSeconds: 600
+  # CLI 的退出码 3 = 租约被别的入口持有（"这轮不该我干"，不是配置错）。K8s 会把它
+  # 当失败按指数退避重试（约 10s→20s→40s），正好当"等对方放手"的应用级退避用；
+  # 所以 Failed Job 历史里有零星记录是**预期**的，别当故障。幂等（CREATE TABLE IF
+  # NOT EXISTS ... PARTITION OF），重试不会重复建。
   backoffLimit: 3
   resources: {}
 

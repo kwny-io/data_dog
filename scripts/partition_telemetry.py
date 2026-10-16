@@ -89,7 +89,8 @@ def main(argv: list[str] | None = None) -> int:
                    help="要求转换前最近一次写入早于 N 秒（拒绝并发写入丢失）")
     p.add_argument("--dry-run", action="store_true", help="只打印将要做的事，不执行 DDL")
     p.add_argument("--no-lease", action="store_true",
-                   help="跳过结构变更互斥（仅单机直跑 / 已确认无并发；多副本请留着）")
+                   help="跳过结构变更互斥（仅单机直跑 / 已确认无并发；多副本请留着）。"
+                        "关掉后 ensure/drop 连库层咨询锁都没有（那只盖迁移与转换）")
     p.add_argument("--json", action="store_true", help="输出 JSON（供调度器采集）")
     args = p.parse_args(argv)
 

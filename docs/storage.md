@@ -327,6 +327,14 @@ python scripts/partition_telemetry.py --check              # 应为"分区表，
 | 只读动作 | `--check` / `--dry-run` **不参与互斥**：不抢锁，别人持锁也照常给现状与计划 |
 | TTL | `DD_PARTITION_DDL_LEASE_TTL_S` 默认 **900s**，必须大于最慢的那次 DDL（转换含整表拷贝），否则长 DDL 会被第二个副本抢走 |
 | 关掉 | `--no-lease` 或 `DD_PARTITION_DDL_LEASE=0`（仅单机直跑 / 已确认无并发） |
+| CronJob 见到退出码 3 | K8s 按 `backoffLimit` 指数退避重试（约 10s→20s→40s），正好当"等对方放手"的退避；因此 Job 历史里零星 Failed 是**预期**的。幂等，重试不会重复建 |
+
+**机制的不对称（如实写）**：租约管 `--ensure-months` / `--drop-before` / `--convert` 三个入口；
+而库层 PG 咨询锁目前只盖**迁移**与**转换事务**。所以一旦 `--no-lease`（或租约被关），
+`ensure`/`drop` 就**完全没有互斥**——只剩 PG 自己的表锁（`CREATE TABLE IF NOT EXISTS ... PARTITION OF`
+在真并发下会撞 `pg_class` 唯一性并报错，所以**多副本 + 自动补分区 + 关租约**是危险组合）。
+`data-dog config check` 对"自动补分区 + 关租约"与"自动补分区 + memory 后端"两条直接报警；
+真多副本请让 `DD_STATE_BACKEND` 落在 postgres/redis 且**别关租约**。
 
 **它保证什么、不保证什么**：保证"同一时刻只有一个入口在动结构"且"谁在动"可查；**它不是转换
 正确性的边界**——租约是协作式且带 TTL（长 DDL 超过 TTL 时第二个副本仍可能抢到），真正兜底的是

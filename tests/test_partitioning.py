@@ -13,6 +13,7 @@ import importlib.util
 import json
 import os
 import pathlib
+import time
 from datetime import datetime, timezone
 
 import pytest
@@ -841,9 +842,14 @@ def test_convert_busy_on_real_pg_does_not_queue():
         with Session(eng) as a:
             assert pg_locks.acquire_xact_lock(a, pg_locks.PARTITION_CONVERT_LOCK_KEY) is True
             with Session(eng) as b:
+                # **计时**：非阻塞是这里唯一真正值钱的性质——一旦退回 wait=True，B 会一直等到
+                # statement_timeout（本仓默认 15s）才抛 QueryCanceled，那正是要消灭的"看不懂的超时"。
+                t0 = time.monotonic()
                 with pytest.raises(partitioning.ConversionBusy):
                     partitioning.convert_to_partitioned(
                         b, table, now=datetime(2026, 12, 1, tzinfo=timezone.utc), confirm=table)
+                elapsed = time.monotonic() - t0
+                assert elapsed < 2.0, f"抢不到锁时阻塞了 {elapsed:.1f}s（应立刻返回）"
                 b.rollback()
             a.commit()                       # 释放锁
         with Session(eng) as c:
