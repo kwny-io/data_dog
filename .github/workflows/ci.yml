@@ -51,7 +51,8 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev,postgres]"
       - name: ruff
-        run: ruff check src tests scripts
+        # alembic/ 也纳入：迁移是生产路径的一部分（此前不在门禁里，攒了 65 条）
+        run: ruff check src tests scripts alembic
       - name: mypy
         run: mypy src
       - name: 依赖清单与元数据一致性（漂移即红）

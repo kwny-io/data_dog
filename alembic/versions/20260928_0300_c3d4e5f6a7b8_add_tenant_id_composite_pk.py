@@ -34,16 +34,16 @@ baseline 建的主键**没有名字**，而 SQLite 也不保存主键约束名�
 """
 from __future__ import annotations
 
-from typing import Sequence, Union
+from collections.abc import Sequence
 
-from alembic import op
 import sqlalchemy as sa
 
+from alembic import op
 
 revision: str = 'c3d4e5f6a7b8'
-down_revision: Union[str, None] = 'a06f16a9eff1'
-branch_labels: Union[str, Sequence[str], None] = None
-depends_on: Union[str, Sequence[str], None] = None
+down_revision: str | None = 'a06f16a9eff1'
+branch_labels: str | Sequence[str] | None = None
+depends_on: str | Sequence[str] | None = None
 
 
 # 既有行回填的租户值（固定字面量：迁移必须可重放，不读运行期环境）。

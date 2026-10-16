@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Alembic 环境配置。
 
 关键点
@@ -11,18 +10,19 @@
 """
 from __future__ import annotations
 
-from logging.config import fileConfig
-
-from alembic import context
-from sqlalchemy import engine_from_config, pool
-
 # 让 alembic 能看到 src/ 布局下的包
 import os
 import sys
+from logging.config import fileConfig
+
+from sqlalchemy import engine_from_config, pool
+
+from alembic import context
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from data_dog.storage.db import Base, database_url  # noqa: E402
 from data_dog.storage import models  # noqa: F401,E402  确保模型注册到 Base.metadata
+from data_dog.storage.db import Base, database_url  # noqa: E402
 
 config = context.config
 

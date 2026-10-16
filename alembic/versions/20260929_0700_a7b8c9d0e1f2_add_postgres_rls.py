@@ -31,14 +31,14 @@
 """
 from __future__ import annotations
 
-from typing import Sequence, Union
+from collections.abc import Sequence
 
 from alembic import op
 
 revision: str = 'a7b8c9d0e1f2'
-down_revision: Union[str, None] = 'f6a7b8c9d0e1'
-branch_labels: Union[str, Sequence[str], None] = None
-depends_on: Union[str, Sequence[str], None] = None
+down_revision: str | None = 'f6a7b8c9d0e1'
+branch_labels: str | Sequence[str] | None = None
+depends_on: str | Sequence[str] | None = None
 
 # 带 tenant_id 列的表（state_kv 是全局状态，无租户维度，不加 RLS）
 _TENANT_TABLES = (

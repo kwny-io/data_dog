@@ -18,16 +18,16 @@ no-op（本地开发仍是应用层过滤）。
 """
 from __future__ import annotations
 
-from typing import Sequence, Union
+from collections.abc import Sequence
 
-from alembic import op
 import sqlalchemy as sa
 
+from alembic import op
 
 revision: str = 'a3b4c5d6e7f8'
-down_revision: Union[str, None] = 'e8f9a0b1c2d3'
-branch_labels: Union[str, Sequence[str], None] = None
-depends_on: Union[str, Sequence[str], None] = None
+down_revision: str | None = 'e8f9a0b1c2d3'
+branch_labels: str | Sequence[str] | None = None
+depends_on: str | Sequence[str] | None = None
 
 _PREDICATE = "tenant_id = current_setting('app.tenant_id', true)"
 
