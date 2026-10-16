@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import pathlib
 from datetime import datetime, timezone
@@ -368,7 +369,7 @@ def test_real_telemetry_shape_is_blocked_by_its_primary_key():
         # 转换计划与转换入口也必须**拒绝**（不能只在 check 里提示）
         assert partitioning.plan_conversion(s, table)["blockers"], "计划里也应带阻塞项"
         with pytest.raises(partitioning.ConversionRefused):
-            partitioning.convert_to_partitioned(s, table)
+            partitioning.convert_to_partitioned(s, table, confirm=table)
         with pytest.raises(NotSupportedError) as e:
             with eng.begin() as c:
                 c.execute(text(
@@ -421,7 +422,8 @@ def test_convert_existing_table_to_day_bucket_partitions():
             assert plan["rows"] == 2
             assert plan["partitions"] == [f"{table}_202610", f"{table}_202611",
                                           f"{table}_202612", f"{table}_202701"]
-            out = partitioning.convert_to_partitioned(s, table, months=2, now=now)
+            out = partitioning.convert_to_partitioned(
+                s, table, months=2, now=now, confirm=table)
             s.commit()
             assert out["converted"] is True and out["rows"] == 2
             assert partitioning.is_partitioned(s, table) is True
@@ -474,7 +476,8 @@ def test_real_table_writes_land_in_partition_and_retention_drops(monkeypatch):
 
     with session_scope(system=True) as s:
         if not partitioning.is_partitioned(s, partitioning.PARTITION_TABLE):
-            partitioning.convert_to_partitioned(s, partitioning.PARTITION_TABLE)
+            partitioning.convert_to_partitioned(
+                s, partitioning.PARTITION_TABLE, confirm=partitioning.PARTITION_TABLE)
             s.commit()
         assert partitioning.ensure_partitions(s, partitioning.PARTITION_TABLE, months=2)
         s.commit()
@@ -507,3 +510,308 @@ def test_real_table_writes_land_in_partition_and_retention_drops(monkeypatch):
         s.commit()
         assert expired in dropped
         assert expired not in partitioning.list_partitions(s, partitioning.PARTITION_TABLE)
+
+# ------------------------------------------------- DDL 互斥（多副本 / 架构评审 A9）
+
+@pytest.fixture()
+def clean_state():
+    """每个用例一把干净的共享状态：租约存在进程内单例里，用例之间不能互相串。"""
+    from data_dog.state import reset_state_store
+
+    reset_state_store()
+    yield
+    reset_state_store()
+
+
+def _hold_ddl_lease(*, owner: str = "other-replica", ttl_s: float = 300.0):
+    """模拟「另一个副本正在做结构变更」：以别的 owner 抢住同一把租约。"""
+    from data_dog.partition_ddl import PARTITION_DDL_LEASE_KEY
+    from data_dog.state import Lease, get_state_store
+
+    holder = Lease(get_state_store(), PARTITION_DDL_LEASE_KEY, owner, ttl_s=ttl_s)
+    assert holder.acquire(), "测试自己都没抢到租约"
+    return holder
+
+
+_PG_SHAPE = {"dialect": "postgresql", "postgres": True, "partitioned": True,
+             "partitions": ["telemetry_events_202610"], "partition_count": 1}
+
+
+def _pretend_partitioned_pg(monkeypatch):
+    """让 CLI 以为面对的是「已分区的 PG 表」，从而走到真正执行 DDL 的那条路。
+
+    在 SQLite 上跑 CLI 会停在「非 PG → 退出码 2」，永远碰不到互斥分支——那只覆盖了
+    「能力边界」，覆盖不了本次新增的互斥。`describe` 是形状的唯一来源，换掉它即可。
+    """
+    monkeypatch.setattr(partitioning, "describe",
+                        lambda _s, table=partitioning.PARTITION_TABLE: dict(_PG_SHAPE))
+
+
+def test_script_check_takes_no_lease(url, clean_state):
+    """只读动作不参与互斥：--check 不该在共享状态里留下锁（也不该去碰它）。"""
+    from data_dog.partition_ddl import ddl_lease_holder
+
+    mod = _load_script("partition_telemetry")
+    assert mod.main(["--check"]) == 0
+    assert ddl_lease_holder() == "", "--check 竟然抢了结构变更锁"
+
+
+def test_script_skips_ensure_when_another_replica_holds_the_lease(
+        url, clean_state, monkeypatch, capsys):
+    """别的副本正在改结构 → **一个 DDL 都不执行**、退出码 3、如实报 skipped + 持有者。
+
+    3 是刻意的：0 会让调度器以为「补完了」（其实没有），2 又是「配置错」的专用码。
+    """
+    mod = _load_script("partition_telemetry")
+    _pretend_partitioned_pg(monkeypatch)
+    called: list[str] = []
+    monkeypatch.setattr(partitioning, "ensure_partitions",
+                        lambda *a, **k: called.append("ensure") or [])
+    holder = _hold_ddl_lease()
+    try:
+        code = mod.main(["--ensure-months", "2", "--json"])
+    finally:
+        holder.release()
+
+    assert code == 3, "抢不到租约必须以 3 退出（不是 0 成功，也不是 2 配置错）"
+    assert called == [], "被互斥挡住竟然还是建了分区"
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["skipped"] == "lease_held"
+    assert payload["lease_owner"] == "other-replica"
+    assert payload["actions"] == [], "跳过时不该报出任何动作"
+
+
+def test_script_skips_drop_and_convert_when_blocked(url, clean_state, monkeypatch):
+    """互斥覆盖全部三个会改结构的动作，不只是 --ensure-months。"""
+    mod = _load_script("partition_telemetry")
+    _pretend_partitioned_pg(monkeypatch)
+    monkeypatch.setattr(partitioning, "plan_conversion",
+                        lambda _s, table=partitioning.PARTITION_TABLE, **_kw:
+                        {"table": table, "new_table": table + "_new", "blockers": [],
+                         "rows": 0, "partitions": [], "actions": []})
+    touched: list[str] = []
+    monkeypatch.setattr(partitioning, "drop_partitions_before",
+                        lambda *a, **k: touched.append("drop") or [])
+    monkeypatch.setattr(partitioning, "convert_to_partitioned",
+                        lambda *a, **k: touched.append("convert") or {})
+    holder = _hold_ddl_lease()
+    try:
+        assert mod.main(["--drop-before", "2026-08", "--convert"]) == 3
+    finally:
+        holder.release()
+    assert touched == [], "被互斥挡住竟然还是动了结构"
+
+
+def test_script_no_lease_flag_bypasses_the_lock(url, clean_state, monkeypatch):
+    """--no-lease：单机直跑 / 已确认无并发时的显式退路（多副本下别用）。"""
+    mod = _load_script("partition_telemetry")
+    _pretend_partitioned_pg(monkeypatch)
+    called: list[str] = []
+    monkeypatch.setattr(partitioning, "ensure_partitions",
+                        lambda *a, **k: called.append("ensure") or [])
+    holder = _hold_ddl_lease()
+    try:
+        assert mod.main(["--ensure-months", "2", "--no-lease"]) == 0
+    finally:
+        holder.release()
+    assert called == ["ensure"]
+
+
+def test_script_dry_run_neither_takes_nor_respects_the_lease(url, clean_state, monkeypatch):
+    """只读动作不参与互斥：dry-run 不抢锁，别人持锁也照常给计划。"""
+    from data_dog.partition_ddl import ddl_lease_holder
+
+    mod = _load_script("partition_telemetry")
+    _pretend_partitioned_pg(monkeypatch)
+    assert mod.main(["--ensure-months", "2", "--dry-run"]) == 0
+    assert ddl_lease_holder() == "", "dry-run 竟然留了锁"
+
+    holder = _hold_ddl_lease()
+    try:
+        assert mod.main(["--drop-before", "2026-08", "--dry-run"]) == 0
+    finally:
+        holder.release()
+
+
+def test_script_leaves_no_lease_behind_after_a_successful_run(url, clean_state, monkeypatch):
+    """干完就还锁：单副本连续两轮都能跑，别的副本不必等满 TTL。"""
+    from data_dog.partition_ddl import ddl_lease_holder
+
+    mod = _load_script("partition_telemetry")
+    _pretend_partitioned_pg(monkeypatch)
+    monkeypatch.setattr(partitioning, "ensure_partitions", lambda *a, **k: [])
+    assert mod.main(["--ensure-months", "2"]) == 0
+    assert ddl_lease_holder() == "", "跑完没释放——别的副本要等满 TTL"
+
+
+# ---------------------------------------------------------------- 转换前置条件（①）与"不排队"互斥（②）
+
+def test_convert_refuses_without_matching_confirm_token(url):
+    """确认令牌门：不在 `confirm` 里原样复述表名就拒绝（与 X-Confirm-Tenant 同意）。"""
+    from data_dog.storage.db import session_scope
+
+    table = partitioning.PARTITION_TABLE
+    for token in ("", "telemetry_event", "Telemetry_Events"):
+        with session_scope(system=True) as s:
+            with pytest.raises(partitioning.ConversionRefused) as e:
+                partitioning.convert_to_partitioned(s, table, confirm=token)
+            assert e.value.details["reason"] == "confirm_required"
+            assert e.value.details["expect"] == table
+
+
+def test_convert_confirm_check_is_exact():
+    """令牌校验是纯函数：完全相等才放行（不做大小写/空格宽容）。"""
+    table = "telemetry_events"
+    partitioning.check_convert_confirm(table, table)
+    # 与 X-Confirm-Tenant 一致：只 strip 首尾空白，**不做大小写宽容**。
+    partitioning.check_convert_confirm(table, "  " + table + "  ")
+    for token in ("telemetry_event", "Telemetry_Events", "TENANT_EVENTS", ""):
+        with pytest.raises(partitioning.ConversionRefused):
+            partitioning.check_convert_confirm(table, token)
+
+
+def test_quiet_gate_passes_on_empty_and_old_table(url):
+    """空表与"早已停写"的表都算静默：没有写入就不必等。"""
+    from data_dog.storage.db import session_scope
+    from data_dog.storage.models import day_of
+
+    table = partitioning.PARTITION_TABLE
+    base = datetime(2026, 12, 1, tzinfo=timezone.utc)
+    with session_scope(system=True) as s:
+        sig = partitioning.check_convert_quiet(s, table, seconds=30.0, now=base)
+        assert sig["present"] is False and sig["last_write_age_s"] is None
+
+    old = {"tenant_id": "t1", "event_id": "old-1", "device_sn": "SN1",
+           "occurred_at": "2026-10-14T00:00:00Z", "component_ref": "leg.hip",
+           "created_at": base.timestamp() - 120.0}
+    old["created_day"] = day_of(old["created_at"])
+    _seed(url, table, [old])
+    with session_scope(system=True) as s:
+        sig = partitioning.check_convert_quiet(s, table, seconds=30.0, now=base)
+        assert sig["present"] is True and abs(sig["last_write_age_s"] - 120.0) < 0.01
+        assert partitioning._quiet_signal(s, table, now=base)["last_write_epoch"] == old["created_at"]
+
+
+def test_quiet_gate_refuses_when_a_write_landed_inside_the_window(url, monkeypatch):
+    """窗口内有写入 → 拒绝，并把"多久前写的、要求多少"写进机器可读 details。"""
+    from data_dog.storage.db import session_scope
+    from data_dog.storage.models import day_of
+
+    table = partitioning.PARTITION_TABLE
+    base = datetime(2026, 12, 1, tzinfo=timezone.utc)
+    # plan_conversion 在非 PG 上会先报"能力边界"；这里只测静默门本身。
+    monkeypatch.setattr(partitioning, "plan_conversion",
+                        lambda _s, t=table, **_kw: {
+                            "table": t, "new_table": t + "_new", "blockers": [],
+                            "rows": 0, "partitions": [], "actions": []})
+    fresh = {"tenant_id": "t1", "event_id": "fresh-1", "device_sn": "SN1",
+             "occurred_at": "2026-10-14T00:00:00Z", "component_ref": "leg.hip",
+             "created_at": base.timestamp() - 5.0}
+    fresh["created_day"] = day_of(fresh["created_at"])
+    _seed(url, table, [fresh])
+
+    with session_scope(system=True) as s:
+        age = partitioning._quiet_signal(s, table, now=base)["last_write_age_s"]
+        assert abs(age - 5.0) < 0.01
+        with pytest.raises(partitioning.ConversionRefused) as e:
+            partitioning.convert_to_partitioned(
+                s, table, now=base, require_quiet=30.0, confirm=table)
+        d = e.value.details
+        assert d["reason"] == "not_quiet" and d["require_quiet_s"] == 30.0
+        assert abs(d["last_write_age_s"] - 5.0) < 0.01
+
+
+def test_convert_busy_is_raised_instead_of_blocking(url, monkeypatch):
+    """②：库层咨询锁抢不到时抛 ConversionBusy（**不排队**），而不是挂到 statement_timeout。"""
+    from data_dog.storage.db import session_scope
+
+    table = partitioning.PARTITION_TABLE
+    monkeypatch.setattr(partitioning, "plan_conversion",
+                        lambda _s, t=table, **_kw: {
+                            "table": t, "new_table": t + "_new", "blockers": [],
+                            "rows": 0, "partitions": [], "actions": []})
+    monkeypatch.setattr(partitioning, "try_xact_lock", lambda _s, _k: False)
+    with session_scope(system=True) as s:
+        with pytest.raises(partitioning.ConversionBusy):
+            partitioning.convert_to_partitioned(s, table, confirm=table)
+
+
+def test_script_convert_requires_confirm_token(url, clean_state, monkeypatch, capsys):
+    """CLI：缺 --confirm-table → 退出码 2，且**碰都没碰** convert_to_partitioned。"""
+    mod = _load_script("partition_telemetry")
+    _pretend_partitioned_pg(monkeypatch)
+    monkeypatch.setattr(partitioning, "plan_conversion",
+                        lambda _s, table=partitioning.PARTITION_TABLE, **_kw:
+                        {"table": table, "new_table": table + "_new", "blockers": [],
+                         "rows": 0, "partitions": [], "actions": []})
+    touched: list[str] = []
+    monkeypatch.setattr(partitioning, "convert_to_partitioned",
+                        lambda *a, **k: touched.append("convert") or {})
+
+    code = mod.main(["--convert", "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 2, "缺确认令牌必须以 2 退出（不该执行）"
+    assert touched == [], "没通过确认门竟然还是调了转换"
+    assert payload["refused"]["reason"] == "confirm_required"
+
+
+def test_script_convert_runs_with_confirm_token(url, clean_state, monkeypatch, capsys):
+    """CLI：带上原样表名的确认令牌才真的执行转换。"""
+    mod = _load_script("partition_telemetry")
+    _pretend_partitioned_pg(monkeypatch)
+    monkeypatch.setattr(partitioning, "plan_conversion",
+                        lambda _s, table=partitioning.PARTITION_TABLE, **_kw:
+                        {"table": table, "new_table": table + "_new", "blockers": [],
+                         "rows": 0, "partitions": [], "actions": []})
+    seen: dict = {}
+
+    def fake_convert(_s, table=partitioning.PARTITION_TABLE, **kw):
+        seen.update(kw)
+        return {"notes": ["ok"], "partitions": [table + "_202612"], "quiet": None}
+
+    monkeypatch.setattr(partitioning, "convert_to_partitioned", fake_convert)
+    assert mod.main(["--convert", "--confirm-table", partitioning.PARTITION_TABLE]) == 0
+    assert seen["confirm"] == partitioning.PARTITION_TABLE
+    assert seen["require_quiet"] is None
+
+
+def test_script_convert_busy_maps_to_exit_3(url, clean_state, monkeypatch, capsys):
+    """②：库层锁忙 → CLI 报 skipped=convert_busy + 退出码 3（与租约同语义，不是错误）。"""
+    mod = _load_script("partition_telemetry")
+    _pretend_partitioned_pg(monkeypatch)
+    monkeypatch.setattr(partitioning, "plan_conversion",
+                        lambda _s, table=partitioning.PARTITION_TABLE, **_kw:
+                        {"table": table, "new_table": table + "_new", "blockers": [],
+                         "rows": 0, "partitions": [], "actions": []})
+
+    def busy(*_a, **_k):
+        raise partitioning.ConversionBusy("另一个转换在跑")
+
+    monkeypatch.setattr(partitioning, "convert_to_partitioned", busy)
+    code = mod.main(["--convert", "--confirm-table", partitioning.PARTITION_TABLE, "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 3
+    assert payload["skipped"] == "convert_busy"
+    assert payload["actions"] == []
+
+
+def test_script_convert_dry_run_reports_quiet_without_refusing(url, clean_state, monkeypatch, capsys):
+    """dry-run 是只读：--require-quiet 不满足时**不拒绝**，只把静默信号报出来供人判断。"""
+    mod = _load_script("partition_telemetry")
+    _pretend_partitioned_pg(monkeypatch)
+    monkeypatch.setattr(partitioning, "plan_conversion",
+                        lambda _s, table=partitioning.PARTITION_TABLE, **_kw:
+                        {"table": table, "new_table": table + "_new", "blockers": [],
+                         "rows": 0, "partitions": [], "actions": ["INSERT ... SELECT"]})
+    def not_quiet(_s, table, *, seconds, now=None):
+        raise partitioning.ConversionRefused(
+            ["最近 1.0s 内有写入"],
+            details={"reason": "not_quiet", "last_write_age_s": 1.0,
+                     "require_quiet_s": seconds, "rows": True})
+
+    monkeypatch.setattr(partitioning, "check_convert_quiet", not_quiet)
+    code = mod.main(["--convert", "--dry-run", "--require-quiet", "30", "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert payload["quiet_ok"] is False, "dry-run 不该因为静默窗口不满足而拒绝"
+    assert payload["quiet"]["reason"] == "not_quiet"

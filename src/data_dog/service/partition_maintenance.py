@@ -14,6 +14,9 @@
 - `ensure_if_enabled()`：`DD_PARTITION_AUTO_ENSURE=1` 时在启动补齐未来 N 个月（幂等 DDL）。
   **默认关**——结构变更由集群层面的 CronJob（helm `partition.enabled`）做，应用副本不偷偷改结构；
   开了也只是多一层保险，失败不阻止启动，由指标 + 告警兜底。
+
+  **多副本**：真的开的时候先抢 `partition:ddl` 单持有者租约（`partition_ddl.py`）——
+  滚动发布 = N 个副本同时启动，只有抢到的那个补分区，其余**如实跳过**。
 """
 from __future__ import annotations
 
@@ -21,6 +24,7 @@ import logging
 
 from .. import settings
 from ..core import metrics
+from ..partition_ddl import ddl_guard
 from ..storage import partitioning
 from ..storage.db import session_scope
 
@@ -54,14 +58,21 @@ def ensure_if_enabled() -> list[str]:
     if not settings.partition_auto_ensure():
         return []
     months = settings.partition_ensure_months()
-    with session_scope(system=True) as s:
-        if not partitioning.is_partitioned(s):
-            _log.warning(
-                "DD_PARTITION_AUTO_ENSURE=1，但 %s 不是分区表（非 PostgreSQL 或尚未转换），跳过",
-                partitioning.PARTITION_TABLE)
+    # **多副本互斥**（架构评审 A9）：滚动发布时 N 个副本会同时走到这里。只有抢到
+    # `partition:ddl` 租约的那个补分区，其余如实跳过——分区已经被那个持有者补齐了
+    # （或马上会），都去抢表锁只会白干、还让日志变吵。
+    with ddl_guard() as blocker:
+        if blocker is not None:
+            _log.info("分区结构变更由 %s 持有，本次启动跳过自动补齐", blocker)
             return []
-        created = partitioning.ensure_partitions(s, months=months)
-        # 顺便报一次：刚补完的进程不该等到下一次抓取才有"有效期"这个信号。
-        report_horizon(s)
-    _log.info("分区有效期已补齐到未来 %d 个月：%s", months, ", ".join(created) or "(无变化)")
-    return created
+        with session_scope(system=True) as s:
+            if not partitioning.is_partitioned(s):
+                _log.warning(
+                    "DD_PARTITION_AUTO_ENSURE=1，但 %s 不是分区表（非 PostgreSQL 或尚未转换），跳过",
+                    partitioning.PARTITION_TABLE)
+                return []
+            created = partitioning.ensure_partitions(s, months=months)
+            # 顺便报一次：刚补完的进程不该等到下一次抓取才有"有效期"这个信号。
+            report_horizon(s)
+        _log.info("分区有效期已补齐到未来 %d 个月：%s", months, ", ".join(created) or "(无变化)")
+        return created

@@ -102,3 +102,32 @@ def test_cli_exit_codes(monkeypatch):
     monkeypatch.setattr(cc, "check", lambda: bad)
     assert cc.main(["--json"]) == 1
     print("PASS test_cli_exit_codes")
+
+
+def test_partition_auto_ensure_warns_when_the_mutex_cannot_hold():
+    """自动补分区是"每个副本启动都会走"的 DDL：memory 后端 / 关掉互斥都该报警。
+
+    与 DD_AUTO_MIGRATE 同类（并发结构变更），但更隐蔽——它由**启动**触发，
+    没人会为它安排维护窗，而滚动发布时每个副本都会走一遍。
+    """
+    mem = check({"DD_PARTITION_AUTO_ENSURE": "1"})
+    assert "DD_PARTITION_AUTO_ENSURE" in _keys(mem, "warnings")
+    assert mem["ok"], "危险组合只该是警告"
+
+    off = check({"DD_PARTITION_AUTO_ENSURE": "1", "DD_PARTITION_DDL_LEASE": "0",
+                 "DD_STATE_BACKEND": "postgres"})
+    assert "DD_PARTITION_DDL_LEASE" in _keys(off, "warnings")
+
+
+def test_partition_auto_ensure_with_shared_state_and_lease_is_clean():
+    """两样都对（共享状态 + 互斥在开）时不该有告警：默认配置不能被噪声淹没。"""
+    report = check({"DD_API_KEY": "k", "DD_PARTITION_AUTO_ENSURE": "1",
+                    "DD_STATE_BACKEND": "postgres",
+                    "DD_DATABASE_URL": "postgresql+psycopg://u:p@h/db"})
+    assert report["ok"] and not report["warnings"], report
+
+
+def test_partition_lease_keys_are_known():
+    """新旋钮必须被 known_keys() 认出来，否则体检反过来把正常配置报成"未知键"。"""
+    known = known_keys()
+    assert {"DD_PARTITION_DDL_LEASE", "DD_PARTITION_DDL_LEASE_TTL_S"} <= known

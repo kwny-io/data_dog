@@ -62,6 +62,19 @@ def acquire_xact_lock(session: Any, key: int, *, wait: bool = True) -> bool:
     return True if wait else bool(got)
 
 
+def try_xact_lock(session: Any, key: int) -> bool:
+    """**不阻塞**地试抢事务级咨询锁；拿到返回 True，别人正持有返回 False。
+
+    只读探测用（例如"报告转换为什么被拒"）：在 PG 里**同一事务**已经持有该锁时再调
+    `pg_try_advisory_xact_lock` 仍会返回 False（锁按"持有个数"计），所以它回答的是
+    "此刻还有没有别人拿着"，不是"我能不能重入"。非 PG：no-op（返回 True）。
+    """
+    if not is_postgres(session):
+        return True
+    got = session.execute(text("SELECT pg_try_advisory_xact_lock(:k)"), {"k": key}).scalar()
+    return bool(got)
+
+
 @contextmanager
 def advisory_xact_lock(session: Any, key: int, *, wait: bool = True) -> Iterator[bool]:
     """事务级咨询锁的上下文形式：`with` ... as got`，`got=False` 表示"别人正持有"。

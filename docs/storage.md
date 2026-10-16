@@ -153,6 +153,9 @@ python scripts/partition_telemetry.py --drop-before 2026-08    # 删"整段早�
   - 本机/部署脚本：`make partition`（`MONTHS=3` 可覆盖）与 `make partition-check`（只读）；
   - 应用侧兜底：`DD_PARTITION_AUTO_ENSURE=1` 时启动补一次（默认**关**——结构变更不该由应用
     副本偷偷做，生产交给集群 CronJob）。
+- **多副本 / 多入口互斥**：会改结构的三个动作（`--ensure-months` / `--drop-before` /
+  `--convert`）与"启动自动补齐"共用 `partition:ddl` 单持有者租约，抢不到就**一个 DDL 都不执行**、
+  退出码 3（详见 §8.4）。单机直跑可用 `--no-lease`（或 `DD_PARTITION_DDL_LEASE=0`）显式关掉。
 - `--drop-before` 只删**整段过期**的分区（上界 ≤ 截止时间）；边界月里可能还有要留的数据，
   宁可少删（保数据），留给下一轮。
 - 一旦确认是分区表，`retention` 的 `telemetry_events` 规则会**自动**改走 `DROP PARTITION`
@@ -245,8 +248,9 @@ DELETE 还不是问题**——所以先定触发线，而不是先动表结构�
 python scripts/partition_telemetry.py --check
 # 1. 看计划：多少行、建哪些分区、按什么顺序动
 python scripts/partition_telemetry.py --convert --dry-run
-# 2. 停止接入（见下），然后在低峰期执行
-python scripts/partition_telemetry.py --convert            # 加 --keep-old 可保留 <表>_old
+# 2. 停止接入（见下），然后在低峰期执行：确认令牌 + 静默窗口是硬门（§8.3.1）
+python scripts/partition_telemetry.py --convert --confirm-table telemetry_events --require-quiet 30
+#   加 --keep-old 可保留 <表>_old；--require-quiet N 缺省 = 不检查静默
 # 3. 验证
 python scripts/partition_telemetry.py --check              # 应为"分区表，共 N 个分区"
 ```
@@ -262,6 +266,32 @@ python scripts/partition_telemetry.py --check              # 应为"分区表，
 
 **回填历史数据注意**：新写路径把 `created_day` 记为**摄取日**。若你要灌历史事件并希望它们按
 事件时间分区，必须先手工建好对应月份的分区，否则会撞 `no partition of relation ... found for row`。
+
+### 8.3.1 转换的两道**机器可验前置条件**（把"记得停接入"变成硬门）
+
+互斥（租约 + 咨询锁）只保证"同一时刻只有一个入口在动结构"——它与"有人正在**写**"毫无关系。
+而 `--convert` 真正的数据丢失点正是后者：`INSERT INTO new SELECT * FROM old` 拿的是读快照，
+**事务期间的并发写入不会进新表**，`RENAME` 那一刻就丢了。以前这只靠 runbook 里一句
+"执行前请停止接入"。现在把它变成两道代码可验的门：
+
+| 门 | CLI | 行为 | 拒绝时 |
+|---|---|---|---|
+| **确认令牌** | `--confirm-table <表名>` | 必须**原样复述**目标表名（与 `POST /v1/tenant/purge` 的 `X-Confirm-Tenant` 同意：只 strip 首尾空白，不宽容大小写） | `refused.reason=confirm_required`，退出码 **2**，连计划都不算 |
+| **静默窗口** | `--require-quiet N` | 最近一次写入必须早于 N 秒前；在**拿锁之后、任何 DDL 之前**检查（与 `INSERT...SELECT` 同事务） | `refused.reason=not_quiet` + `last_write_age_s`/`require_quiet_s`，退出码 **2** |
+
+- 两道门在**库层**（`partitioning.check_convert_confirm` / `check_convert_quiet`），不只在 CLI：任何调
+  `convert_to_partitioned()` 的代码路径都一样被挡。反面也成立：`--dry-run` 对静默窗口**只读探测、
+  不拒绝**（报 `quiet.last_write_age_s`），因为它本来就不执行 DDL。
+- 静默信号用 `created_at`（epoch 秒）而非分区键 `created_day`（日桶分辨率只有一天），基准时刻默认取
+  **库自己的时间**（PG `extract(epoch from now())`）——运维终端与库的时钟偏移不该把"刚写过"误判成"已停"。
+- **它保证什么、不保证什么**：保证"以为停了"变成"**实测**停了"且"没说清楚就不准动结构"；**不保证**
+  静默窗口之后新到的写入不丢——那只能靠真的停服/停接入。它也**不**是安全边界（能跑这个脚本的人本来就有 DDL 权限）。
+
+**咨询锁也不再排队（退出码 3）**：转换事务里的 PG 咨询锁改成 `pg_try_advisory_xact_lock`
+（`partitioning.convert_to_partitioned(lock_wait=False)`，默认）：抢不到就抛 `ConversionBusy`、CLI 报
+`skipped=convert_busy` + 退出码 **3**。为什么不像迁移那样阻塞等待：会话上有 `statement_timeout`（15s），
+"排队"最终是 15 秒后抛一个看不懂的 `QueryCanceled`（也分不清是谁占着）。失败关闭但不排队，语义与租约
+那条腿对齐。（对照：迁移 `migration_lock` 仍然**排队等待**——迁移是不可分割的一次性任务，排队比并行乱跑好。）
 
 ### 8.4 有效期信号与调度（"跨月无分区"必须会响）
 
@@ -284,6 +314,28 @@ python scripts/partition_telemetry.py --check              # 应为"分区表，
 得能只暂停其中一个（`cronjob-partition.yaml` / `cronjob-retention.yaml`）。保留清理的
 `retention.dryRun` **默认 true**：定时任务里"默认删数据"是不可接受的默认值，要真删必须显式改。
 
+**多副本 / 多入口互斥（A9 的最后一公里）**：分区维护此前只有"**单事务**（失败整体回滚）+"
+**文档化的停机窗口**这两层保护——那是在保护"一个人的操作"，挡不住"多个入口同时动手"：
+滚动发布时 `DD_PARTITION_AUTO_ENSURE=1` 的每个副本都会补分区；集群 CronJob 可能与运维手工
+`--ensure-months` 重叠；`--convert` 撞上 `--drop-before` 只会撞表锁、抛难读的错。现在这些动作
+共用 `state/lease.py` 的 `partition:ddl` 单持有者租约（与 A6 的 `retention:purge` 同一把原语）：
+
+| 事情 | 行为 |
+|---|---|
+| 抢不到 | **一个 DDL 都不执行**；CLI 报 `skipped=lease_held` + `lease_owner`，**退出码 3** |
+| 启动自动补齐 | 抢不到就**安静跳过**并把持有者记进日志（不阻止启动，也不重复 DDL） |
+| 只读动作 | `--check` / `--dry-run` **不参与互斥**：不抢锁，别人持锁也照常给现状与计划 |
+| TTL | `DD_PARTITION_DDL_LEASE_TTL_S` 默认 **900s**，必须大于最慢的那次 DDL（转换含整表拷贝），否则长 DDL 会被第二个副本抢走 |
+| 关掉 | `--no-lease` 或 `DD_PARTITION_DDL_LEASE=0`（仅单机直跑 / 已确认无并发） |
+
+**它保证什么、不保证什么**：保证"同一时刻只有一个入口在动结构"且"谁在动"可查；**它不是转换
+正确性的边界**——租约是协作式且带 TTL（长 DDL 超过 TTL 时第二个副本仍可能抢到），真正兜底的是
+库层：转换事务里另取一把 **PG 咨询锁**（`storage/pg_locks.py`，覆盖"表还没建出来"的迁移与超 TTL
+的情形，非 PG 自动 no-op），以及 PG 自身的表锁。撞上只会被挡、不会坏数据；租约省掉的是"白干 +
+表锁堆积 + 日志变吵 + 说不清谁在动结构"。**memory 状态后端不提供跨副本保证**（各副本一份状态），
+多副本必须让 `DD_STATE_BACKEND` 落在 postgres/redis——`data-dog config check` 对"自动补分区 +
+memory"直接报警。
+
 ### 8.5 诚实边界
 
 - **只在 PostgreSQL 上有效**；SQLite（测试/单机演示）走原路径。非 PG 上执行维护 CLI 会明确
@@ -293,5 +345,9 @@ python scripts/partition_telemetry.py --check              # 应为"分区表，
 - **真库验证已在本机完成**：起 `postgres:16-alpine`（端口 55432）后，`-m postgres` 用例
   **24 passed**（含建分区→插入→删过期分区往返，以及"该表被主键阻塞"的回归）。
 - **`telemetry_events` 的转换已实现并真库验证**（探针表 + 真表都跑通）：`--convert` 转换真表后，
-  `save_telemetry` 的行确实落进**当月分区**，过期分区被整段 DROP。仍**未做**：多副本并发下跑
-  迁移的协调（`DD_AUTO_MIGRATE=0` 由部署流程负责）、亿级表的分批回填（当前回填是一条 `UPDATE`）。
+  `save_telemetry` 的行确实落进**当月分区**，过期分区被整段 DROP。**多副本并发下的协调已补上**
+  （§8.4：`partition:ddl` 单持有者租约，抢不到就跳过并如实标注、**退出码 3**；但租约只防"并发"。
+  "停接入"已由 §8.3.1 的**确认令牌 + 静默窗口**变成机器可验的前置条件，但它只把"我们以为停了"
+  变成"实测停了"，**不能阻止静默窗口之后新到的写入**；转换本身仍是停机窗口操作）。仍**未做**：
+  亿级表的分批回填已有工具（`scripts/backfill_created_day.py` + `docs/partition_backfill.md`），
+  但**转换路径本身的分批实现**仍是单条 `INSERT ... SELECT`。

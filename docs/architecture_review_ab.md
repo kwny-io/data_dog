@@ -16,14 +16,14 @@
 | # | 缺口 | 状态 | 提交 | 落地内容（一句话） |
 |---|---|---|---|---|
 | A1 | LLM 花费/额度无硬约束 | ✅ | `b0142c8` | per-tenant 日/月 token+USD 硬熔断，调用前后各一次检查；超限 429 + `error_code=budget_exceeded` |
-| A2 | 队列无准入/背压 | ✅ | `b0142c8` | 共享队列深度 + `DD_INVESTIGATE_QUEUE_MAX`；超限 **落 job 之前** 429 + `Retry-After`（不做假受理） |
+| A2 | 队列无准入/背压 | ✅ | `b0142c8` | 共享队列深度 + `DD_INVESTIG@E_QUEUE_MAX`；超限 **落 job 之前** 429 + `Retry-After`（不做假受理） |
 | A3 | Prompt 注入只有 mock 回归 | ✅ | `afd62f4` `49bd1d0` | 不可信文本包成数据块 + 系统提示声明指令层级 + 注入特征进 trace；红队入口 `make redteam`。后续修掉数据块导致的**评测静默失效**（`unwrap` 剥壳） |
 | A4 | 提交侧无幂等 | ✅ | `b0142c8` | `Idempotency-Key`：窗口内同 (租户,key) 只真跑一次；重放带 `idempotent_replay`；进行中 409 + `Retry-After` |
 | A5 | PG 上 JSON 列是 `json` 不是 `jsonb` | ✅ | `51091f1` | 方言变体 + 迁移 `f2a3b4c5d6e7` ALTER 既有库；真 PG 16 验证 24/24 列 `jsonb`、可逆 |
 | A6 | 多副本下 retention 无租约 | ✅ | `bf75343` | 真删前抢 `retention:purge` 单持有者租约；抢不到本轮**跳过**并如实标注（≠ 删了 0 行） |
 | A7 | 没有告警规则 / SLO 未落地 | ✅ | `574b384` | `PrometheusRule` 12 条规则（可用性/热路径 P99/治理积压/静默失败）+ `docs/slo.md` §9 映射表 + 不依赖 helm 的 meta 测试 |
 | A8 | LLM 无降级链 | ✅ | `b0142c8` | 有界重试（只重试可重试错、带抖动、每次重过 deadline）+ 备用模型；`DD_LLM_RETRIES` / `DD_LLM_FALLBACK_MODEL` |
-| A9 | `telemetry_events` 没有分区 | ✅ | `46b344c` + 本轮 | 走「摄取日桶」（代价：跨天重投递多一行，有检测函数）：schema/写路径/迁移 → 分区模块日粒度 → 转换脚本；三段均在**真 PG** 验证（含真表转换 + 写路径落分区 + 整段 DROP），见下 |
+| A9 | `telemetry_events` 没有分区 | ✅ | `46b344c` + 本轮 | 走「摄取日桶」（代价：跨天重投递多一行，有检测函数）：schema/写路径/迁移 → 分区模块日粒度 → 转换脚本；三段均在**真 PG** 验证（含真表转换 + 写路径落分区 + 整段 DROP）；**多副本 DDL 互斥**：`partition:ddl` 单持有者租约（CLI 与启动自动补齐共用，抢不到退出码 3 + `skipped=lease_held`），见下 |
 | A10 | 控制台仍单租户 + 两套 UI | ✅ | 见下 | 收敛决定：**产品控制台 = `web/`，`ui/` 只作演示台**（README/交付文档写明）；多租户最小步：`DD_WEB_TENANTS` 服务端**允许清单** + `dd_web_tenant` cookie 做租户**选择**（清单外 403、未配置时行为不变）。**用户级身份/RBAC 仍是人工边界** |
 
 ## B. 存量可优化
@@ -31,7 +31,7 @@
 | # | 优化项 | 状态 | 提交 | 落地内容（一句话） |
 |---|---|---|---|---|
 | B1 | 同步路 histogram 顶格 2.5s → 全落 +Inf | ✅ | `51091f1` | 桶补到 120s（异步路另有 job 直方图），同步调查 P95/P99 重新可观测 |
-| B2 | 同步仍是默认 | ✅ | `d3b5f9d` `38751dc` `473a3d9` | 三步：① 异步结果一次取齐 `report/verdict/trace/usage`（同源 `_verdict_for`）；② 控制台改"提交→轮询→取结果"；③ `DD_INVESTIGATE_ASYNC` **默认 1**（测试用 conftest 钉成同步，默认值另有回归）；见下 |
+| B2 | 同步仍是默认 | ✅ | `d3b5f9d` `38751dc` `473a3d9` | 三步：① 异步结果一次取齐 `report/verdict/trace/usage`（同源 `_verdict_for`）；② 控制台改"提交→轮询→取结果"；③ `DD_INVESTIG@E_ASYNC` **默认 1**（测试用 conftest 钉成同步，默认值另有回归）；见下 |
 | B3 | 运行日志写放大（40 步 ≤160 KB/次） | ✅ | `8213327` | `DD_RUN_LOG_FULL_STEPS=auto`：成功且已判定只落**骨架**，失败/取消/`needs_human_review` 落全文；`steps_truncated` 如实标注 |
 | B4 | 配置治理：60+ `DD_*` 无启动期校验 | ✅ | `0e785fe` | `data-dog config check` / `make config-check`：未知键、非法取值（会静默回默认）、危险组合；不连库、有错即非零退出 |
 | B5 | meta 测试靠人记得跑 | ✅ | `17f775a` | `readme_counts.py --check` 挂进 pre-commit，且**无条件**跑（漂移常发生在没有 .py 变更的提交里） |
@@ -40,7 +40,7 @@
 
 ## 未落地项：边界与原因
 
-### B2 同步默认翻异步（`DD_INVESTIGATE_ASYNC`）——✅ 三步全部落地（`d3b5f9d` `38751dc` `473a3d9`）
+### B2 同步默认翻异步（`DD_INVESTIG@E_ASYNC`）——✅ 三步全部落地（`d3b5f9d` `38751dc` `473a3d9`）
 
 **第 1 步（后端补载荷）已完成**：新增 `GET /v1/investigations/jobs/{id}/result`，成功后就地取齐
 `report` + `verdict`/`verdict_detail` + `trace` + `usage`，口径与同步响应**同源**
@@ -72,8 +72,8 @@
 3. ~~再翻默认~~ ✅（默认 1；`?sync=1` 或 `=0` 退回同步；测试夹具钉同步 + 默认值回归测试）。
 
 - 默认异步意味着**每个应用实例**都会起 worker 线程池 + 队列轮询线程（纯 API / 单副本实例可置
-  `DD_INVESTIGATE_ASYNC=0`）；
-- 多副本必须配 `DD_STATE_BACKEND=postgres`（memory 后端的队列只在进程内）——`data-dog config check`
+  `DD_INVESTIG@E_ASYNC=0`）；
+- 多副本必须配 `DD_ST@E_BACKEND=postgres`（memory 后端的队列只在进程内）——`data-dog config check`
   会对"异步 + memory"报警告。
 
 ### A9 `telemetry_events` 分区 —— ✅ 走「摄取日桶」，三段全部落地并在**真 PG** 验证
@@ -112,7 +112,7 @@ retention 自动分流到 `DROP PARTITION`。测试含 `-m postgres` 真库往�
 - PG 规则：**分区表的唯一约束必须包含全部分区键**。实测报错原文：
   `FeatureNotSupported: unique constraint on partitioned table must include all partitioning columns`；
 - 而 `telemetry_events` 的主键是 `(tenant_id, event_id)`——它正是写入路径
-  `INSERT ... ON CONFLICT DO UPDATE` 的**去重键**（`repository.py`）。所以"按 `created_at` 做
+  `INSERT ... ON CONFLICT DO UPD@E` 的**去重键**（`repository.py`）。所以"按 `created_at` 做
   范围分区 + 保留原主键"在 PG 上**不可能**；换 `PRIMARY KEY (tenant_id, event_id, created_at)`
   会让重复上报（同一 `event_id` 不同 `created_at`）不再被去重——**数据完整性代价**；
 - 实测另一条路：`PARTITION BY HASH (tenant_id, event_id)` 可以保留该唯一约束，但**哈希分区
@@ -129,6 +129,26 @@ retention 自动分流到 `DROP PARTITION`。测试含 `-m postgres` 真库往�
 **因此 A9 的正确表述**：分区**基础设施**可用且已真库验证；`telemetry_events` 的**转换需要一个
 数据模型决策**（去重键怎么改、或接受哈希分区不省删除、或维持现状只靠 DELETE）——这不是工程
 实现问题，是"重复上报去重"与"按年龄删分区"二选一的产品决策，不该由实现者替用户选。
+
+**多副本收口（本轮）**：上面第 3 步的 `--convert` / `--ensure-months` / `--drop-before` 此前只有
+"单事务 + 文档化的维护窗"。现在三个动作与"应用启动自动补齐"共用 `state/lease.py` 的
+`partition:ddl` 单持有者租约（与 A6 的 `retention:purge` 同一把原语）：抢不到就**一个 DDL 都不执行**，
+CLI 报 `skipped=lease_held` + `lease_owner` + **退出码 3**（不是 0 成功，也不是 2 配置错），启动路径
+安静跳过并记下持有者；`--check` / `--dry-run` 不参与互斥（只读不抢锁）。边界如实写：**它不是转换
+正确性的边界**——PG 表锁（`RENAME` 要 `ACCESS EXCLUSIVE`）才是，撞上只会被挡、不会坏数据；租约省掉
+的是并发白干与"谁在动结构"说不清。TTL 必须大于最慢的那次 DDL（`DD_PARTITION_DDL_LEASE_TTL_S` 默认
+900s）；`config check` 对"自动补分区 + memory 后端"与"自动补分区 + 关租约"两条危险组合报警。
+
+**转换的两道机器可验前置条件（本轮收口互斥管不到的那一半）**：互斥只保证"同一时刻一个入口在动
+结构"，与"有人正在**写**"无关；而 `RENAME` 前的 `INSERT INTO new SELECT * FROM old` 拿的是读快照，
+**事务期间的并发写入不会进新表**，只能靠 runbook 里一句"执行前请停止接入"——那是靠人记得。现在：
+`--confirm-table <表名>`（原样复述目标表名，与 `POST /v1/tenant/purge` 的 `X-Confirm-Tenant` 同意）与
+`--require-quiet N`（最近一次写入必须早于 N 秒前，在**拿锁之后、任何 DDL 之前**、`INSERT...SELECT` 同一事务内检查）
+都是库层硬门（`partitioning.check_convert_confirm` / `check_convert_quiet`），不满足即拒绝、退出码 2；
+`--dry-run` 只报 `quiet.last_write_age_s` 不拒绝。**边界如实写**：它把"以为停了"变成"实测停了"，
+**不能阻止静默窗口之后新到的写入**，也不是安全边界。另外转换事务里的 PG 咨询锁改为
+`pg_try_advisory_xact_lock`（`lock_wait=False` 默认）：抢不到就 `ConversionBusy` + `skipped=convert_busy` + 退出码 3，
+**不排队**——会话上的 `statement_timeout`（15s）会把"排队"变成看不懂的 `QueryCanceled`（迁移入口仍排队，因为迁移不可分割）。
 
 ### A10 控制台收敛 + 多租户身份（已落地：收敛 + 租户选择 + 用户级授权最小步；OIDC 为边界）
 
@@ -256,6 +276,7 @@ A/B 各项的证据此前都是**例子测试**（"这几个路径被拒了"）�
 | ④ 告警缺口 | `85c1382` | 5 条告警 + 证据解析计数器（指标↔阈值↔文档**四向对齐**） |
 | ⑤ 覆盖率门禁 | `bc1dce5` `211c5a6` `6143866` | 单文件 60%→70% + PG-only 文件分腿 80%；**反证**验证；CI 已接线 |
 | ② 控制台 E2E | `635327d` | 真 Chromium 走「代理 → 租户 → 异步轮询 → refs 面板」；**抓出"候选行点不动"的真 bug**（裸 CSS 压掉工具类） |
+| — | A9 多副本 DDL 互斥 | 本轮 | 分区"建 / 删 / 转"与启动自动补齐共用 `partition:ddl` 单持有者租约；抢不到**一个 DDL 都不执行**、退出码 3 + `skipped=lease_held`（不静默成功） |
 
 ② 的实现来自并行窗口，本轮由我**独立验收后接手提交**（tsc/lint/vitest/e2e 四项按 CI 口径全绿）。
 
@@ -288,6 +309,7 @@ web：`tsc --noEmit` 0 错误、`next lint` clean、`vitest` 102 passed、
 （两边同时在改该文件，本提交不去撞），锁的机制与分工写在与代码同址的模块 docstring 里；
 A 的 Windows 保证形式与 POSIX **不等价**（POSIX 把"检查+打开"合成同一个系统调用，Windows 是
 "一次打开 + 对已打开对象核路径"），差异写进 docstring；C 的数字是**下界**（本机另有 agent 在跑）。
+
 ## 怎么复核
 
 ```bash

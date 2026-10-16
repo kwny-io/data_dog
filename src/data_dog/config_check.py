@@ -159,6 +159,19 @@ def check(environ: dict[str, str] | None = None) -> dict[str, Any]:
              "启动即自动迁移：多副本会**并发跑迁移**、互相竞争",
              "多副本置 0，迁移交给一次性 Job/命令（见 helm 的 migrate Job）")
 
+    # 分区结构变更（A9）的多副本互斥：自动补齐是"每个副本启动都会走"的 DDL，
+    # 与自动迁移同类——只是对象从"迁移"换成"建分区 / 删分区 / 换表"。
+    if _truthy(env, "DD_PARTITION_AUTO_ENSURE"):
+        if backend in ("", "memory"):
+            warn("DD_PARTITION_AUTO_ENSURE",
+                 "启动自动补齐分区 + memory 状态后端：`partition:ddl` 互斥租约只在**进程内**成立，"
+                 "多副本会各自去改表结构",
+                 "多副本必须 DD_STATE_BACKEND=postgres（或 redis），或关掉自动补齐交给集群 CronJob")
+        if not _truthy(env, "DD_PARTITION_DDL_LEASE", default=True):
+            warn("DD_PARTITION_DDL_LEASE",
+                 "启动自动补齐分区 + 结构变更互斥被显式关闭：每个副本启动都会自己动手做 DDL",
+                 "删掉这一项（默认开），或关掉 DD_PARTITION_AUTO_ENSURE 交给集群 CronJob")
+
     if _truthy(env, "DD_NOTIFY_ENABLED") and _truthy(env, "DD_NOTIFY_ALLOW_PRIVATE"):
         warn("DD_NOTIFY_ALLOW_PRIVATE",
              "通知目标允许内网/回环：SSRF 门已打开（默认失败关闭）",

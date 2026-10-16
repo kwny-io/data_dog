@@ -33,12 +33,13 @@ class _RecordingLog:
 
     def __init__(self) -> None:
         self.warnings: list[str] = []
+        self.infos: list[str] = []
 
     def warning(self, msg, *args, **_kw):
         self.warnings.append(msg % args if args else msg)
 
     def info(self, msg, *args, **_kw):
-        return None
+        self.infos.append(msg % args if args else msg)
 
 
 def test_enabled_but_not_partitioned_logs_and_returns(monkeypatch):
@@ -146,3 +147,119 @@ def test_app_startup_survives_a_failing_partition_hook(monkeypatch):
 
     asyncio.run(_run_startup())
     assert calls == ["called"]
+
+# --------------------------------------------- 分区 DDL 互斥（多副本 / A9）
+
+@pytest.fixture()
+def clean_state():
+    """每个用例一把干净的共享状态：租约存在进程内单例里，用例之间不能互相串。"""
+    from data_dog.state import reset_state_store
+
+    reset_state_store()
+    yield
+    reset_state_store()
+
+
+def _hold_ddl_lease(*, owner: str = "other-replica", ttl_s: float = 300.0):
+    """模拟「另一个副本正在做结构变更」：以别的 owner 抢住同一把租约。"""
+    from data_dog.partition_ddl import PARTITION_DDL_LEASE_KEY
+    from data_dog.state import Lease, get_state_store
+
+    holder = Lease(get_state_store(), PARTITION_DDL_LEASE_KEY, owner, ttl_s=ttl_s)
+    assert holder.acquire(), "测试自己都没抢到租约"
+    return holder
+
+
+def test_guard_yields_no_blocker_when_nobody_holds_it(clean_state):
+    from data_dog.partition_ddl import ddl_guard
+
+    with ddl_guard() as blocker:
+        assert blocker is None
+
+
+def test_guard_reports_the_other_holder(clean_state):
+    """别人持锁 → 产出**持有者标识**（调用方据此「跳过 + 说清被谁挡的」）。"""
+    from data_dog.partition_ddl import ddl_guard
+
+    holder = _hold_ddl_lease()
+    try:
+        with ddl_guard() as blocker:
+            assert blocker == "other-replica"
+    finally:
+        holder.release()
+
+
+def test_guard_releases_the_lease_on_exit(clean_state):
+    """干完就还锁：单副本连续两轮都能跑，别的副本不必等 TTL 过期。"""
+    from data_dog.partition_ddl import ddl_guard, ddl_lease_holder
+
+    with ddl_guard() as blocker:
+        assert blocker is None
+        assert ddl_lease_holder() != "", "拿到租约却没写进共享状态"
+    assert ddl_lease_holder() == "", "跑完没释放——别的副本会被永久挡住"
+
+
+def test_guard_off_switch_ignores_a_held_lease(clean_state, monkeypatch):
+    """显式关掉互斥：单机直跑不碰共享状态，别人持锁也不管。"""
+    from data_dog.partition_ddl import ddl_guard
+
+    holder = _hold_ddl_lease()
+    try:
+        monkeypatch.setenv("DD_PARTITION_DDL_LEASE", "0")
+        with ddl_guard() as blocker:
+            assert blocker is None, "关掉互斥却仍然被挡住"
+    finally:
+        holder.release()
+
+
+def _boom_scope(*_a, **_kw):
+    raise AssertionError("被互斥挡住时不该打开数据库会话")
+
+
+def test_startup_ensure_skips_without_opening_a_session_when_blocked(monkeypatch, clean_state):
+    """别的副本正在改结构 → 本次启动**跳过补齐**：不开 session、日志说清被谁挡。
+
+    滚动发布时这是常态（N 个副本同时启动），所以它必须是「安静跳过」而不是报错。
+    """
+    rec = _RecordingLog()
+    monkeypatch.setenv("DD_PARTITION_AUTO_ENSURE", "1")
+    monkeypatch.setattr(pm, "_log", rec)
+    monkeypatch.setattr(pm, "session_scope", _boom_scope)
+    holder = _hold_ddl_lease()
+    try:
+        assert pm.ensure_if_enabled() == []
+    finally:
+        holder.release()
+    assert any("other-replica" in m for m in rec.infos), rec.infos
+
+
+def test_startup_ensure_releases_the_lease_after_success(monkeypatch, clean_state):
+    from data_dog.partition_ddl import ddl_lease_holder
+
+    monkeypatch.setenv("DD_PARTITION_AUTO_ENSURE", "1")
+    monkeypatch.setattr(pm, "session_scope", _fake_scope)
+    monkeypatch.setattr(pm.partitioning, "is_partitioned",
+                        lambda _s, _t=pm.partitioning.PARTITION_TABLE: True)
+    monkeypatch.setattr(pm.partitioning, "ensure_partitions", lambda _s, months=3, **_kw: [])
+    monkeypatch.setattr(pm, "report_horizon",
+                        lambda _s, _t=pm.partitioning.PARTITION_TABLE: None)
+
+    assert pm.ensure_if_enabled() == []
+    assert ddl_lease_holder() == "", "启动补齐跑完没释放租约"
+
+
+def test_startup_ensure_releases_the_lease_even_when_ddl_raises(monkeypatch, clean_state):
+    """真错误照抛，但租约**在异常路径上**也必须还回去（否则别的副本等满 TTL）。"""
+    from data_dog.partition_ddl import ddl_lease_holder
+
+    def _boom(*_a, **_kw):
+        raise RuntimeError("permission denied for schema public")
+
+    monkeypatch.setenv("DD_PARTITION_AUTO_ENSURE", "1")
+    monkeypatch.setattr(pm, "session_scope", _fake_scope)
+    monkeypatch.setattr(pm.partitioning, "is_partitioned",
+                        lambda _s, _t=pm.partitioning.PARTITION_TABLE: True)
+    monkeypatch.setattr(pm.partitioning, "ensure_partitions", _boom)
+    with pytest.raises(RuntimeError):
+        pm.ensure_if_enabled()
+    assert ddl_lease_holder() == "", "异常路径没释放租约"

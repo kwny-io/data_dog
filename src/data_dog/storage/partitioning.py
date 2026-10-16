@@ -31,7 +31,7 @@ from typing import Any
 from sqlalchemy import text
 
 from .models import day_of
-from .pg_locks import PARTITION_CONVERT_LOCK_KEY, acquire_xact_lock
+from .pg_locks import PARTITION_CONVERT_LOCK_KEY, acquire_xact_lock, try_xact_lock
 
 PARTITION_TABLE = "telemetry_events"
 # 分区键是**摄取日桶** `created_day`（= floor(created_at/86400)），不是 `created_at` 本身：
@@ -342,7 +342,91 @@ class ConversionRefused(RuntimeError):
     """前置检查未通过（或目标已是分区表 / 中间表已存在）——**拒绝转换**，附阻塞项。
 
     拒绝而不是"尽力而为"：转换要在停机窗口里动生产表，任何没讲清楚的前提都必须挡住。
+
+    `details` 可选的**机器可读**上下文（确认令牌、静默窗口实测值等），供 CLI 把
+    "为什么被拒" 写进 --json 载荷，而不得靠解析异常文本。
     """
+
+    def __init__(self, blockers: list[str], *, details: dict[str, Any] | None = None) -> None:
+        super().__init__(blockers)
+        self.blockers = list(blockers)
+        self.details: dict[str, Any] = dict(details or {})
+
+
+class ConversionBusy(RuntimeError):
+    """另一个转换正在进行（**库层咨询锁**被持有）——**不排队、直接退出**。
+
+    为什么不像迁移那样阻塞等待：转换会话上有 statement_timeout（默认 15s），"排队"
+    实际会在 15 秒后爆成难读的 QueryCanceled。与其让人看不懂，不如当场说
+    "另一个转换在跑，这轮不该我"。退出码语义与租约那条腿对齐：**3 = 这轮不该我干**。
+    """
+
+
+# 静默窗口的默认口径：与 `X-Confirm-Tenant`（不可逆删除前要原样复述租户 id）同一类
+# “机器可验的前置条件”——不靠 runbook 里念一句“记得停接入”。
+DEFAULT_QUIET_SECONDS = 30.0
+
+
+def _quiet_signal(session: Any, table: str = PARTITION_TABLE, *,
+                  now: datetime | None = None) -> dict[str, Any]:
+    """只读：目标表最近一次写入离现在多久（秒）——转换的“停接入”前置信号。
+
+    为什么用 `created_at`（epoch 秒）而不是分区键 `created_day`：日桶的分辨率只有一天，
+    “30 秒内有没有写”根本看不出来。基准时刻默认取 **库自己的时间**（PG：`extract(epoch from now())`）
+    而不是进程时钟：运维终端与库的时钟偏移不该把“刚写过”误判成“已停”。
+
+    返回：{present 有无数据, last_write_age_s 空表时为 None,
+    last_write_epoch, checked_at_epoch}。
+    """
+    name = _check_name(table)
+    base = now.timestamp() if now is not None else (
+        float(session.execute(text("SELECT extract(epoch from now())")).scalar())
+        if is_postgres(session) else datetime.now(timezone.utc).timestamp())
+    last = session.execute(text(f"SELECT max(created_at) FROM {name}")).scalar()
+    if last is None:
+        return {"present": False, "last_write_age_s": None,
+                "last_write_epoch": None, "checked_at_epoch": base}
+    last_f = float(last)
+    return {"present": True, "last_write_age_s": max(0.0, base - last_f),
+            "last_write_epoch": last_f, "checked_at_epoch": base}
+
+
+def check_convert_quiet(session: Any, table: str = PARTITION_TABLE, *, seconds: float,
+                        now: datetime | None = None) -> dict[str, Any]:
+    """静默窗口门：最近一次写入必须早于 seconds 秒前，否则拒绝转换。
+
+    这是防数据丢失的那一条：`INSERT INTO new SELECT * FROM old` 拿的是读快照，**事务期间的并发
+    写入不会进新表**，`RENAME` 那一刻就丢了。互斥只保证“同一时刻一个操作者在动结构”，
+    跟“有人在写”毫无关系。把“停接入”从“人记得”变成机器可验的前置条件。
+
+    提醒（如实写进文档）：它在**事务内、拿锁之后、任何 DDL 之前**运行，所以与
+    `INSERT ... SELECT` 共享同一事务快照；但它**不能阻止静默窗口之后新到的写入**（那只能靠停服）——
+    它只把“我们以为停了”变成“实测停了”。
+    """
+    sig = _quiet_signal(session, table, now=now)
+    age = sig["last_write_age_s"]
+    if sig["present"] and (age is None or age < float(seconds)):
+        raise ConversionRefused(
+            [f"{table} 最近一次写入距今 {age:.1f}s（要求 >= {float(seconds):.1f}s）"
+             "——转换会丢掉事务期间的并发写入，请先停接入"],
+            details={"reason": "not_quiet", "last_write_age_s": age,
+                     "require_quiet_s": float(seconds), "rows": sig["present"]})
+    return sig
+
+
+def check_convert_confirm(table: str, confirm: str | None) -> None:
+    """确认令牌门：必须在 confirm 里**原样复述表名**，否则拒绝。
+
+    与 `POST /v1/tenant/purge` 的 `X-Confirm-Tenant` 同意：不可逆动作前要求人把目标写一遍。
+    它挡的是“手滑把错表转了”与“脚本被调度器无参数重跑”；它**不**是安全边界
+    （能跑这个脚本的人本来就有 DDL 权限）。
+    """
+    if (confirm or "").strip() != table:
+        raise ConversionRefused(
+            [f"缺少确认令牌：请用 --confirm-table {table} 原样复述表名"
+             "（不可逆的结构变更）"],
+            details={"reason": "confirm_required", "expect": table,
+                     "got": (confirm or "").strip()})
 
 
 def _q(ident: str) -> str:
@@ -480,7 +564,9 @@ def plan_conversion(session: Any, table: str = PARTITION_TABLE, *,
 
 def convert_to_partitioned(session: Any, table: str = PARTITION_TABLE, *,
                            months: int = 3, keep_old: bool = False,
-                           now: datetime | None = None) -> dict[str, Any]:
+                           now: datetime | None = None, confirm: str = "",
+                           require_quiet: float | None = None,
+                           lock_wait: bool = False) -> dict[str, Any]:
     """把**既有普通表**就地转成按 `created_day` 的月分区表（**单事务**，失败全回滚）。
 
     为什么敢自动化（此前只说"要人工 runbook"）：日桶进主键之后，
@@ -491,19 +577,47 @@ def convert_to_partitioned(session: Any, table: str = PARTITION_TABLE, *,
     仍然是**停机窗口**操作：同一事务里 `INSERT ... SELECT` 拿的是旧表的读快照，期间的并发写入
     不会进新表；`RENAME` 还要 ACCESS EXCLUSIVE。**执行前请停止接入**。
 
-    返回：`{converted, rows, partitions, notes, old_table}`。**不 commit**——由调用方决定事务边界。
+    **前置条件（要求而不是建议）**：
+
+    - `confirm` 必须**原样复述表名**（与 `X-Confirm-Tenant` 同意），否则拒绝；
+    - `require_quiet=N` 时，要求最近一次写入早于 N 秒前（在**拿锁之后、任何 DDL 之前**检查，
+      与 `INSERT ... SELECT` 同事务），否则拒绝——这是唯一直接降“转换丢并发写入”概率的改动；
+    - `lock_wait=False`（默认）时库层咨询锁**不排队**：抢不到抛 `ConversionBusy`，
+      避免 15s 后爆成难读的 QueryCanceled。
+
+    返回：`{converted, rows, partitions, notes, old_table, quiet}`。**不 commit**——由调用方决定事务边界。
     """
+    # 确认令牌：在**做任何事之前**就拥有最强的语义（连计划都不算）。
+    check_convert_confirm(table, confirm)
+
     plan = plan_conversion(session, table, months=months, now=now)
     if plan["blockers"]:
         raise ConversionRefused(plan["blockers"])
     new = plan["new_table"]
-    if session.execute(text("SELECT to_regclass(:t)"), {"t": _check_name(new)}).scalar() is not None:
+
+    # 库层硬互斥：与另一个 --convert（或另一个副本的手工转换）**串行**，而不是两边同时
+    # RENAME 撞 ACCESS EXCLUSIVE 表锁。事务级锁随本事务结束自动释放，不改变调用方事务边界。
+    #
+    # **刻意放在“查中间表是否已存在”之前**：锁忙时连一次探测都不做（快失败），
+    # 也避免在没有 PG 能力的环境里撞上 PG 专有函数。
+    #
+    # 为什么 WAIT=False（除非调用方显式要求等）：会话上有 statement_timeout（15s），“排队”
+    # 最终是 15 秒后抛 QueryCanceled（看不懂、也分不清是谁占着）。失败关闭但不排队：当场告诉
+    # 调用方“另一个转换在跑”，退出码 3 与租约那条腿对齐。
+    if lock_wait:
+        acquire_xact_lock(session, PARTITION_CONVERT_LOCK_KEY)
+    elif not try_xact_lock(session, PARTITION_CONVERT_LOCK_KEY):
+        raise ConversionBusy(
+            "另一个转换正在进行（咨询锁 partition:ddpc 被持有）——本轮不排队，请稍后重试")
+
+    if is_postgres(session) and session.execute(
+            text("SELECT to_regclass(:t)"), {"t": _check_name(new)}).scalar() is not None:
         raise ConversionRefused([f"{new} 已存在——脚本不替你删表，请人工确认后再执行"])
 
-    # 库层硬互斥：与另一个 `--convert`（或另一个副本的手工转换）**串行**，而不是两边同时
-    # RENAME 撞 `ACCESS EXCLUSIVE` 表锁、抛出难读的错。事务级锁随本事务结束自动释放，
-    # 不改变调用方的事务边界（本函数本来就不 commit）。
-    acquire_xact_lock(session, PARTITION_CONVERT_LOCK_KEY)
+    # 静默窗口：**拿锁之后、任何 DDL 之前**（与 INSERT...SELECT 同事务）。不满足就拒绝，
+    # 不要去建一张注定会丢写入的新表。
+    quiet = check_convert_quiet(session, table, seconds=require_quiet, now=now) \
+        if require_quiet is not None else None
 
     notes: list[str] = [f"建分区父表 {new}（LIKE {table} INCLUDING ALL）"]
     session.execute(text(f"CREATE TABLE {_check_name(new)} (LIKE {_check_name(table)} INCLUDING ALL) "
@@ -559,4 +673,5 @@ def convert_to_partitioned(session: Any, table: str = PARTITION_TABLE, *,
                                  f"RENAME TO {_check_name(old_name)}"))
     return {"converted": True, "rows": new_rows,
             "partitions": [table + n[len(new):] for n in names],
-            "notes": notes, "old_table": old_table if keep_old else None}
+            "notes": notes, "old_table": old_table if keep_old else None,
+            "quiet": quiet}

@@ -962,6 +962,30 @@ def partition_ensure_months() -> int:
     return max(1, _get_int("DD_PARTITION_ENSURE_MONTHS", default=3))
 
 
+def partition_ddl_lease() -> bool:
+    """分区**结构变更（DDL）**是否先抢单持有者租约（DD_PARTITION_DDL_LEASE，默认 1 = 抢）。
+
+    为什么：`--ensure-months` / `--drop-before` / `--convert` 都是结构变更，而
+    `DD_PARTITION_AUTO_ENSURE=1` 时**每个副本启动都会补分区**（滚动发布 = N 个进程同时动手）。
+    抢不到就**本轮跳过**（不是失败）——结构与数据一个字都没改，下一轮再来。
+
+    单机直跑可以设 0 省掉一次共享状态往返；那时保护退回到"单事务 + 文档化的维护窗"这一层。
+    多副本下关掉它是危险的：`data-dog config check` 会在"自动补分区 + 关租约"时报警。
+    """
+    return _get_bool("DD_PARTITION_DDL_LEASE", default=True)
+
+
+def partition_ddl_lease_ttl_s() -> float:
+    """分区 DDL 租约 TTL（秒，DD_PARTITION_DDL_LEASE_TTL_S，默认 900）。
+
+    比清理租约（300s）给得宽：结构变更里可能包含**整表拷贝**（`INSERT ... SELECT`），
+    耗时随数据量增长。TTL 即"持有者崩了之后多久别人能接管"——太长则崩溃后空窗久，
+    **太短则长 DDL 会被第二个副本抢走**（那时 PG 的表锁仍会挡住第二个 DDL、不会坏数据，
+    但互斥就失效了）。所以它必须大于最慢的那次 DDL。
+    """
+    return max(1.0, _get_float("DD_PARTITION_DDL_LEASE_TTL_S", default=900.0))
+
+
 def investigate_workers() -> int:
     """异步调查 worker 池大小（进程内线程数）。"""
     return max(1, _get_int("DD_INVESTIGATE_WORKERS", default=4))

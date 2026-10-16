@@ -73,3 +73,24 @@ def test_migration_session_lock_excludes_and_releases():
         assert got is True, "迁移结束后锁应已释放"
         after.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": key})   # 清理池化连接状态
         after.commit()
+
+
+def test_try_xact_lock_is_non_blocking_and_noop_on_sqlite():
+    """只读探测原语：SQLite no-op 返回 True；且不执行 PG 专有 SQL。"""
+    with session_scope(url="sqlite+pysqlite:///:memory:", system=True) as s:
+        assert pg_locks.try_xact_lock(s, pg_locks.PARTITION_CONVERT_LOCK_KEY) is True
+
+
+@_needs_pg
+def test_try_xact_lock_returns_false_while_another_session_holds_it():
+    """真库：A 持有未提交时，B 用 try 立刻得 False（**不阻塞**）；A 提交后得 True。"""
+    key = pg_locks.PARTITION_CONVERT_LOCK_KEY
+    with session_scope(url=_PG_URL, system=True) as a:
+        assert pg_locks.acquire_xact_lock(a, key) is True
+        with session_scope(url=_PG_URL, system=True) as b:
+            assert pg_locks.try_xact_lock(b, key) is False, "第二个会话不该拿到"
+            b.rollback()
+        a.commit()
+        with session_scope(url=_PG_URL, system=True) as c:
+            assert pg_locks.try_xact_lock(c, key) is True, "提交后应已释放"
+            c.rollback()
