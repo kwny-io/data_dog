@@ -6,6 +6,7 @@ ref 解析成功、权限校验通过，**内容却是假的**。这里把"真�
 from __future__ import annotations
 
 import os
+import subprocess
 
 import pytest
 
@@ -218,3 +219,74 @@ def test_http_reader_asks_for_one_byte_more_than_the_cap(monkeypatch):
     monkeypatch.setattr("data_dog.data_plane.fetch.safe_request", _fake)
     _resolve(rawlog.make_rawlog_source(config=_http_cfg()), "rawlog://evt-1")
     assert seen["max_bytes"] == 101
+# ------------------------------------------------- Windows：句柄级受控打开
+_WIN = os.name == "nt"
+
+
+def _junction(link, target) -> bool:
+    """用 mklink /J 造目录 junction：**不需要管理员或开发者模式**（符号链接才需要）。"""
+    proc = subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(target)],
+                          capture_output=True, text=True)
+    return proc.returncode == 0 and link.exists()
+
+
+@pytest.mark.skipif(not _WIN, reason="Windows 句柄打开专用")
+def test_windows_refuses_junction_directory_component(tmp_path):
+    """中间目录是 junction（reparse point）→ 拒；失败关闭，不读到根外内容。"""
+    root = tmp_path / "root"
+    outside = tmp_path / "outside"
+    root.mkdir()
+    outside.mkdir()
+    (outside / "secret.log").write_bytes(b"TOP-SECRET")
+    if not _junction(root / "link", outside):
+        pytest.skip("本机不允许建 junction")
+    src = rawlog.make_rawlog_source(config=_cfg(root))
+    with pytest.raises(rawlog.RawLogRefused):
+        src("link/secret.log", [])
+
+
+@pytest.mark.skipif(not _WIN, reason="Windows 句柄打开专用")
+def test_windows_refuses_junction_inside_root_too(tmp_path):
+    """根**内部**的 junction 也拒——核对的是"句柄真实路径 == 受控路径"。
+
+    这条是新旧行为的分水岭：旧实现 resolve() 后做包含性检查，别名解析回根内 → **放行**；
+    新实现看句柄事实，路径不一致 → **拒绝**（保守，但确定）。
+    """
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "real").mkdir()
+    (root / "real" / "a.log").write_bytes(b"body")
+    if not _junction(root / "alias", root / "real"):
+        pytest.skip("本机不允许建 junction")
+    src = rawlog.make_rawlog_source(config=_cfg(root))
+    assert src("real/a.log", [])[1]["content"] == "body"      # 真路径照常
+    with pytest.raises(rawlog.RawLogRefused):                  # 经 junction 一律拒
+        src("alias/a.log", [])
+
+
+@pytest.mark.skipif(not _WIN, reason="Windows 句柄打开专用")
+def test_windows_refuses_symlinked_file(tmp_path):
+    """最后一段是符号链接：FILE_FLAG_OPEN_REPARSE_POINT 让命名对象就是**链接本身** → 拒。"""
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "real.log").write_bytes(b"body")
+    try:
+        os.symlink(root / "real.log", root / "link.log")
+    except (OSError, NotImplementedError):
+        pytest.skip("本机无权限建符号链接（Windows 需开发者模式/管理员）")
+    src = rawlog.make_rawlog_source(config=_cfg(root))
+    assert src("real.log", [])[1]["content"] == "body"
+    with pytest.raises(rawlog.RawLogRefused):
+        src("link.log", [])
+
+
+@pytest.mark.skipif(not _WIN, reason="Windows 句柄打开专用")
+def test_windows_checks_the_opened_handle_path(tmp_path, monkeypatch):
+    """证明核对的是**句柄事实**：把句柄真实路径改到别处，正常文件也必须拒。"""
+    (tmp_path / "a.log").write_bytes(b"body")
+    monkeypatch.setattr(rawlog, "_final_path",
+                        lambda k32, handle: "c:\\windows\\system32\\kernel32.dll")
+    src = rawlog.make_rawlog_source(config=_cfg(tmp_path))
+    with pytest.raises(rawlog.RawLogRefused) as ei:
+        src("a.log", [])
+    assert "句柄实际指向" in str(ei.value)

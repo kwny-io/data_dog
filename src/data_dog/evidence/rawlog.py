@@ -34,8 +34,13 @@
      → 路径上任何符号链接都被拒绝，`resolve()` 与 `read` 之间的换链窗口**关掉**。
      代价是**比逃逸检查更严**：指向根目录内的符号链接也拒（证据读取这样更安全）。
      已在 Linux 容器实测：普通/多级路径可读，symlink-final / symlink-escape / symlink-dir 全拒。
-   - **Windows**：没有 `O_NOFOLLOW`/`dir_fd`，退回"`resolve()` + 包含性检查"——
-     **仍有 TOCTOU 窗口**，假定受控目录不可被非受信方写入。平台边界，不假装平台无关。
+   - **Windows**：没有 `O_NOFOLLOW`/`dir_fd`，改用
+     `CreateFileW(FILE_FLAG_OPEN_REPARSE_POINT)`——命名对象是**链接本身**（不跟随最后一段），
+     再 `GetFinalPathNameByHandleW` 核对**已打开句柄**的真实路径是否等于受控路径。
+     窗口只剩两次系统调用之间，而核对对象是已打开的文件对象 → 中间目录被换成 junction/symlink
+     只会暴露成不一致（失败关闭）。**残留边界：同卷硬链接**（真实路径相同，本规则不区分，
+     也不该区分——那就是同一个文件）。本机实测：普通/多级路径可读，junction 中间段、
+     根内 junction 别名、symlink-final 全拒。
 - **本模块不做鉴权**：权限来自调用方注入的 `lookup`（按租户查 `raw_log_ref`，配合 RLS）。
   本模块只负责"键 → 正文"。
 - `content_sha256` 是**返回内容**（可能已截断）的摘要，不是整份文件的摘要；
@@ -43,6 +48,7 @@
 """
 from __future__ import annotations
 
+import ctypes
 import hashlib
 import os
 import stat
@@ -142,12 +148,136 @@ def _open_beneath(root: Path, rel: Path):
         finally:
             os.close(dir_fd)
 
-    target = (root / rel).resolve()
-    if target != root and root not in target.parents:
-        raise RawLogRefused("存储键逃出受控目录：" + repr(str(rel)))
-    if not target.is_file():
-        return None, None
-    return target.open("rb"), target.stat().st_size
+    return _open_beneath_windows(root, rel)
+
+
+# ---------------------------------------------------------------------------
+# Windows：CreateFileW(FILE_FLAG_OPEN_REPARSE_POINT) + 核对**已打开句柄**的真实路径
+# ---------------------------------------------------------------------------
+_FILE_ATTRIBUTE_NORMAL = 0x80
+_FILE_ATTRIBUTE_REPARSE_POINT = 0x400
+_GENERIC_READ = 0x80000000
+_FILE_SHARE_ALL = 0x00000001 | 0x00000002 | 0x00000004
+_OPEN_EXISTING = 3
+_FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
+_FILE_FLAG_SEQUENTIAL_SCAN = 0x08000000
+_ERROR_FILE_NOT_FOUND = 2
+_ERROR_PATH_NOT_FOUND = 3
+_ERROR_ACCESS_DENIED = 5
+_INVALID_HANDLE_VALUE = -1
+_K32 = None
+
+
+class _FileTime(ctypes.Structure):
+    _fields_ = [("dwLowDateTime", ctypes.c_uint32),
+                ("dwHighDateTime", ctypes.c_uint32)]
+
+
+class _ByHandleFileInformation(ctypes.Structure):
+    _fields_ = [("dwFileAttributes", ctypes.c_uint32),
+                ("ftCreationTime", _FileTime),
+                ("ftLastAccessTime", _FileTime),
+                ("ftLastWriteTime", _FileTime),
+                ("dwVolumeSerialNumber", ctypes.c_uint32),
+                ("nFileSizeHigh", ctypes.c_uint32),
+                ("nFileSizeLow", ctypes.c_uint32),
+                ("nNumberOfLinks", ctypes.c_uint32),
+                ("nFileIndexHigh", ctypes.c_uint32),
+                ("nFileIndexLow", ctypes.c_uint32)]
+
+
+def _win_kernel32():
+    """惰性装好 Win32 原型（只在 Windows 上真正用到）。"""
+    global _K32
+    if os.name != "nt":
+        raise RuntimeError("只有 Windows 才有 Win32 句柄 API")
+    if _K32 is None:
+        import ctypes.wintypes as wt
+
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.CreateFileW.restype = wt.HANDLE
+        k32.CreateFileW.argtypes = [wt.LPCWSTR, wt.DWORD, wt.DWORD, ctypes.c_void_p,
+                                   wt.DWORD, wt.DWORD, wt.HANDLE]
+        k32.GetFinalPathNameByHandleW.restype = wt.DWORD
+        k32.GetFinalPathNameByHandleW.argtypes = [wt.HANDLE, wt.LPWSTR, wt.DWORD, wt.DWORD]
+        k32.GetFileInformationByHandle.restype = wt.BOOL
+        k32.GetFileInformationByHandle.argtypes = [wt.HANDLE, ctypes.c_void_p]
+        k32.CloseHandle.restype = wt.BOOL
+        k32.CloseHandle.argtypes = [wt.HANDLE]
+        _K32 = k32
+    return _K32
+
+
+def _normalize_win_path(p: str) -> str:
+    """剥掉 Windows 长路径前缀（问号前缀 / UNC 长路径）后归一化，便于逐字比对。"""
+    bs = chr(92)
+    unc = bs * 2 + "?" + bs + "UNC" + bs
+    dos = bs * 2 + "?" + bs
+    if p.startswith(unc):
+        p = bs * 2 + p[len(unc):]
+    elif p.startswith(dos):
+        p = p[len(dos):]
+    return os.path.normcase(os.path.normpath(p))
+
+
+def _final_path(k32, handle) -> str | None:
+    """句柄**实际**指向哪里（POST-open 事实，不是"稍后要打开的路径"）。"""
+    buf = ctypes.create_unicode_buffer(32768)
+    n = k32.GetFinalPathNameByHandleW(handle, buf, len(buf), 0)
+    if n == 0 or n >= len(buf):
+        return None
+    return _normalize_win_path(buf.value)
+
+
+def _open_beneath_windows(root: Path, rel: Path):
+    """Windows 受控打开：**不跟随最后一段 reparse point** + 核对已打开句柄的真实路径。
+
+    与 POSIX 的差别（如实写）：POSIX 逐段 `openat` 把"检查"与"打开"合成同一个系统调用，
+    窗口彻底不存在；Windows 没有 `dir_fd`，这里是"一次打开 + 对**已打开句柄**核路径"。
+    窗口只剩两次系统调用之间，而核对对象是**已经打开的那个文件对象**：把中间目录换成
+    junction/符号链接只会在核对时暴露成不一致 → 失败关闭，不会读到根外内容。
+
+    **残留边界**：同卷**硬链接**与目标真实路径相同，本规则不区分（也不该区分：那就是同一个文件）。
+    **副作用（保守）**：根**内部**再套一个 junction 指向根内另一处，也会被拒绝（路径不一致）；
+    根自身是符号链接/挂载点没问题——`cfg.base_dir` 在配置加载时就 `resolve()` 过了。
+    """
+    k32 = _win_kernel32()
+    import msvcrt
+
+    full = root / rel
+    handle = k32.CreateFileW(
+        str(full), _GENERIC_READ, _FILE_SHARE_ALL, None, _OPEN_EXISTING,
+        _FILE_ATTRIBUTE_NORMAL | _FILE_FLAG_OPEN_REPARSE_POINT | _FILE_FLAG_SEQUENTIAL_SCAN,
+        None,
+    )
+    if handle == _INVALID_HANDLE_VALUE:
+        err = ctypes.get_last_error()
+        if err in (_ERROR_FILE_NOT_FOUND, _ERROR_PATH_NOT_FOUND):
+            return None, None
+        if err == _ERROR_ACCESS_DENIED and full.is_dir():
+            return None, None                      # 目录不是"日志正文"（与 POSIX 一致）
+        raise RawLogRefused("受控目录内不可打开：" + repr(str(rel))
+                            + "（WinError " + str(err) + "）")
+    try:
+        info = _ByHandleFileInformation()
+        if not k32.GetFileInformationByHandle(handle, ctypes.byref(info)):
+            raise RawLogRefused("取句柄属性失败：" + repr(str(rel)))
+        if info.dwFileAttributes & _FILE_ATTRIBUTE_REPARSE_POINT:
+            raise RawLogRefused("存储键指向 reparse point（符号链接/junction）："
+                                + repr(str(rel)))
+        actual = _final_path(k32, handle)
+        if actual is None or actual != _normalize_win_path(str(full)):
+            raise RawLogRefused("句柄实际指向 " + repr(actual)
+                                + "，与受控路径不一致（拒绝读取）")
+        size = (int(info.nFileSizeHigh) << 32) | int(info.nFileSizeLow)
+        fd = msvcrt.open_osfhandle(handle, os.O_RDONLY | os.O_BINARY)
+        if fd == -1:                                    # pragma: no cover - 极罕见
+            raise RawLogRefused("句柄转 fd 失败：" + repr(str(rel)))
+        handle = None                                   # 所有权已交给 fd
+        return os.fdopen(fd, "rb"), size
+    finally:
+        if handle is not None:
+            k32.CloseHandle(handle)
 
 
 def _read_local(cfg: RawLogConfig, key: str) -> tuple[bytes | None, dict[str, Any]]:

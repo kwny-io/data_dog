@@ -912,7 +912,7 @@ def rawlog_base_dir() -> str:
     """原始日志正文的**受控目录**（DD_RAWLOG_BASE_DIR，默认空 = 不启用本地读取）。
 
     目录内的相对键由 `telemetry_events.raw_log_ref` 给出；键在目录内解析（拒绝绝对路径、
-    `..`、符号链接逃逸）。假定该目录**不可被非受信方写入**（本地 TOCTOU 见 rawlog.py 边界）。
+    `..`、符号链接/reparse point）。本地 TOCTOU 的处置见 `evidence/rawlog.py`：POSIX 逐段 `openat`+`O_NOFOLLOW`；Windows `CreateFileW(FILE_FLAG_OPEN_REPARSE_POINT)` + 句柄真实路径核对。目录本身仍应由文件系统权限保护（纵深防御，不是替代品）。
     """
     return _get("DD_RAWLOG_BASE_DIR", default="").strip()
 

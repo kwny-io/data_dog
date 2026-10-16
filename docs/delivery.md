@@ -59,10 +59,12 @@
 
 - **两者都不配 = 失败关闭**：解析返回 `execution_failed`，不退回 mock、不猜路径；
   两者同时配 → 同样失败关闭，且 `data-dog config check` 会报错；
-- 目录模式做**容器化校验**（拒绝绝对路径、`..`、符号链接逃逸）：**POSIX** 上逐段
-  `openat`+`O_NOFOLLOW`（路径上任何符号链接都拒，`resolve()`→`read` 的换链窗口关掉；已在 Linux
-  容器实测）；**Windows** 无这两个能力，退回 `resolve()`+包含性检查，**仍有 TOCTOU 窗口**，
-  假定目录不可被非受信方写入——平台边界；
+- 目录模式做**容器化校验**（拒绝绝对路径、`..`、符号链接/reparse point 逃逸）：**POSIX** 上逐段
+  `openat`+`O_NOFOLLOW`（路径上任何符号链接都拒，`resolve()`→`read` 的换链窗口关掉；已在
+  Linux 容器实测）；**Windows** 用 `CreateFileW(FILE_FLAG_OPEN_REPARSE_POINT)` + 核对
+  **已打开句柄**的真实路径（`GetFinalPathNameByHandleW`）——junction/symlink 一律拒
+  （本机实测，含根内 junction 别名这条新旧行为分水岭）；**残留边界**：同卷硬链接真实
+  路径相同，本规则不区分；
 - http 模式走 `data_plane.fetch.safe_request`（逐跳复验重定向 + 连接钉在已校验 IP），
   默认**不允许私网**；取数层自身"读满即止"，故到达上限时按**可能被截断**保守标注；
 - **读正文留痕**：每成功读到正文记一条审计（`action=rawlog.read`，含候选与事件 id），
