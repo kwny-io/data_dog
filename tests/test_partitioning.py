@@ -491,7 +491,7 @@ def test_converted_partitions_do_not_keep_the_new_infix_in_index_names():
             assert partitioning.is_partitioned(s, table) is True
             rows = [r[0] for r in s.execute(text(
                 "SELECT indexname FROM pg_indexes WHERE schemaname = 'public' "
-                "AND (tablename = :t OR tablename LIKE :p)"), {"t": table, "p": table + "\_2%"})]
+                "AND (tablename = :t OR tablename LIKE :p)"), {"t": table, "p": table + r"\_2%"})]
             bad = [n for n in rows if "_new_" in n]
             assert not bad, f"子分区索引名仍带 _new 中缀：{bad}"
             # 子分区索引本身必须存在且被规划器使用（不是"删掉名字清爽了"）
@@ -500,6 +500,46 @@ def test_converted_partitions_do_not_keep_the_new_infix_in_index_names():
         with eng.begin() as c:
             for name in (table, f"{table}_old", f"{table}_new"):
                 c.execute(text(f"DROP TABLE IF EXISTS {name} CASCADE"))
+        eng.dispose()
+
+@pytest.mark.postgres
+@pytest.mark.skipif(not _PG_URL, reason="未设 DD_TEST_PG_URL，跳过 PG 分区集成测试")
+def test_conversion_lifts_the_session_statement_timeout():
+    """真 PG：转换/恢复必须在**本事务内**解除 statement_timeout。
+
+    为什么（100 万行排练实测）：应用连接由 storage/db.py 统一设了 15s 的 statement_timeout，
+    而转换里的整表 INSERT...SELECT 是**一条语句**——表一大就被取消，转换直接失败。
+    这里把会话超时压到很短，再用一条"必然超时"的语句验证护栏确实生效（不依赖表有多大）。
+    """
+    from sqlalchemy import create_engine, text
+    from sqlalchemy.orm import Session
+
+    eng = create_engine(_PG_URL, future=True)
+    table = "timeout_probe"
+    with eng.begin() as c:
+        c.execute(text(f"DROP TABLE IF EXISTS {table} CASCADE"))
+        c.execute(text(
+            f"CREATE TABLE {table} (tenant_id varchar(80) NOT NULL, event_id varchar(80) NOT NULL, "
+            "created_day bigint NOT NULL, created_at double precision NOT NULL, "
+            f"CONSTRAINT pk_{table} PRIMARY KEY (tenant_id, event_id, created_day)) "
+            "PARTITION BY RANGE (created_day)"))
+    try:
+        with Session(eng) as s:
+            s.execute(text("SET statement_timeout = 200"))
+            partitioning._lift_statement_timeout(s)
+            # 400ms > 200ms：护栏没生效的话这里会抛 QueryCanceled
+            s.execute(text("SELECT pg_sleep(0.4)"))
+            s.rollback()
+        # 对照：不调用护栏时，同样的睡眠必须被取消（证明这条断言不是空的）
+        with Session(eng) as s:
+            s.execute(text("SET statement_timeout = 200"))
+            with pytest.raises(Exception) as exc:
+                s.execute(text("SELECT pg_sleep(0.4)"))
+            assert "timeout" in str(exc.value).lower() or "QueryCanceled" in str(exc.value)
+            s.rollback()
+    finally:
+        with eng.begin() as c:
+            c.execute(text(f"DROP TABLE IF EXISTS {table} CASCADE"))
         eng.dispose()
 
 

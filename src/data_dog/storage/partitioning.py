@@ -696,6 +696,9 @@ def convert_to_partitioned(session: Any, table: str = PARTITION_TABLE, *,
     elif not try_xact_lock(session, PARTITION_CONVERT_LOCK_KEY):
         raise ConversionBusy(
             "另一个转换正在进行（咨询锁 partition:ddpc 被持有）——本轮不排队，请稍后重试")
+    # 拿锁之后立刻解除本事务的 statement_timeout：下面的整表 INSERT...SELECT 是**一条语句**，
+    # 表一大就会被会话级 15s 取消（100 万行实测）。
+    _lift_statement_timeout(session)
 
     if is_postgres(session) and session.execute(
             text("SELECT to_regclass(:t)"), {"t": _check_name(new)}).scalar() is not None:
@@ -763,6 +766,21 @@ def convert_to_partitioned(session: Any, table: str = PARTITION_TABLE, *,
             "partitions": [table + n[len(new):] for n in names],
             "notes": notes, "old_table": old_table if keep_old else None,
             "quiet": quiet}
+
+def _lift_statement_timeout(session: Any) -> None:
+    """在**本事务内**解除 `statement_timeout`（`SET LOCAL`，提交/回滚即失效）。
+
+    为什么必须做（**100 万行排练实测**）：应用的连接由 `storage/db.py` 统一设了会话级
+    `statement_timeout`（默认 15s）。转换里的 `INSERT INTO new SELECT * FROM old` 是**一条语句**，
+    表一大就必被取消——实测 100 万行时报 `QueryCanceled: canceling statement due to statement
+    timeout`，转换直接失败。`docs/reliability.md` 里「statement_timeout 不影响迁移」的说法只对
+    alembic（它自己的引擎）成立，**对转换不成立**——这里补上。
+
+    边界：这**不是**给热路径开后门——转换本来就要停机窗口 + `ACCESS EXCLUSIVE`，此时没有值得
+    保护的热路径；而 `SET LOCAL` 作用域仅限本事务，跑完不残留。非 PG：no-op。
+    """
+    if is_postgres(session):
+        session.execute(text("SET LOCAL statement_timeout = 0"))
 
 def check_unpartition_confirm(table: str, confirm: str | None) -> None:
     """反向操作（分区表 → 普通表）的确认令牌——与 `check_convert_confirm` 同一规矩。
@@ -838,6 +856,7 @@ def unpartition(session: Any, table: str = PARTITION_TABLE, *,
     if not try_xact_lock(session, PARTITION_UNPARTITION_LOCK_KEY):
         raise PartitioningBusy(
             "另一个入口正在做分区→普通表的反向转换（咨询锁 partition:ddup 被持有）")
+    _lift_statement_timeout(session)     # 同理：整表 INSERT...SELECT 是一条语句
 
     quiet: dict[str, Any] | None = None
     if require_quiet is not None:
