@@ -55,9 +55,18 @@ def make_config(url: str) -> Config:
 
 
 def upgrade_head(url: str | None = None) -> None:
-    """把数据库迁移到最新版本。"""
+    """把数据库迁移到最新版本（**多入口互斥**：见下）。
+
+    为什么先抢咨询锁：多个副本 / 多个部署任务同时 `alembic upgrade head` 会交错改版本表，
+    落到难以恢复的中间态。锁是**连接级、不需要任何表**的（迁移的表可能还不存在），
+    拿不到就阻塞等待——排队比并行乱跑好。非 PostgreSQL 上自动 no-op。
+    """
     from .db import database_url
-    command.upgrade(make_config(url or database_url()), "head")
+    from .pg_locks import migration_lock
+
+    target = url or database_url()
+    with migration_lock(target):
+        command.upgrade(make_config(target), "head")
 
 
 def current_revision(url: str | None = None) -> str:

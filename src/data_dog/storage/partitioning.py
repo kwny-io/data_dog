@@ -30,6 +30,7 @@ from typing import Any
 from sqlalchemy import text
 
 from .models import day_of
+from .pg_locks import PARTITION_CONVERT_LOCK_KEY, acquire_xact_lock
 
 PARTITION_TABLE = "telemetry_events"
 # 分区键是**摄取日桶** `created_day`（= floor(created_at/86400)），不是 `created_at` 本身：
@@ -442,6 +443,11 @@ def convert_to_partitioned(session: Any, table: str = PARTITION_TABLE, *,
     new = plan["new_table"]
     if session.execute(text("SELECT to_regclass(:t)"), {"t": _check_name(new)}).scalar() is not None:
         raise ConversionRefused([f"{new} 已存在——脚本不替你删表，请人工确认后再执行"])
+
+    # 库层硬互斥：与另一个 `--convert`（或另一个副本的手工转换）**串行**，而不是两边同时
+    # RENAME 撞 `ACCESS EXCLUSIVE` 表锁、抛出难读的错。事务级锁随本事务结束自动释放，
+    # 不改变调用方的事务边界（本函数本来就不 commit）。
+    acquire_xact_lock(session, PARTITION_CONVERT_LOCK_KEY)
 
     notes: list[str] = [f"建分区父表 {new}（LIKE {table} INCLUDING ALL）"]
     session.execute(text(f"CREATE TABLE {_check_name(new)} (LIKE {_check_name(table)} INCLUDING ALL) "
