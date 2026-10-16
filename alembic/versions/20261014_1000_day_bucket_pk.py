@@ -24,8 +24,11 @@
 - PostgreSQL：`ADD COLUMN`（可空）→ 回填 → `SET NOT NULL` → 换主键（`ALTER`，不重写数据）；
 - SQLite：走 batch 重建表（SQLite 不支持改主键），batch 会带上已存在的索引。
 
-⚠️ 运维注意：回填是一条 `UPDATE`（大表上是一个长事务）。**有数据的大表**应先按 docs/storage.md
-§8.2 的 runbook 处理（分批回填 + 停机窗口），不要在启动自动迁移里对亿级表执行本迁移。
+⚠️ 运维注意：本迁移的回填在**同一事务内**分批执行（不再是一条巨型语句，也不分批提交——迁移必须
+原子）。因此**有数据的大表**必须**先**用 CLI 分批回填再跑
+本迁移：`python scripts/backfill_created_day.py --batch 50000`（幂等、可中断；runbook 见
+`docs/partition_backfill.md`）。回填完成后本迁移里的 `UPDATE` 命中 0 行，只剩改主键的 DDL。
+不要在启动自动迁移里对亿级表执行本迁移。
 
 downgrade 保留数据但**可能失败**：若已存在跨天重复行，旧主键 `(tenant_id, event_id)` 建不起来
 ——**失败是对的**（宁可报错，也不静默删掉用户数据）。要回退先按 §8.2 的检测清重复。
@@ -61,12 +64,37 @@ def _backfill_expr(dialect: str) -> str:
     return "CAST(created_at / 86400 AS INTEGER)"       # SQLite：正数截断 == floor
 
 
+# 迁移内的回填批大小：**不是**为了"分批提交"（迁移必须原子），只是为了不产生一条巨型语句。
+# 大表请先用 `scripts/backfill_created_day.py` 在窗口内分批回填（幂等，可中断），
+# 那时这里命中 0 行。批间**不提交**——迁移的事务语义必须保持。
+_BATCH = 50_000
+
+
+def _backfill_in_batches(bind: sa.engine.Connection, dialect: str) -> int:
+    """分批（**同一事务内**）回填 `created_day`，返回更新行数。
+
+    分页用行标识（PG `ctid` / SQLite `rowid`）：要填的正是主键里的那一列，用主键分页
+    会自我循环。只碰 `created_day IS NULL`，所以重复执行安全。
+    """
+    rowid = "ctid" if dialect == "postgresql" else "rowid"
+    expr = _backfill_expr(dialect)
+    total = 0
+    while True:
+        res = bind.execute(sa.text(
+            f"UPDATE {_TABLE} SET created_day = {expr} WHERE {rowid} IN ("
+            f"SELECT {rowid} FROM {_TABLE} WHERE created_day IS NULL LIMIT :n)"),
+            {"n": _BATCH})
+        n = int(res.rowcount or 0)
+        total += n
+        if n < _BATCH:
+            return total
+
+
 def upgrade() -> None:
     bind = op.get_bind()
     dialect = bind.dialect.name
     op.add_column(_TABLE, sa.Column("created_day", sa.BigInteger(), nullable=True))
-    op.execute(sa.text(f"UPDATE {_TABLE} SET created_day = {_backfill_expr(dialect)} "
-                       "WHERE created_day IS NULL"))
+    _backfill_in_batches(bind, dialect)
     if dialect == "postgresql":
         op.alter_column(_TABLE, "created_day", existing_type=sa.BigInteger(), nullable=False)
         op.drop_constraint(_PK, _TABLE, type_="primary")

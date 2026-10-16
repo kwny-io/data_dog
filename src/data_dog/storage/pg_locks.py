@@ -40,6 +40,7 @@ from sqlalchemy import create_engine, text
 # 固定常量：出现在 `pg_locks` / 日志里要能一眼认出"是谁在动手"。
 MIGRATION_LOCK_KEY = 0x64646D67           # "ddmg"：alembic upgrade head
 PARTITION_CONVERT_LOCK_KEY = 0x64647063   # "ddpc"：分区就地转换
+PARTITION_BACKFILL_LOCK_KEY = 0x64647062  # "ddpb"：created_day 分批回填
 
 
 def is_postgres(session_or_bind: Any) -> bool:
@@ -69,6 +70,35 @@ def advisory_xact_lock(session: Any, key: int, *, wait: bool = True) -> Iterator
     （例如宁可直接拒绝，也不要挂住一次 API 请求）。
     """
     yield acquire_xact_lock(session, key, wait=wait)
+
+
+@contextmanager
+def advisory_session_lock(session: Any, key: int, *, wait: bool = True) -> Iterator[bool]:
+    """**会话级**咨询锁（PG）：跨多个事务持有，直到显式解锁或连接关闭。
+
+    用于"自己会分批提交的长任务"（例如大表 `created_day` 分批回填）——事务级锁在第一批
+    提交时就释放了，等于没有。锁挂在 `session` 当前那条连接上，所以**必须**在 finally 里解锁：
+    否则连接回池后锁还在，后续任务会莫名其妙抢不到。
+
+    非 PG：no-op（`yield True`）。`wait=False` 时不阻塞，把"别人正在跑"交给调用方处置。
+    """
+    if not is_postgres(session):
+        yield True
+        return
+    sql = "SELECT pg_advisory_lock(:k)" if wait else "SELECT pg_try_advisory_lock(:k)"
+    got = session.execute(text(sql), {"k": key}).scalar()
+    if not wait and not bool(got):
+        yield False
+        return
+    session.commit()                       # 让"取锁"这一步不挂在悬空事务里
+    try:
+        yield True
+    finally:
+        try:
+            session.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": key})
+            session.commit()
+        except Exception:                  # pragma: no cover - 解锁失败不掩盖主流程异常
+            session.rollback()
 
 
 @contextmanager

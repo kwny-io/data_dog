@@ -13,7 +13,7 @@
 | | 亮点 | 证据 |
 |---|---|---|
 | 🔗 | **全链闭环，一条命令跑通** | 厂商文档 →[P1]→ 算子 →[P2]→ 候选 →[Agent]→ 报告 →[P3]→ 策略门 → SaaS 反馈，`python -m data_dog.e2e.replay_demo` |
-| 🧪 | **1416 项测试，全离线确定性** | `pytest -q` → `1393 passed, 23 skipped`（105 个测试文件，fake provider，无需 API Key、不联网；13 skipped **全部是按环境条件跳过**：未设 `DD_TEST_PG_URL` 的真 PostgreSQL 用例、未设 `DD_TEST_REDIS_URL` 的真 Redis 契约用例，以及"本机已装可选依赖/平台相关"的分支——两类集成用例由 CI 的 `postgres` / `redis` 腿实测；Redis 后端的行为测试另由 `.[dev]` 里的 `fakeredis` 离线跑。这里刻意不再写逐文件条数：那些数字脚本守不住，会漂） |
+| 🧪 | **1422 项测试，全离线确定性** | `pytest -q` → `1397 passed, 25 skipped`（105 个测试文件，fake provider，无需 API Key、不联网；13 skipped **全部是按环境条件跳过**：未设 `DD_TEST_PG_URL` 的真 PostgreSQL 用例、未设 `DD_TEST_REDIS_URL` 的真 Redis 契约用例，以及"本机已装可选依赖/平台相关"的分支——两类集成用例由 CI 的 `postgres` / `redis` 腿实测；Redis 后端的行为测试另由 `.[dev]` 里的 `fakeredis` 离线跑。这里刻意不再写逐文件条数：那些数字脚本守不住，会漂） |
 | 🔒 | **热路径确定性：上报不交给模型判断** | 上不上报由**确定性策略门**（四条件决策表 + 冲突消解）决定，同输入永远同结论；模型只出现在"调查报告"那一步 |
 | 🧱 | **不拿 `eval` 执行厂商字符串** | 自建**受限 DSL**：词法 → AST 解释器，无动态执行原语、函数闭集白名单、编译期类型检查 |
 | 🔍 | **诚实抽取，区分"能证实 / 待确认"** | 官方 SDK 头文件明写电机 **90°C 触发保护** → `verified`；无出处的 75°C → `unconfirmed`，**不冒充厂商事实** |
@@ -23,7 +23,7 @@
 | 📊 | **带 ground truth 的规模化评估（双栏）** | **忠实 MuJoCo 数据集 10 万条**，分层抽跑真实 Agent：**确定性 provider** n=2000 → **准确率 0.818**（Wilson 95% CI 0.801–0.834）、normal 误报率 **0.064**；**真 LLM** n=500 → **0.708**（0.667–0.746）、normal 误报率 **0.72**（故障召回反而更高）。逐类召回一并如实报（**F4 偏置 0.43 为当前最低**）；误报根因（裁决口径把"证据不足"与"证据充分但正常"混为一谈）**已定位并改口径，效果标注为未实测**（本机 key 余额为零）；另有 7 个评估 case（含 2 个对抗性：提示注入 / 身份伪装） |
 | 🚚 | **能交付：服务 + 容器 + HTTPS** | FastAPI（liveness / readiness 分离）+ Dockerfile + compose（含 Caddy 自动申请 HTTPS）+ Makefile |
 
-**规模**：源码 158 个 Python 文件 / 29376 行，测试 105 个文件 / 24409 行；前端 `web/` 为 Next.js 15 控制台（67 个 TS/TSX 文件）；5 份正式事件 JSON Schema；35 个 `make` 命令（另有 `help`）。
+**规模**：源码 158 个 Python 文件 / 29462 行，测试 105 个文件 / 24409 行；前端 `web/` 为 Next.js 15 控制台（67 个 TS/TSX 文件）；5 份正式事件 JSON Schema；35 个 `make` 命令（另有 `help`）。
 
 ---
 

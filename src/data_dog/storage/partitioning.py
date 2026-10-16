@@ -24,6 +24,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Any
 
@@ -170,6 +171,61 @@ def horizon_epoch(session: Any, table: str = PARTITION_TABLE) -> float | None:
     known = [e for e in ends if e is not None]
     return max(known) if known else None
 
+
+
+def _backfill_expr(dialect: str) -> str:
+    """`floor(created_at / 86400)` 的可移植写法。
+
+    **必须与迁移 `alembic/versions/20261014_1000_day_bucket_pk.py` 里的公式一致**——
+    `tests/test_backfill_created_day.py` 会把两处钉在一起（公式漂移 = 分区键与主键不一致）。
+    不能用 `CAST(created_at / 86400 AS BIGINT)` 一把梭：PG 的 double→整型是**四舍五入**，
+    正午之后的时刻会被推进次日。
+    """
+    if dialect == "postgresql":
+        return "FLOOR(created_at / 86400)::bigint"
+    return "CAST(created_at / 86400 AS INTEGER)"       # SQLite：非负数截断 == floor
+
+
+def backfill_created_day(session: Any, table: str = PARTITION_TABLE, *, batch: int = 50_000,
+                         commit_each: bool = True,
+                         log: Callable[[str], None] | None = None) -> dict[str, Any]:
+    """给**大表**分批回填 `created_day`（幂等、可中断重跑）：A9 迁移前的停机窗口用。
+
+    为什么需要它：迁移里的回填是**一条 `UPDATE`**——亿级表上就是一个长事务（WAL 峰值高、锁久、
+    失败全回滚、只能重头再来），而 `docs/storage.md` 的 runbook 只说"应分批回填"却没工具。
+
+    分批评据是**行标识**（PG `ctid` / SQLite `rowid`），不是主键——回填的正是主键要加的
+    那一列，用主键分页会自我循环。每批一次提交（`commit_each=True`），中断后再跑即可：
+    它只碰 `created_day IS NULL` 的行。
+
+    返回 `{"updated", "batches", "remaining", "dialect", "batch"}`；`remaining` 是**回填前**观察到的
+    待办行数（并发写入可能让它偏保守，以 `--check` 复查为准）。
+    """
+    dialect = _dialect(session)
+    name = _check_name(table)
+    expr = _backfill_expr(dialect)
+    rowid = "ctid" if dialect == "postgresql" else "rowid"
+    size = max(1, int(batch))
+    todo = int(session.execute(text(
+        f"SELECT count(*) FROM {name} WHERE created_day IS NULL")).scalar() or 0)
+    updated = 0
+    batches = 0
+    while True:
+        res = session.execute(text(
+            f"UPDATE {name} SET created_day = {expr} WHERE {rowid} IN ("
+            f"SELECT {rowid} FROM {name} WHERE created_day IS NULL LIMIT :n)"),
+            {"n": size})
+        n = int(res.rowcount or 0)
+        if commit_each:
+            session.commit()
+        updated += n
+        batches += 1
+        if log is not None:
+            log(f"created_day 回填：第 {batches} 批 +{n}（累计 {updated}/{todo}）")
+        if n < size:
+            break
+    return {"updated": updated, "batches": batches, "remaining": max(0, todo - updated),
+            "dialect": dialect, "batch": size}
 
 
 def ensure_partitions(session: Any, table: str = PARTITION_TABLE, *,
