@@ -123,6 +123,37 @@ export function resolveProxyConfig(
 }
 
 /**
+ * 失败关闭的**启动护栏**：`DD_WEB_TRUST_PROXY_AUTH=1` 是一把双刃剑。
+ *
+ * 打开它是让控制台**信任** `<userHeader>` 里的用户名。但控制台无法验证这个头是谁写的：
+ * 只要上游反代**没有**剥掉客户端伪造的同名头，任何人加一个头就能冒充任意用户（包括
+ * 用户清单里的 alice）。这是一条 CLI 检查不到的部署前提，靠人记住必然出事。
+ *
+ * 所以这里把它变成启动期硬门：开了信任、却既没有一道门（`DD_WEB_BASIC_AUTH`）、也没有
+ * 显式承担责任的确认（`DD_WEB_TRUST_PROXY_ACK=1`）时，**拒绝启动**并说明原因，
+ * 而不是静默信任。返回值：`null` = 放行；非空字符串 = 拒绝原因（由调用方抛错/退出）。
+ *
+ * 纯函数：只读 env，不抛错、不读文件，便于单测把判定表钉死。
+ */
+export function trustProxyAuthGuard(
+  env: Record<string, string | undefined> = process.env,
+): string | null {
+  const cfg = resolveProxyConfig(env);
+  if (!cfg.trustProxyAuth) return null;
+  if (cfg.basicAuth) return null;
+  if ((env.DD_WEB_TRUST_PROXY_ACK ?? "").trim() === "1") return null;
+  return [
+    "拒绝启动（失败关闭）：DD_WEB_TRUST_PROXY_AUTH=1 会让控制台把请求头 " +
+      `"${cfg.userHeader}"` +
+      " 当作已认证的用户身份，但控制台**无法验证这个头是谁写的**。",
+    "上游反代必须剥掉客户端伪造的同名头；否则任何人加一个头即可冒充任意用户。",
+    "请二选一后重启：(a) 给控制台加一道门 DD_WEB_BASIC_AUTH=user:pass；" +
+      "(b) 确认已在反代剥离该头，显式设置 DD_WEB_TRUST_PROXY_ACK=1 以示承担该责任。",
+    "（当前既未设置 DD_WEB_BASIC_AUTH，也未设置 DD_WEB_TRUST_PROXY_ACK=1。）",
+  ].join("\n");
+}
+
+/**
  * Validate and join the catch-all path segments.
  *
  * Returns the upstream path (`v1/...`, `metrics`, `healthz`, `readyz`) or `null`
