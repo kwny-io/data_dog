@@ -272,33 +272,63 @@ ReAct 轨迹 = Agent 一步步的行动脚印（调了哪个工具、传了什�
 ## 目录结构
 
 ```
-src/data_dog/
+src/data_dog/            # 17 个包 + 20 个顶层模块（.py）
   providers/    多供应商接入（DeepSeek/OpenAI/智谱）
   evidence/     证据库 + 在线检测算子
   tools/        受控调查工具（5 个只读：遥测/厂商知识/邻居事件/近期变更/因果链）
   agent/        AgentLoop（调查主循环）
   schemas/      CandidateEvent / InvestigationReport
-  correlation/  多事件关联
-  reporter/     提出上报意图（A3，本地 outbox + 幂等 + Receipt）
   synth/        合成遥测生成器（Go2 物理参数 + 故障注入 + ground truth）+ 评估（synth_eval 小集 / dataset_eval 数据集规模评估）
   mujoco_sim/   MuJoCo 仿真数据源（conditions 条件网格 + gait trot 步态 + simulate 跑 Go2 + noise 噪声层 + gen_dataset 分片并行生成 + to_sample 转样本 + mujoco_eval 评估）
   operator_factory/  离线算子工厂（文档 revision + 诚实知识抽取 + 受限 DSL + Fixture 回放）
   data_plane/   在线数据面（网关/兼容绑定/解析链/候选构建 + SSRF 安全引用）
   alerting/     上报闭环（确定性策略门 + Alert 生命周期 + 幂等 Outbox + 测试 SaaS）
   e2e/          整链回放（厂商文档→算子→候选→Agent→策略门→SaaS，一条命令）
-  storage/      持久化（SQLAlchemy：本地 SQLite / 生产 PostgreSQL）+ 仓储层
-  service/      HTTP 服务（FastAPI：探针 + 遥测接入 + 调查/查询端 + P3 落库接线）
+  storage/      持久化（SQLAlchemy：本地 SQLite / 生产 PostgreSQL）+ 仓储层 + 分区 DDL
+  stream/       真实遥测流式接入（file / http / mqtt / kafka 四种传输，统一走同一数据面）
+  replication/  跨地域多活（确定性收敛 + 冲突消解，只做应用层可见部分）
+  service/      HTTP 服务（FastAPI：探针 + 遥测接入 + 调查/查询端 + 审计 + 租户合规）
+  core/         横切关注点（日志 / 请求上下文 / 追踪 / 指标 / 注入防御 unwrap / 控制台 UTF-8）
+  state/        跨副本共享状态（限流桶、候选归并）+ 租约（选主，水平扩展硬前提）
+  # —— 顶层模块（按用途分组）——
+  correlation.py        多事件关联
+  reporter.py           提出上报意图（A3，本地 outbox + 幂等 + Receipt）
+  cli.py                `data-dog` 命令入口（init / run / test …）
+  candidates.py         演示用候选异常用例（每例认准一件真·有遥测的部件，保证"不同输入不同结论"）
   knowledge.py          向量知识库客户端（Chroma，厂商知识检索）
   knowledge_ingest.py   用户文档导入的纯逻辑（切片 + 词法检索，无外部依赖）
+  context.py            运行时上下文注入（tenant/scope 由可信运行时给，Tool 不接受、越权收紧）
+  errors.py             失败收敛到有限错误码（上层可稳定分类，不散落字符串）
+  observability.py      可观测性（token 消耗 / 每步耗时 / 成本统计）
+  budget.py             LLM 额度硬熔断（花钱之前拦）
   eval_feedback.py      反馈回灌：人工标签 vs Agent 处置 → 一致率/误报率/漏报率
-  settings.py   配置集中（纯 os.environ，调用时惰性读取，不缓存）
-  paths.py      资源定位（资源位置外部可注入，防"打包后路径失联"）
-  observability.py  可观测性（token 消耗 / 每步耗时 / 成本统计）
-ui/             Streamlit **演示台**（不是产品控制台；产品控制台是 web/，见下）
+  audit.py              安全审计留痕（只增不改；对齐 SLO §6 保留 ≥ 1 年）
+  retention.py          保留清理（`make retention`，默认 dry-run）
+  tenant_data.py        合规成对：租户导出 + 被遗忘删除（须原样复述 X-Confirm-Tenant）
+  partition_ddl.py      分区维护 DDL（--ensure-months 建分区 / --drop-before 收口）
+  settings.py           配置集中（纯 os.environ，调用时惰性读取，不缓存）
+  paths.py              资源定位（资源位置外部可注入，防"打包后路径失联"）
+  config_check.py       配置体检（140+ 个 DD_* 变量的启动期检查）
+  mcp_context.py        MCP 常驻连接（握手一次、整个进程复用、进程死了自动关旧建新）
+  presentation.py       演示场景的裁决/展示逻辑抽离
+# —— 以下是**仓库根**目录（不在 src/data_dog/ 下）——
+web/            产品控制台（Next.js 15；密钥不进浏览器，见 docs/delivery.md）
+ui/             Streamlit **演示台**（不是产品控制台）
 evals/          Agent 评估框架（7 case，含对抗性）
-scripts/        数据清洗 / 算子生成 / RAG 落地脚本
+scripts/        数据清洗 / 算子生成 / RAG 落地 / 分区维护 / 覆盖率门禁 / git-hooks
 schemas/        标准事件正式 Schema（JSON Schema，5 份）+ 版本演进策略 + 校验工具
-docs/           设计文档（架构总览、落地交付、各子系统、SLO、受限 DSL 规范）
+docs/           设计文档（架构总览、落地交付、各子系统、SLO、受限 DSL 规范）+ docs/p4/ 十篇
+tests/          pytest（112 个 test_*.py）
+alembic/        数据库迁移（启动时按 DD_AUTO_MIGRATE 自动 upgrade head）
+helm/           K8s 部署 chart（含 PrometheusRule 告警规则）
+deploy/         容器与生产 compose（Caddy 自动 HTTPS；deploy/replication 多活）
+mcp_servers/    本地 MCP server（上下文注入）
+operators/      算子产物（generated/）
+benchmarks/     性能基准（P4-8 软实时：baseline.md / last_run.txt）
+data/           数据集（mj_60s_100k / cwru 等）与本地 SQLite
+vendor_docs/    厂商文档备份（unitree/，含 SOURCES.md 来源与许可）
+third_party/    第三方源码（mujoco_menagerie）
+tools/          开发辅助（loadgen.py / perf_probe.py / bench.ps1 / k8s_e2e.sh）
 ```
 
 ---
