@@ -61,6 +61,8 @@ def main(argv: list[str] | None = None) -> int:
                    help="要求最近一次写入早于 N 秒，否则拒绝")
     p.add_argument("--keep-partitioned", action="store_true",
                    help="保留原分区表为 <表>_old，而不是删掉")
+    p.add_argument("--no-verify", action="store_true",
+                   help="跳过反向转换后的整表内容指纹核对（只留行数核对）")
     p.add_argument("--dry-run", action="store_true", help="只打印将要做的事，不执行 DDL")
     p.add_argument("--no-lease", action="store_true",
                    help="不抢结构变更租约（单机确认无并发时用）")
@@ -148,7 +150,7 @@ def _run(args, s: Any, out: dict[str, Any], partitioning: Any) -> None:
     out["actions"] = [{"unpartition": [
         f"卸下 {table} 的旧主键（连带子分区约束）",
         f"建普通表、按旧主键 {out.get('old_primary_key') or '(推导)'} 加主键、重建规范名索引",
-        "复制 RLS 开关/策略/非属主授权 → 核对行数 → 改名切换",
+        "复制 RLS 开关/策略/非属主授权 → 核对内容（行数 + 整表指纹）→ 改名切换",
     ], "executed": False}]
     if args.dry_run:
         return
@@ -156,13 +158,14 @@ def _run(args, s: Any, out: dict[str, Any], partitioning: Any) -> None:
     res = partitioning.unpartition(
         s, table, old_primary_key=out.get("old_primary_key") or "",
         keep_partitioned=args.keep_partitioned, confirm=args.confirm_table,
-        require_quiet=args.require_quiet)
+        require_quiet=args.require_quiet, verify=not args.no_verify)
     s.commit()
     out["actions"] = [{"unpartition": res["notes"], "executed": True}]
     out["partitioned"] = False
     out["partitions"] = []
     out["partition_count"] = 0
     out["rows"] = res["rows"]
+    out["verified"] = res.get("verified", False)
     if res.get("quiet") is not None:
         out["quiet"] = res["quiet"]
         out["quiet_ok"] = True
@@ -185,6 +188,9 @@ def _print_report(out: dict[str, Any], args) -> None:
             print(f"  {kind}: ")
             for n in names:
                 print(f"    - {n}")
+    if out.get("rows") is not None:
+        print(f"  拷贝核对通过：{out['rows']} 行"
+              + ("，内容指纹已比对" if out.get("verified") else "（仅行数，--no-verify）"))
     if out.get("blockers"):
         print("  阻塞项（不解决就不能退回普通表）：")
         for item in out["blockers"]:

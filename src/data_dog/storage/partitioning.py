@@ -99,6 +99,115 @@ def _day_bounds(start: datetime, end: datetime) -> tuple[int, int]:
     return day_of(start.timestamp()), day_of(end.timestamp())
 
 
+# 逐列内容指纹的聚合：PG 用 md5 的 64 位和 mod 素数；SQLite 回退成长度指纹。
+# 为什么是**聚合**而不是"整表拼一个串再哈希"：SQLite 构建没有 md5/sha256（实测），
+# 且 string_agg 会吃内存。逐行摘要求和 → 每张表只回 1 行，Python 侧不物化数据行。
+
+
+def _row_digest_expr(columns: list[str]) -> str:
+    """逐行摘要表达式的 SQL 片段。
+
+    规则：每列先 `CASE WHEN col IS NULL THEN '~' ELSE 'S' || CAST(col AS text) END`。
+
+    只要求**同一方言内**确定性——我们永远只比"同一个库里的两张表"，不做跨方言比对，
+    所以 PG 的 `float8::text`、`jsonb::text` 各自渲染成什么并不需要两库一致。列顺序本身
+    进了拼接串，所以"错列"会改变摘要；两列值恰好相同则互换不可检出，但那本来就是同一份内容。
+    """
+    parts: list[str] = []
+    for col in columns:
+        c = _q(col)
+        parts.append("CASE WHEN " + c + " IS NULL THEN '~' ELSE 'S' || CAST(" + c + " AS text) END")
+    return " || ".join(parts)
+
+
+def _table_columns(session: Any, table: str) -> list[str]:
+    """列名（按定义顺序；两方言各自查目录）。"""
+    if _dialect(session) == "sqlite":
+        rows = session.execute(text("SELECT name FROM pragma_table_info(:t)"),
+                               {"t": _check_name(table)}).all()
+    else:
+        rows = session.execute(text(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = :t AND table_schema = current_schema() "
+            "ORDER BY ordinal_position"),
+            {"t": _check_name(table)}).all()
+    return [str(r[0]) for r in rows]
+
+
+def content_fingerprint(session: Any, table: str) -> dict[str, Any]:
+    """整表**内容指纹**：行数之外的校验，用来证明"拷过去的是同一份数据"。
+
+    为什么只有行数不够：`INSERT INTO new SELECT * FROM old` 万一错列/截断/类型转换错，
+    行数照样相等——那只证明"条数对"，不证明"内容对"。
+
+    口径（全用标准 SQL 聚合，PG 与 SQLite 都能跑）：
+
+    - `n`：行数；
+    - `len_sum`：所有列 `length(CAST(col AS text))` 之和——抓截断、列错位；
+    - `digest`：逐行摘要（PG = md5 前 60 位）的**和**。它是"多集和式摘要"，与行序无关，
+      所以两张表行序不同不影响判定；代价是理论上存在加性碰撞（两处误差相加抵消）——
+      抄表场景不会凑出这种抵消，但不当成密码学保证。
+
+    **边界（如实写）**：PG 上用 `md5` 逐行摘要（能检出任意内容差异）；
+    SQLite 构建**没有 md5/sha256**（实测 3.45.3 无该函数），只能退化成
+    "逐行拼接串长度之和"——**对等长替换检不出**。转换的目标路径是 PG，
+    SQLite 只是测试腿；这个强弱不对称写在这里，不假装两边一样强。
+    """
+    columns = _table_columns(session, table)
+    if not columns:
+        raise PartitioningUnsupported(f"读不到 {table} 的列（表不存在？）")
+    expr = _row_digest_expr(columns)
+    len_sum = " + ".join(f"COALESCE(length(CAST({_q(c)} AS text)), 0)" for c in columns)
+    if _dialect(session) == "postgresql":
+        digest = "COALESCE(SUM(('x' || substr(md5(" + expr + "), 1, 15))::bit(64)::bigint), 0)"
+    else:
+        digest = "COALESCE(SUM(length(" + expr + ")), 0)"
+    row = session.execute(text(
+        f"SELECT count(*), COALESCE(SUM({len_sum}), 0), {digest} "
+        f"FROM {_check_name(table)}")).first()
+    return {"n": int(row[0]), "len_sum": int(row[1]), "digest": int(row[2]),
+            "columns": columns}
+
+
+def fingerprint_diff(before: dict[str, Any], after: dict[str, Any],
+                     *, before_name: str = "源表", after_name: str = "新表") -> list[str]:
+    """比较两份 `content_fingerprint`，返回人类可读的差异列表（空列表 = 内容一致）。
+
+    `columns` 只用于诊断，不参与相等判断。
+    """
+    out: list[str] = []
+    if before["n"] != after["n"]:
+        out.append(f"行数不一致：{before_name}={before['n']}，{after_name}={after['n']}")
+    if before["len_sum"] != after["len_sum"]:
+        out.append(
+            f"内容长度不一致：{before_name}={before['len_sum']}，{after_name}={after['len_sum']}"
+            "（疑似截断或列错位）")
+    if before["digest"] != after["digest"]:
+        out.append(f"内容摘要不一致：{before_name}={before['digest']}，{after_name}={after['digest']}")
+    if list(before["columns"]) != list(after["columns"]):
+        out.append(f"列集合/顺序不一致：{before['columns']} vs {after['columns']}")
+    return out
+
+
+def _verify_copy(session: Any, source: str, target: str,
+                 before_fp: dict[str, Any] | None) -> tuple[list[str], int]:
+    """拷贝后的**内容核对**：行数 + （可选）整表内容指纹。返回 (差异列表, 目标行数)，
+    差异列表为空 = 一致。
+
+    `before_fp` 必须在 `INSERT ... SELECT` **之前**采样（同事务），这样才能保证比对的两端
+    就是"拷贝前"和"拷贝后"；为 None 表示调用方选了 `verify=False`，只做行数核对。
+    """
+    src_n = int(session.execute(text(f"SELECT count(*) FROM {_check_name(source)}")).scalar() or 0)
+    dst_n = int(session.execute(text(f"SELECT count(*) FROM {_check_name(target)}")).scalar() or 0)
+    out: list[str] = []
+    if src_n != dst_n:
+        out.append(f"行数不一致：{source}={src_n}，{target}={dst_n}")
+    if before_fp is not None:
+        out += fingerprint_diff(before_fp, content_fingerprint(session, target),
+                                before_name=source, after_name=target)
+    return out, dst_n
+
+
 def month_bounds(when: datetime) -> tuple[datetime, datetime]:
     """`when` 所在自然月的 `[起, 止)`（止 = 下月 1 日 0 点）。"""
     start = when.astimezone(timezone.utc).replace(
@@ -653,13 +762,15 @@ def convert_to_partitioned(session: Any, table: str = PARTITION_TABLE, *,
                            months: int = 3, keep_old: bool = False,
                            now: datetime | None = None, confirm: str = "",
                            require_quiet: float | None = None,
-                           lock_wait: bool = False) -> dict[str, Any]:
+                           lock_wait: bool = False,
+                           verify: bool = True) -> dict[str, Any]:
     """把**既有普通表**就地转成按 `created_day` 的月分区表（**单事务**，失败全回滚）。
 
     为什么敢自动化（此前只说"要人工 runbook"）：日桶进主键之后，
     `CREATE TABLE new (LIKE old INCLUDING ALL) PARTITION BY RANGE (created_day)` 就能建出
     **结构等价**的新表（真 PG 实测：主键/唯一索引/普通索引都会被复制成分区索引）。剩下的差异
-    是 `LIKE` **不复制**的三样——RLS 开关、策略、授权——脚本显式复制，并在提交前核对行数。
+    是 `LIKE` **不复制**的三样——RLS 开关、策略、授权——脚本显式复制，并在提交前核对
+    **行数 + 整表内容指纹**（`verify=True`，默认开）。
 
     仍然是**停机窗口**操作：同一事务里 `INSERT ... SELECT` 拿的是旧表的读快照，期间的并发写入
     不会进新表；`RENAME` 还要 ACCESS EXCLUSIVE。**执行前请停止接入**。
@@ -670,7 +781,10 @@ def convert_to_partitioned(session: Any, table: str = PARTITION_TABLE, *,
     - `require_quiet=N` 时，要求最近一次写入早于 N 秒前（在**拿锁之后、任何 DDL 之前**检查，
       与 `INSERT ... SELECT` 同事务），否则拒绝——这是唯一直接降“转换丢并发写入”概率的改动；
     - `lock_wait=False`（默认）时库层咨询锁**不排队**：抢不到抛 `ConversionBusy`，
-      避免 15s 后爆成难读的 QueryCanceled。
+      避免 15s 后爆成难读的 QueryCanceled；
+    - `verify=True`（默认）时，`INSERT ... SELECT` **前后**各采一次整表内容指纹，
+      不一致即 `ConversionRefused` + 全回滚。为什么要它：行数相等**不等于**内容相等
+      （错列、截断、类型转换错都能让行数照样相等）。表极大且已用别的方式确认过时可关。
 
     返回：`{converted, rows, partitions, notes, old_table, quiet}`。**不 commit**——由调用方决定事务边界。
     """
@@ -720,16 +834,19 @@ def convert_to_partitioned(session: Any, table: str = PARTITION_TABLE, *,
         names.append(partition_name(new, start))
     notes.append(f"建 {len(names)} 个分区：{names[0]} … {names[-1]}")
 
+    # 内容指纹必须在 `INSERT ... SELECT` **之前**采样：这次读与 INSERT 同事务、与 INSERT 一起
+    # 把源表钉住，比对的两端才是"拷贝前 / 拷贝后"的同一份数据。
+    before_fp = content_fingerprint(session, table) if verify else None
+
     session.execute(text(f"INSERT INTO {_check_name(new)} SELECT * FROM {_check_name(table)}"))
     notes += _copy_rls(session, table, new)
     notes += _copy_grants(session, table, new)
 
-    old_rows = int(session.execute(text(f"SELECT count(*) FROM {_check_name(table)}")).scalar() or 0)
-    new_rows = int(session.execute(text(f"SELECT count(*) FROM {_check_name(new)}")).scalar() or 0)
-    if old_rows != new_rows:
-        raise ConversionRefused(
-            [f"行数核对失败（{table}={old_rows}, {new}={new_rows}），已回滚"])
-    notes.append(f"行数核对通过：{new_rows}")
+    diff, new_rows = _verify_copy(session, table, new, before_fp)
+    if diff:
+        raise ConversionRefused([f"拷贝核对失败（{table} → {new}），已回滚："] + diff)
+    notes.append("拷贝核对通过：" + (f"{table} → {new}，内容指纹 digest={before_fp['digest']}"
+                                      if before_fp else f"{table} → {new}（仅行数，--no-verify）"))
 
     old_sigs = _index_signatures(session, table)
     new_sigs = _index_signatures(session, new)
@@ -762,7 +879,7 @@ def convert_to_partitioned(session: Any, table: str = PARTITION_TABLE, *,
         else:
             session.execute(text(f"ALTER INDEX {_check_name(entry[0])} "
                                  f"RENAME TO {_check_name(old_name)}"))
-    return {"converted": True, "rows": new_rows,
+    return {"converted": True, "rows": new_rows, "verified": before_fp is not None,
             "partitions": [table + n[len(new):] for n in names],
             "notes": notes, "old_table": old_table if keep_old else None,
             "quiet": quiet}
@@ -832,7 +949,8 @@ def unpartition_blockers(session: Any, table: str = PARTITION_TABLE) -> list[str
 def unpartition(session: Any, table: str = PARTITION_TABLE, *,
                 old_primary_key: str = "", keep_partitioned: bool = False,
                 now: datetime | None = None,
-                confirm: str = "", require_quiet: float | None = None) -> dict[str, Any]:
+                confirm: str = "", require_quiet: float | None = None,
+                verify: bool = True) -> dict[str, Any]:
     """把**分区表转回普通表**（`convert_to_partitioned` 的反向；单事务，失败全回滚）。
 
     为什么需要它（真实缺口）：`convert_to_partitioned` 默认路径（`keep_old=False`）会删掉旧表，
@@ -842,10 +960,13 @@ def unpartition(session: Any, table: str = PARTITION_TABLE, *,
     顺序是**真 PG 实测定的**（`DROP CONSTRAINT` 会级联删掉子分区的同名约束，而约束名是
     schema 级唯一——不先卸掉，普通表就拿不到 `pk_<表>` 这个规范名）：
     ① 卸旧主键 → ② 建普通表（主键显式命名）→ ③ 搬数据 + 复制 RLS/授权 + 普通索引改名
-    → ④ 核对行数 → ⑤ 改名切换。
+    → ④ 核对内容（行数 + 整表指纹）→ ⑤ 改名切换。
 
     仍是**停机窗口**操作：`INSERT ... SELECT` 拿的是读快照，期间的并发写入不会进新表；
     `RENAME` 还要 ACCESS EXCLUSIVE。**执行前停止接入**（`require_quiet` 是硬门）。
+
+    `verify=True`（默认）与 `convert_to_partitioned` 同义：单击拷贝前后各采一次整表内容指纹，
+    不一致即 `ConversionRefused` + 全回滚。
     """
     if not is_postgres(session):
         raise PartitioningUnsupported("只有 PostgreSQL 支持分区")
@@ -912,15 +1033,16 @@ def unpartition(session: Any, table: str = PARTITION_TABLE, *,
     session.execute(text(
         f"ALTER TABLE {_check_name(plain)} ADD CONSTRAINT {_q(pk)} PRIMARY KEY {old_pk}"))
     notes.append(f"建普通表 {plain}（主键 {old_pk}）")
+    # 内容指纹在拷贝**之前**采样（同事务），见 _verify_copy 的说明。
+    before_fp = content_fingerprint(session, table) if verify else None
     session.execute(text(f"INSERT INTO {_check_name(plain)} SELECT * FROM {_check_name(table)}"))
     notes += _copy_rls(session, table, plain)
     notes += _copy_grants(session, table, plain)
-    old_rows = int(session.execute(text(f"SELECT count(*) FROM {_check_name(table)}")).scalar() or 0)
-    new_rows = int(session.execute(text(f"SELECT count(*) FROM {_check_name(plain)}")).scalar() or 0)
-    if old_rows != new_rows:
-        raise ConversionRefused(
-            [f"行数核对失败（{table}={old_rows}, {plain}={new_rows}），已回滚"])
-    notes.append(f"行数核对通过：{new_rows}")
+    diff, new_rows = _verify_copy(session, table, plain, before_fp)
+    if diff:
+        raise ConversionRefused([f"拷贝核对失败（{table} → {plain}），已回滚："] + diff)
+    notes.append("拷贝核对通过：" + (f"{table} → {plain}，内容指纹 digest={before_fp['digest']}"
+                                      if before_fp else f"{table} → {plain}（仅行数，--no-verify）"))
     session.execute(text(f"ALTER TABLE {_check_name(table)} RENAME TO {_check_name(old_table)}"))
     session.execute(text(f"ALTER TABLE {_check_name(plain)} RENAME TO {_check_name(table)}"))
     if keep_partitioned:
@@ -936,6 +1058,6 @@ def unpartition(session: Any, table: str = PARTITION_TABLE, *,
                .replace(f" ON {table} USING", f" ON {_q(table)} USING", 1))
         session.execute(text(sql))
         notes.append(f"重建索引 {name}")
-    return {"unpartitioned": True, "rows": new_rows,
+    return {"unpartitioned": True, "rows": new_rows, "verified": before_fp is not None,
             "old_table": old_table if keep_partitioned else None,
             "primary_key": f"PRIMARY KEY {old_pk}", "notes": notes, "quiet": quiet}

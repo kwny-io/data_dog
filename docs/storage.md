@@ -268,7 +268,7 @@ python scripts/partition_telemetry.py --check
 python scripts/partition_telemetry.py --convert --dry-run
 # 2. 停止接入（见下），然后在低峰期执行：确认令牌 + 静默窗口是硬门（§8.3.1）
 python scripts/partition_telemetry.py --convert --confirm-table telemetry_events --require-quiet 30
-#   加 --keep-old 可保留 <表>_old；--require-quiet N 缺省 = 不检查静默
+#   加 --keep-old 可保留 <表>_old；--require-quiet N 缺省 = 不检查静默；--no-verify 关闭内容核对
 # 3. 验证
 python scripts/partition_telemetry.py --check              # 应为"分区表，共 N 个分区"
 ```
@@ -282,7 +282,8 @@ python scripts/partition_telemetry.py --check              # 应为"分区表，
 
 **脚本替你做的事**（都在同一个事务里）：建结构等价的新分区父表（`LIKE ... INCLUDING ALL` 复制
 列/默认值/约束/索引）→ 按既有 `created_day` 的月份区间 + 未来 N 个月建分区 → 拷数据 → 复制
-**RLS 开关、策略、非属主授权**（`LIKE` 不复制这三样，真库实测）→ 核对新旧行数（不等就回滚）→
+**RLS 开关、策略、非属主授权**（`LIKE` 不复制这三样，真库实测）→ **核对内容**（行数 + 整表指纹，
+不等就回滚；§8.3.4，`--no-verify` 可关闭且会如实标 `verified=false`）→
 `RENAME` 切换 → 分区与索引名改回规范名 → 删旧表（`--keep-old` 时保留为 `<表>_old`）。
 
 **回填历史数据注意**：新写路径把 `created_day` 记为**摄取日**。若你要灌历史事件并希望它们按
@@ -393,7 +394,42 @@ DELETE FROM telemetry_events t USING telemetry_events d
 与 `retention.py` 实际用的一致）在 20k 行上**同样是 3,660 行/s**，所以这不是"缺索引"造成的，
 更像是每批的 `LIMIT` 扫描要反复穿过自己刚制造的死元组。**口径限制**：这是本机容器内的合成负载，
 与 `retention.py` 的真实调用形状（批间可能被其他工作干扰、有 autovacuum）不完全一致；
-与 §8.2 记录的"百万行 52,000 行/s"也对不上。**先记为观察，不下结论**——要下结论得用真实保留作业跑。### 8.4 有效期信号与调度（"跨月无分区"必须会响）
+与 §8.2 记录的"百万行 52,000 行/s"也对不上。**先记为观察，不下结论**——要下结论得用真实保留作业跑。
+
+### 8.3.4 内容校验：行数相等 ≠ 内容相等（默认开启）
+
+转换/恢复此前只核对**行数**——而行数相等证明不了内容相等：`INSERT INTO new SELECT * FROM old`
+遇到列序错、截断、`CAST` 溢出，行数都可能一样。现在搬完数据后比的是**整表指纹**
+（`partitioning.content_fingerprint` / `fingerprint_diff`），且**不把数据读进应用内存**：
+每张表只在库里算出一行聚合结果。
+
+| 成分 | 口径 | 能证明什么 |
+|---|---|---|
+| `n` | `count(*)` | 行没少、没多 |
+| `len_sum` | 所有列 `length(CAST(col AS text))` 之和 | 有没有被**截断**（变短） |
+| `digest` | 逐行拼串取 `md5`（截 60 位）再求和；逐行串里 NULL 编成 `~`、非 NULL 前缀 `S` | 有没有被**改写**（等长也算） |
+| `columns` | 列名有序列表 | 结构没变（列名不一致时直接点名） |
+
+- 逐行摘要按「列序 + NULL 标记 + 文本化」拼串再哈希，所以**行序无关**（多集和式摘要）：
+  行的物理顺序变了不会误报。
+- `digest` 是 PG `sum(bigint)`（返回精确 `numeric`）的**无界精确和**，刻意**不取模**——
+  取模会带进符号位，让「低 64 位」这类说法变谎话；digest 允许是负数。
+- **两种方言都能跑，但能力不对称**（如实写）：SQLite 构建没有 `md5`/`sha256`（实测 3.45.3），
+  那边 `digest` 退化成「逐行拼接串长度之和」——**等长改写检不出**，`NULL` 与 `''` 也分不出；
+  真 PG 有 `md5`，两者都能检出。测试把这条边界写成**可执行断言**
+  （`test_equal_length_rewrite_is_invisible_on_sqlite` 与 PG 侧要求检出的对称用例），不靠文档口头承诺。
+- **不保证**跨方言比较：指纹口径是「同一个库先后两次读同一张表」，从不在 SQLite 与 PG 之间比。
+
+**怎么用**：`convert_to_partitioned(..., verify=True)` / `unpartition(..., verify=True)` 是**默认**；
+`--no-verify` 关闭后返回体里 `verified=False`（如实标注「只核对了行数」，而不是谎称已校验）。
+CLI 成功时打印 `拷贝核对通过：N 行，内容指纹已比对`，`--json` 带 `verified` / `rows`。
+核对不通过 → 抛 `ConversionRefused`，**整个事务回滚**（不会留下半张新表）。
+
+**真 PG 验证**：`tests/test_partition_content_verification.py`（离线 SQLite 8 条 + 真 PG 4 条：
+等长改写被检出 / `NULL` vs 空串被区分 / 目标表被破坏时 `_verify_copy` 报错 /
+转换默认 `verified=True` 且 `--no-verify` 可关）。
+
+### 8.4 有效期信号与调度（"跨月无分区"必须会响）
 
 分区维护此前是**能力齐全但没人调用**：CLI 得人工跑，helm 里没有定时任务，应用启动也不碰。
 而"忘了建下月分区"这件事在**出错前没有任何信号**——跨月那一刻写入才开始报错。现在两层都补上：
@@ -478,7 +514,8 @@ memory"直接报警。
 - **分区键边界是 epoch 秒数值**（`created_at` 是 `double precision`）。上一版生成的时间戳字面量
   在真库上会报 `invalid input syntax for type double precision`——已修，并有真库用例钉住。
 - **真库验证已在本机完成**：起 `postgres:16-alpine`（端口 55432）后，`-m postgres` 用例
-  **28 passed**（含建分区→插入→删过期分区往返，以及"该表被主键阻塞"的回归）。
+  **35 passed**（含建分区→插入→删过期分区往返、"该表被主键阻塞"的回归、反向恢复往返、
+  内容指纹与等长改写检出）。
 - **`telemetry_events` 的转换已实现并真库验证**（探针表 + 真表都跑通）：`--convert` 转换真表后，
   `save_telemetry` 的行确实落进**当月分区**，过期分区被整段 DROP。**多副本并发下的协调已补上**
   （§8.4：`partition:ddl` 单持有者租约，抢不到就跳过并如实标注、**退出码 3**；但租约只防"并发"。

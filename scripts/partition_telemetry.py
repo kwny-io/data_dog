@@ -87,6 +87,9 @@ def main(argv: list[str] | None = None) -> int:
                    help="原样复述目标表名才允许转换（与 X-Confirm-Tenant 同意）")
     p.add_argument("--require-quiet", type=float, default=None, metavar="秒",
                    help="要求转换前最近一次写入早于 N 秒（拒绝并发写入丢失）")
+    p.add_argument("--no-verify", action="store_true",
+                   help="跳过转换后的整表内容指纹核对（只留行数核对）。默认核对——"
+                        "行数相等不等于内容相等（错列/截断都能让行数照样相等）")
     p.add_argument("--dry-run", action="store_true", help="只打印将要做的事，不执行 DDL")
     p.add_argument("--no-lease", action="store_true",
                    help="跳过结构变更互斥（仅单机直跑 / 已确认无并发；多副本请留着）。"
@@ -229,7 +232,8 @@ def _run_convert(args, s: Any, out: dict[str, Any], lease_blocker: str,
     try:
         res = partitioning.convert_to_partitioned(
             s, partitioning.PARTITION_TABLE, keep_old=args.keep_old,
-            confirm=args.confirm_table, require_quiet=args.require_quiet)
+            confirm=args.confirm_table, require_quiet=args.require_quiet,
+            verify=not args.no_verify)
     except partitioning.ConversionBusy as exc:
         # 库层锁忙：与租约同语义（这轮不该我），不报 error，交由 main 归到退出码 3。
         s.rollback()
@@ -243,6 +247,8 @@ def _run_convert(args, s: Any, out: dict[str, Any], lease_blocker: str,
     out["partitions"] = res["partitions"]
     out["partition_count"] = len(res["partitions"])
     out["partitioned"] = True
+    out["verified"] = res.get("verified", False)
+    out["rows"] = res.get("rows")
     if res.get("quiet") is not None:
         out["quiet"] = res["quiet"]
 
@@ -264,6 +270,9 @@ def _print_report(out: dict[str, Any], args) -> None:
             if kind == "executed":
                 continue
             print(f"  {kind}: " + (", ".join(names) or "无"))
+    if out.get("rows") is not None:
+        print(f"  拷贝核对通过：{out['rows']} 行"
+              + ("，内容指纹已比对" if out.get("verified") else "（仅行数，--no-verify）"))
     if out.get("quiet") is not None:
         q = out["quiet"]
         age = q.get("last_write_age_s")
