@@ -161,7 +161,36 @@ partition_ddl_lease_held = Gauge(
 )
 partition_ddl_lease_age_seconds = Gauge(
     "data_dog_partition_ddl_lease_age_seconds",
-    "分区 DDL 租约从上次获取/续期算起的秒数（无主时不上报）",
+    "分区 DDL 租约从上次获取/续期算起的秒数（无主时上报 0）",
+    registry=registry,
+)
+
+# 结构变更**结果**的可见性（A9 收尾）："今天补分区被跳过"有了 counter，但"补分区**失败了**"
+# 仍然只有 K8s Job 日志。失败发生在**CronJob 进程**里，而 Prometheus 抓的是 **service** 的
+# /metrics——所以结果要先落到共享 state（`partition_ddl.record_result`），再由 service 在抓取时
+# 搬进这三条 Gauge。op ∈ {ensure, drop, convert, unpartition, backfill}（**有限枚举**，
+# 上报时按白名单过滤：state 里的脏值不该在 Prometheus 里造出无限基数）。
+#
+# 为什么连续失败用 Gauge 而不是 Counter：要回答的是"**当前**是不是坏的"——成功即清零。
+# Counter 只能回答"历史上失败过几次"，而一次早已修好的失败会永久把图染红。
+# 为什么同时留 last_success/failure 时间戳：排障第一问是"最后一次好的/坏的什么时候"，
+# 而连续失败数在成功后被清零、丢掉了"上次坏是什么时候"。
+partition_ddl_consecutive_failures = Gauge(
+    "data_dog_partition_ddl_consecutive_failures",
+    "分区结构变更连续失败次数（按动作 op；上一次成功即清零，跳过不计）",
+    labelnames=("op",),
+    registry=registry,
+)
+partition_ddl_last_success_timestamp_seconds = Gauge(
+    "data_dog_partition_ddl_last_success_timestamp_seconds",
+    "分区结构变更上一次成功的 epoch 秒（按动作 op；0 = 从未成功过）",
+    labelnames=("op",),
+    registry=registry,
+)
+partition_ddl_last_failure_timestamp_seconds = Gauge(
+    "data_dog_partition_ddl_last_failure_timestamp_seconds",
+    "分区结构变更上一次失败的 epoch 秒（按动作 op；0 = 从未失败过）",
+    labelnames=("op",),
     registry=registry,
 )
 

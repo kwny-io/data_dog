@@ -212,6 +212,7 @@ loadgen 客户端实测能推 **997 req/s**，故客户端也不是瓶颈）。
 | `DataDogEvidenceDeniedSpike` | `increase(data_dog_evidence_resolve_total{outcome="denied"}[15m])` | > `prometheusRule.evidenceDeniedThreshold`（默认 20） | warning | 正常应为 0；涨起来=越权探测信号。定位靠审计（指标刻意不带租户标签） |
 | `DataDogPartitionDdlSkipped` | `increase(data_dog_partition_ddl_skipped_total[24h])` | > 0 | warning | A9 互斥：滚动发布时的少量 `lease_held` 属预期；**持续**出现说明持有者卡在长 DDL 或崩了没释放。`convert_busy` = 库层咨询锁被另一个转换占着（有意**不排队**，见 storage.md §8.3.1） |
 | `DataDogPartitionDdlLeaseStuck` | `max(data_dog_partition_ddl_lease_age_seconds)` | > 1800s（2× 默认 TTL）持续 5m | warning | 租约被一个进程占着超过 30 分钟：要么长 DDL 卡住、要么持有者死了但租约还没过期——这期间**没人会补分区**。0（无主）不会触发 |
+| `DataDogPartitionDdlFailed` | `max by (op) (data_dog_partition_ddl_consecutive_failures)` | > 0 持续 5m | warning | A9 **迁移失败**的可见窗口：CronJob 崩溃被 `backoffLimit` 重试后只留在 Job 日志里，指标上什么都不剩。用**连续失败数**而不是最后失败时间戳（后者被下一次成功挡住视线）。退出码 2（确认令牌/静默窗口/容量）与真异常计入，退出码 3（跳过）不计 |
 
 **诚实边界**：
 
@@ -235,3 +236,4 @@ loadgen 客户端实测能推 **997 req/s**，故客户端也不是瓶颈）。
 |---|---|---|
 | v0.1 | 2026-09-13 | 首版；全部为设计预算值，待真实数据校准 |
 | v0.1.1 | 2026-10-14 | 新增 §9 告警规则：把 §3 的 P99 与两类"静默失败"（审计写入、write-behind 丢数）落成 PrometheusRule；版本记录顺延为 §10 |
+| v0.1.2 | 2026-10-17 | §9 新增 `DataDogPartitionDdlFailed`：A9 分区迁移的**失败**此前不可见（只留在 CronJob 日志里） |

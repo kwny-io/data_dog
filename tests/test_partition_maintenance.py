@@ -395,3 +395,29 @@ def test_metrics_scrape_reports_lease_state(clean_state, tmp_path, monkeypatch):
         reset_engine()
     assert _lease_held_in(body) == 1.0, "抓取 /metrics 没上报租约被持"
     assert any(ln.startswith("data_dog_partition_ddl_lease_age_seconds ") for ln in body.splitlines())
+
+
+def test_metrics_scrape_reports_ddl_failure_state(clean_state, tmp_path, monkeypatch):
+    """CronJob 进程里失败了，service 的 /metrics 必须看得见（两进程只能靠共享 state 传话）。"""
+    from fastapi.testclient import TestClient
+
+    from data_dog import partition_ddl
+    from data_dog.service.app import create_app
+    from data_dog.storage.db import init_db, reset_engine
+
+    url = f"sqlite:///{(tmp_path / 'ddl_metrics.db').as_posix()}"
+    monkeypatch.setenv("DD_DATABASE_URL", url)
+    reset_engine()
+    init_db(url)
+    partition_ddl.record_result("ensure", ok=False, kind="error", detail="boom")
+    try:
+        with TestClient(create_app()) as c:
+            body = c.get("/metrics").text
+    finally:
+        reset_engine()
+
+    lines = body.splitlines()
+    assert 'data_dog_partition_ddl_consecutive_failures{op="ensure"} 1.0' in lines, body[-800:]
+    assert 'data_dog_partition_ddl_last_success_timestamp_seconds{op="ensure"} 0.0' in lines
+    assert any(ln.startswith('data_dog_partition_ddl_last_failure_timestamp_seconds{op="ensure"} ')
+               for ln in lines)

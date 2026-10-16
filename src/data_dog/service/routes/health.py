@@ -17,6 +17,7 @@ from ...storage import migrations
 from ...storage import models as M
 from ...storage import repository as repo
 from ...storage.db import session_scope
+from ..partition_maintenance import report_ddl_results as _report_partition_ddl_results
 from ..partition_maintenance import report_horizon as _report_partition_horizon
 from ..partition_maintenance import report_lease as _report_partition_lease
 from ..runtime import (
@@ -125,6 +126,9 @@ def metrics_endpoint() -> Response:
     metrics.uptime_seconds.set(round(time.time() - _STARTED_AT, 1))
     # 分区 DDL 租约状态：共享状态读取，**不依赖 DB**，所以放在库内计数那个 try 之外。
     _report_partition_lease()
+    # 分区 DDL 的**结果**（CronJob / 启动钩子写进共享 state，这里转发成指标）：同样不依赖 DB。
+    # 这是"迁移失败"唯一的信号出口——Job 日志不会进 Prometheus。
+    _report_partition_ddl_results()
     _runner, _src, _thr, _stop = _stream_handle()
     metrics.stream_up.set(1 if (_thr is not None and _thr.is_alive()) else 0)
     # 异步调查：队列深度（共享队列里的待办数）+ 各状态 job 数

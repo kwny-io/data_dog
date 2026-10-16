@@ -19,6 +19,12 @@
 - `--require-quiet N`：要求目标表最近一次写入早于 N 秒前（在拿锁后、任何 DDL 前检查）。
   不满足 → 拒绝（退出码 2）。`--dry-run` 下不拒绝，只把静默信号报出来供人判断。
 
+容量也是机器可算的前置条件：`--convert` 要**整表复制一份**（新旧两份同时在盘上，再算 WAL），
+峰值远大于"表有多大"，而空间不够的失败发生在**事务中间**（旧表还在、新表半成品）。所以转换前
+先算需求并和可用空间比：不够 → 拒绝（退出码 2）。**可用空间测不到**时（脚本与库不在同一台机器/
+容器，本机就是这种）默认只警告不拦——`--free-bytes` 从监控侧喂数，`--require-free-space` 把
+"测不到"也升级成拒绝。
+
 退出码总览：`0` 干完了 / `2` 前置条件或能力边界不满足（不该执行）/ `3` 这轮**不该我干**
 （租约被别人持有，或库层咨询锁告诉你另一个转换在跑）——都不是失败，下一轮再来。
 
@@ -46,7 +52,7 @@ from typing import Any
 
 from data_dog.core import metrics
 from data_dog.core.console import ensure_utf8_console
-from data_dog.partition_ddl import ddl_guard, record_skip
+from data_dog.partition_ddl import ddl_guard, record_result, record_skip
 
 
 def parse_cutoff(raw: str) -> float:
@@ -71,6 +77,36 @@ def planned_partitions(months: int, now: datetime | None = None) -> list[str]:
         out.append(partitioning.partition_name(partitioning.PARTITION_TABLE, start))
     return out
 
+def _ddl_op(args: Any) -> str:
+    """本次调用代表哪个动作（失败告警的归因）；只读调用 → 空串（不记账）。"""
+    if args.dry_run:
+        return ""
+    if args.convert:
+        return "convert"
+    if args.drop_before:
+        return "drop"
+    if args.ensure_months:
+        return "ensure"
+    return ""
+
+
+def _capacity_gate(args, s: Any, out: dict[str, Any], partitioning: Any) -> None:
+    """容量预检：整表复制要多少空间、还剩多少（只读，且不抢锁）。
+
+    dry-run 只报**不拒**——闸门要防的是"在事务中间撞 ENOSPC"，而 dry-run 本来就不动结构。
+    真跑时 `--require-free-space` 把"测不到空间"也升级成拒绝（退出码 2）。
+    """
+    try:
+        out["capacity"] = partitioning.check_capacity(
+            s, partitioning.PARTITION_TABLE, free_bytes=args.free_bytes,
+            require_free=bool(args.require_free_space and not args.dry_run))
+    except partitioning.ConversionRefused as exc:
+        out["capacity"] = dict(exc.details)
+        if not args.dry_run:
+            raise                                  # 真跑：交给 main 归一成退出码 2
+        out["capacity"]["dry_run"] = True           # dry-run：报出"真跑会被拒"，但不拦
+
+
 def main(argv: list[str] | None = None) -> int:
     ensure_utf8_console()
     p = argparse.ArgumentParser(description="telemetry_events 分区维护（A9）")
@@ -87,6 +123,11 @@ def main(argv: list[str] | None = None) -> int:
                    help="原样复述目标表名才允许转换（与 X-Confirm-Tenant 同意）")
     p.add_argument("--require-quiet", type=float, default=None, metavar="秒",
                    help="要求转换前最近一次写入早于 N 秒（拒绝并发写入丢失）")
+    p.add_argument("--free-bytes", type=int, default=None, metavar="字节",
+                   help="磁盘可用空间（从监控/df 拿到后喂进来）。给了就按它做容量预检——"
+                        "脚本与库不在同一台机器时，这是唯一能测到空间的途径")
+    p.add_argument("--require-free-space", action="store_true",
+                   help="空间不够、或**测不到**空间时直接拒绝（退出码 2）；不给则测不到只警告")
     p.add_argument("--no-verify", action="store_true",
                    help="跳过转换后的整表内容指纹核对（只留行数核对）。默认核对——"
                         "行数相等不等于内容相等（错列/截断都能让行数照样相等）")
@@ -101,6 +142,8 @@ def main(argv: list[str] | None = None) -> int:
 
     # 只有"真的会改结构"的动作参与互斥：--check / --dry-run 是只读的，不该抢锁。
     mutating = bool(not args.dry_run and (args.convert or args.ensure_months or args.drop_before))
+    # 失败告警的归因（哪个动作失败了）。跳过（退出码 3）不记账：什么都没做，不欠谁一个解释。
+    op = _ddl_op(args)
     out: dict[str, Any] = {"table": partitioning.PARTITION_TABLE, "actions": [], "error": ""}
     lease_blocker = ""
 
@@ -127,6 +170,12 @@ def main(argv: list[str] | None = None) -> int:
         record_skip("ddl_busy", metrics.partition_ddl_skipped_total)
         out["skipped"] = "ddl_busy"
         out["busy"] = str(exc)
+    except Exception as exc:
+        # 真异常（不是"不该执行"）：**记下来再抛**。否则崩溃只留在 K8s Job 日志里，Prometheus
+        # 上什么也看不见——而"迁移失败"恰恰是最该被看见的那件事。
+        if op:
+            record_result(op, ok=False, kind="error", detail=f"{type(exc).__name__}: {exc}")
+        raise
 
     if out.get("error"):
         exit_code = 2
@@ -139,6 +188,13 @@ def main(argv: list[str] | None = None) -> int:
         record_skip("lease_held", metrics.partition_ddl_skipped_total)
         out["skipped"] = "lease_held"
         out["lease_owner"] = lease_blocker
+
+    if op and exit_code != 3:
+        # 记账：成功清零连续失败数；2 是"前置条件/能力边界不满足"（refused）。跳过（3）既不
+        # 算失败、也不该清掉上一次成功的记录。service 抓 /metrics 时把它转成指标 + 告警。
+        record_result(op, ok=(exit_code == 0),
+                      kind="" if exit_code == 0 else "refused",
+                      detail=out.get("error") or "")
 
     if args.json:
         import json
@@ -204,6 +260,9 @@ def _run_convert(args, s: Any, out: dict[str, Any], lease_blocker: str,
         out["error"] = "当前库不是 PostgreSQL：分区是 PG 能力，无需转换"
         return
 
+    # 容量预检放在计划之前：只读、便宜，而且是"这次根本别开始"的判断。
+    _capacity_gate(args, s, out, partitioning)
+
     plan = partitioning.plan_conversion(s, partitioning.PARTITION_TABLE)
     out["plan"] = plan
     if plan["blockers"]:
@@ -229,6 +288,7 @@ def _run_convert(args, s: Any, out: dict[str, Any], lease_blocker: str,
     # 确认门：在拿锁/动结构之前就拒，不浪费一次租约，也不让"手滑转错表"变成现实。
     partitioning.check_convert_confirm(partitioning.PARTITION_TABLE, args.confirm_table)
 
+    wal_start = partitioning.wal_position(s)          # 实测本次复制写出多少 WAL（复盘用）
     try:
         res = partitioning.convert_to_partitioned(
             s, partitioning.PARTITION_TABLE, keep_old=args.keep_old,
@@ -241,6 +301,8 @@ def _run_convert(args, s: Any, out: dict[str, Any], lease_blocker: str,
         out["busy"] = str(exc)
         return
     s.commit()
+    # 实测口径：全库 WAL 插入位置的增量（含并发写入噪声），只用于复盘/校准，不参与判定。
+    out["wal_bytes"] = partitioning.wal_bytes_since(s, wal_start)
     s.execute(text("ANALYZE " + partitioning.PARTITION_TABLE))
     s.commit()
     out["actions"].append({"convert": res["notes"], "executed": True})
@@ -255,6 +317,8 @@ def _run_convert(args, s: Any, out: dict[str, Any], lease_blocker: str,
 
 def _print_report(out: dict[str, Any], args) -> None:
     """人类可读报告（--json 时不走这里）。"""
+    from data_dog.storage.partitioning import format_bytes as _fmt_size
+
     print(f"===== {out['table']} 分区状态（dialect={out['dialect']}）=====")
     if not out["postgres"]:
         print("  非 PostgreSQL：分区不可用（SQLite 走分批 DELETE，无需维护）")
@@ -279,6 +343,22 @@ def _print_report(out: dict[str, Any], args) -> None:
         age_txt = "空表（无写入）" if not q.get("present") else f"{age:.1f}s 前"
         print(f"  静默窗口信号：最近写入 = {age_txt}"
               + ("" if out.get("quiet_ok", True) else "  [未达要求]"))
+    cap = out.get("capacity")
+    if cap:
+        verdict = {"ok": "充足", "short": "**空间不足**", "unknown": "测不到"}.get(
+            cap.get("verdict"), cap.get("verdict"))
+        print(f"  容量预检（转换要整表复制一份）：{verdict}"
+              + ("  [DRY-RUN：真跑会被拒]" if cap.get("dry_run") else ""))
+        print(f"    源表 ≈ {_fmt_size(cap.get('source_bytes'))}"
+              + (f"，约 {cap.get('source_rows')} 行（pg_class 估计）"
+                 if cap.get("source_rows") is not None else ""))
+        print(f"    预计需要 ≈ {_fmt_size(cap.get('need_bytes'))}"
+              f"（峰值 ×{cap.get('peak_factor')} + WAL ×{cap.get('wal_ratio')}）")
+        print(f"    可用 {_fmt_size(cap.get('free_bytes'))}（{cap.get('free_source')}）")
+        if cap.get("message"):
+            print(f"    {cap['message']}")
+    if out.get("wal_bytes") is not None:
+        print(f"  本次转换写出 WAL ≈ {_fmt_size(out['wal_bytes'])}（全库口径，含并发写入噪声）")
     if out.get("blockers"):
         print("  转换阻塞项（不解决就不能把这张表转成分区表）：")
         for item in out["blockers"]:

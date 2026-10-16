@@ -16,7 +16,14 @@
 - **没有跨天重复**：旧主键 `(tenant_id, event_id)` 建不起来——`--check` 会点名是哪几组；
 - **确认令牌** `--confirm-table`：原样复述表名（与转换、租户清理同一规矩）；
 - **静默窗口** `--require-quiet N`：最近一次写入必须早于 N 秒（`INSERT ... SELECT` 拿的是读快照，
-  事务期间的并发写入不会进新表）。
+  事务期间的并发写入不会进新表）；
+- **容量**：反向转换同样是**整表复制**（普通表 + 拷数据 + WAL），所以先算需求再比可用空间，
+  不够就拒绝。可用空间**测不到**时默认只警告——`--free-bytes` 从监控侧喂数、
+  `--require-free-space` 把"测不到"也升级成拒绝。
+
+失败会被记到共享状态（`partition_ddl.record_result`），service 抓 `/metrics` 时转成
+`data_dog_partition_ddl_consecutive_failures{op="unpartition"}` 并触发 `DataDogPartitionDdlFailed`。
+只在**跳过**（退出码 3）时不记账：什么都没做，不欠谁一个解释。
 
 退出码：`0` 完成 / `2` 前置条件不满足（不该执行）/ `3` 这轮不该我干（租约或咨询锁被别人持有）。
 仍是**停机窗口**操作，执行前停止接入。
@@ -30,7 +37,7 @@ from typing import Any
 
 from data_dog.core import metrics
 from data_dog.core.console import ensure_utf8_console
-from data_dog.partition_ddl import ddl_guard, record_skip
+from data_dog.partition_ddl import ddl_guard, record_result, record_skip
 
 
 def _pg_like(out: dict[str, Any]) -> bool:
@@ -50,6 +57,28 @@ def session_scope(*, system: bool):
     return _scope(system=system)
 
 
+def _ddl_op(args: Any) -> str:
+    """本次调用代表哪个动作（失败告警的归因）；只读/dry-run → 空串（不记账）。"""
+    return "unpartition" if (args.unpartition and not args.dry_run) else ""
+
+
+def _capacity_gate(args, s: Any, out: dict[str, Any], partitioning: Any) -> None:
+    """容量预检：整表复制要多少空间、还剩多少（只读，且不抢锁）。
+
+    与 `partition_telemetry.py` 的同名闸门同一逻辑（两个脚本各自可独立搬运，故不互相 import）。
+    真跑时 `--require-free-space` 把"测不到空间"也升级成拒绝（退出码 2）。
+    """
+    try:
+        out["capacity"] = partitioning.check_capacity(
+            s, partitioning.PARTITION_TABLE, free_bytes=args.free_bytes,
+            require_free=bool(args.require_free_space and not args.dry_run))
+    except partitioning.ConversionRefused as exc:
+        out["capacity"] = dict(exc.details)
+        if not args.dry_run:
+            raise
+        out["capacity"]["dry_run"] = True
+
+
 def main(argv: list[str] | None = None) -> int:
     ensure_utf8_console()
     p = argparse.ArgumentParser(description="telemetry_events 分区 → 普通表（A9 恢复路径）")
@@ -59,6 +88,10 @@ def main(argv: list[str] | None = None) -> int:
                    help="必须原样复述表名（不可逆动作的确认门）")
     p.add_argument("--require-quiet", type=float, default=None, metavar="秒",
                    help="要求最近一次写入早于 N 秒，否则拒绝")
+    p.add_argument("--free-bytes", type=int, default=None, metavar="字节",
+                   help="磁盘可用空间（从监控/df 拿到后喂进来；脚本与库不在同一台机器时必给）")
+    p.add_argument("--require-free-space", action="store_true",
+                   help="空间不够、或**测不到**空间时直接拒绝（退出码 2）；不给则测不到只警告")
     p.add_argument("--keep-partitioned", action="store_true",
                    help="保留原分区表为 <表>_old，而不是删掉")
     p.add_argument("--no-verify", action="store_true",
@@ -73,6 +106,7 @@ def main(argv: list[str] | None = None) -> int:
 
     table = partitioning.PARTITION_TABLE
     mutating = bool(args.unpartition and not args.dry_run)
+    op = _ddl_op(args)
     out: dict[str, Any] = {"table": table, "actions": [], "error": "", "blockers": []}
     lease_blocker = ""
 
@@ -87,6 +121,8 @@ def main(argv: list[str] | None = None) -> int:
                 elif not out["partitioned"]:
                     out["error"] = f"{table} 不是分区表，无需反向转换"
                 elif _pg_like(out):
+                    # 容量只读、便宜，且是"这次根本别开始"的判断，所以排在阻塞项前面。
+                    _capacity_gate(args, s, out, partitioning)
                     # 阻塞项要查 pg_class（只有 PG 有）；dry-run 只报告、不据此拒绝。
                     out["blockers"] = partitioning.unpartition_blockers(s, table)
                     out["old_primary_key"] = _derive_old_pk(s, partitioning, table)
@@ -104,6 +140,12 @@ def main(argv: list[str] | None = None) -> int:
         record_skip("unpartition_busy", metrics.partition_ddl_skipped_total)
         out["skipped"] = "unpartition_busy"
         out["busy"] = str(exc)
+    except Exception as exc:
+        # 真异常：**记下来再抛**——否则崩溃只留在调度器日志里，指标上什么也看不见，
+        # 而"恢复失败"恰恰是最该被看见的那件事。
+        if op:
+            record_result(op, ok=False, kind="error", detail=f"{type(exc).__name__}: {exc}")
+        raise
 
     if out.get("error"):
         exit_code = 2
@@ -116,6 +158,11 @@ def main(argv: list[str] | None = None) -> int:
         record_skip("lease_held", metrics.partition_ddl_skipped_total)
         out["skipped"] = "lease_held"
         out["lease_owner"] = lease_blocker
+    if op and exit_code != 3:
+        # 成功清零连续失败数；2 是前置条件不满足（refused）；跳过（3）不改写既有记录。
+        record_result(op, ok=(exit_code == 0),
+                      kind="" if exit_code == 0 else "refused",
+                      detail=out.get("error") or "")
     if args.json:
         print(json.dumps(out, ensure_ascii=False))
         return exit_code
@@ -155,11 +202,14 @@ def _run(args, s: Any, out: dict[str, Any], partitioning: Any) -> None:
     if args.dry_run:
         return
     partitioning.check_unpartition_confirm(table, args.confirm_table)
+    wal_start = partitioning.wal_position(s)          # 实测本次复制写出多少 WAL（复盘用）
     res = partitioning.unpartition(
         s, table, old_primary_key=out.get("old_primary_key") or "",
         keep_partitioned=args.keep_partitioned, confirm=args.confirm_table,
         require_quiet=args.require_quiet, verify=not args.no_verify)
     s.commit()
+    # 全库 WAL 增量（含并发写入噪声），只用于复盘/校准容量系数，不参与判定。
+    out["wal_bytes"] = partitioning.wal_bytes_since(s, wal_start)
     out["actions"] = [{"unpartition": res["notes"], "executed": True}]
     out["partitioned"] = False
     out["partitions"] = []
@@ -172,6 +222,8 @@ def _run(args, s: Any, out: dict[str, Any], partitioning: Any) -> None:
 
 
 def _print_report(out: dict[str, Any], args) -> None:
+    from data_dog.storage.partitioning import format_bytes as _fmt_size
+
     print(f"===== {out['table']} 恢复为普通表（dialect={out.get('dialect')}）=====")
     if not out.get("postgres"):
         print("  非 PostgreSQL：分区不可用，无需恢复")
@@ -191,6 +243,22 @@ def _print_report(out: dict[str, Any], args) -> None:
     if out.get("rows") is not None:
         print(f"  拷贝核对通过：{out['rows']} 行"
               + ("，内容指纹已比对" if out.get("verified") else "（仅行数，--no-verify）"))
+    cap = out.get("capacity")
+    if cap:
+        verdict = {"ok": "充足", "short": "**空间不足**", "unknown": "测不到"}.get(
+            cap.get("verdict"), cap.get("verdict"))
+        print(f"  容量预检（反向转换要整表复制一份）：{verdict}"
+              + ("  [DRY-RUN：真跑会被拒]" if cap.get("dry_run") else ""))
+        print(f"    源表 ≈ {_fmt_size(cap.get('source_bytes'))}"
+              + (f"，约 {cap.get('source_rows')} 行（pg_class 估计）"
+                 if cap.get("source_rows") is not None else ""))
+        print(f"    预计需要 ≈ {_fmt_size(cap.get('need_bytes'))}"
+              f"（峰值 ×{cap.get('peak_factor')} + WAL ×{cap.get('wal_ratio')}）")
+        print(f"    可用 {_fmt_size(cap.get('free_bytes'))}（{cap.get('free_source')}）")
+        if cap.get("message"):
+            print(f"    {cap['message']}")
+    if out.get("wal_bytes") is not None:
+        print(f"  本次恢复写出 WAL ≈ {_fmt_size(out['wal_bytes'])}（全库口径，含并发写入噪声）")
     if out.get("blockers"):
         print("  阻塞项（不解决就不能退回普通表）：")
         for item in out["blockers"]:

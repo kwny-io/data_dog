@@ -300,5 +300,20 @@ spec:
               转换含整表拷贝，慢是可能的；但"远超 TTL 还在持有"通常意味着持有者卡在
               锁等待/网络，或进程崩了。此时别的副本/定时任务都**不会**补分区。
               先看共享状态里的 owner，再决定是等它跑完还是做人工处置。
+        - alert: DataDogPartitionDdlFailed
+          # "迁移失败"必须有人知道：CronJob 里的一次崩溃会被 backoffLimit 重试，最终只留在
+          # Job 日志里，指标上什么都不剩。这里用**连续失败数**（Gauge）回答"现在是不是坏的"；
+          # 不看 last_failure 时间戳——它会被下一次成功挡住视线，只适合看板/复盘。
+          for: 5m
+          expr: max by (op) (data_dog_partition_ddl_consecutive_failures) > 0
+          labels:
+            severity: warning
+          annotations:
+            summary: "分区结构变更连续失败（op={{ $labels.op }}）"
+            description: >-
+              {{ $labels.op }} 在上一次成功之后又连续失败，且还没恢复。退出码 2（前置条件
+              不满足：确认令牌、静默窗口、容量不足）与真异常都计入；退出码 3（租约/咨询锁
+              被别人持有）**不计**——那是跳过，不是失败。首行异常同时记在共享状态里
+              （partition:ddl_result），脚本/Job 日志里也有。
     {{- end }}
 {{- end }}

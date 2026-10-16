@@ -429,6 +429,37 @@ CLI 成功时打印 `拷贝核对通过：N 行，内容指纹已比对`，`--js
 等长改写被检出 / `NULL` vs 空串被区分 / 目标表被破坏时 `_verify_copy` 报错 /
 转换默认 `verified=True` 且 `--no-verify` 可关）。
 
+### 8.3.5 容量预检：转换前先算，不靠运气（①）
+
+转换不是"原地改结构"：它**同时**在盘上放着旧表 + 新分区表 + 全量拷贝产生的 WAL。空间不够的失败
+发生在**事务中间**——不是"没开始"，而是旧表在、新表半成品、回滚本身还要再写一遍 WAL。所以
+`--convert`（以及反向的 `--unpartition`）现在先算一笔账，再决定要不要动：
+
+| 项 | 口径 |
+|---|---|
+| 源表大小 | `pg_total_relation_size`。**分区表要对子分区求和**——实测 `pg_total_relation_size(<分区父表>)` 返回 **0**（父表是逻辑表，没有自己的存储），只看父表会把需求算成 0 |
+| 源表行数 | `pg_class.reltuples`（**估计值**，不是 `count(*)`）：目标是亿级表，`count(*)` 本身就是一次全表读 |
+| 峰值 | `源 × 2.0`——旧表 + 新表同时在盘上 |
+| WAL | `源 × 1.5`——整表 `INSERT ... SELECT` 的 WAL 量级（排练实测系数 **1.449**，向上取 1.5） |
+| 判定 | `需要 ≤ 可用` → `ok`；`需要 > 可用` → **拒绝转换**（`ConversionRefused`，退出码 2，事务还没开始） |
+
+**可用空间从哪来**：`SHOW data_directory` → `pg_tablespace_location(0)` → `shutil.disk_usage`。
+但脚本与库**常常不在同一台机器/容器**（本机就是 docker 里的 PG + 宿主上的脚本；容器里的路径在
+宿主上可能根本不存在）——所以：
+
+- 测不到 → 默认**只警告不拦**（`verdict=unknown`），并在报告里写清在哪一步失败的；
+- `--free-bytes N`：从监控/`df` 拿到空间后喂进来，这时才是可靠数字；
+- `--require-free-space`：连"测不到"也**拒绝**（退出码 2）——"必须证明放得下"的部署用这个；
+- `--dry-run` 只报不拒（它本来就不动结构），但会把"真跑会被拒"标出来。
+
+`source_bytes` / `source_rows` / `need_bytes` / `free_bytes` / `verdict` / `message` 都在
+`--json` 与人类可读报告里；真跑时另实测 `wal_bytes`（`pg_current_wal_lsn()` 差值，**全库口径**、
+含并发写入噪声，只用于复盘校准，**不参与判定**）。
+
+**真 PG 验证**：`tests/test_partition_capacity.py`（离线 SQLite：`verdict=unknown`、`need_bytes=None`
+且不拦；真 PG：源表大小 > 0、**分区父表求和 > 0**（钉住上面那个 0 值陷阱）、`free_bytes=1` → 拒绝并
+报 `shortfall_bytes`、`--require-free-space` 在测不到时也拒）。
+
 ### 8.4 有效期信号与调度（"跨月无分区"必须会响）
 
 分区维护此前是**能力齐全但没人调用**：CLI 得人工跑，helm 里没有定时任务，应用启动也不碰。
@@ -494,10 +525,25 @@ memory"直接报警。
 | `data_dog_partition_ddl_skipped_total{reason}` | counter | 本轮被让路的次数；`reason` ∈ `{lease_held, convert_busy, ddl_busy, unpartition_busy}` | 启动路径 + 两个 CLI |
 | `data_dog_partition_ddl_lease_held` | gauge | 此刻租约是否有主（1/0） | `/metrics` 每次抓取 |
 | `data_dog_partition_ddl_lease_age_seconds` | gauge | 从上次获取/续期算起的秒数（无主 = 0） | 同上 |
+| `data_dog_partition_ddl_consecutive_failures{op}` | gauge | **连续失败次数**（成功即清零）；`op` ∈ `{ensure, drop, convert, unpartition, backfill}` | `/metrics` 每次抓取（读共享状态 `partition:ddl_result`） |
+| `data_dog_partition_ddl_last_success_timestamp_seconds{op}` | gauge | 上次成功的时间戳（epoch 秒，从未成功 = 0） | 同上 |
+| `data_dog_partition_ddl_last_failure_timestamp_seconds{op}` | gauge | 上次失败的时间戳（从未失败 = 0） | 同上 |
 
-两条对应告警（见 `docs/slo.md` §9、helm `prometheusrule.yaml` 的 `data-dog.storage` 组）：
-`DataDogPartitionDdlSkipped`（24h 内有跳过）与 `DataDogPartitionDdlLeaseStuck`（持有 > 30 分钟）。
-两者都在 `partition.enabled=true` 时才渲染，与有效期那两条同一开关。
+三条对应告警（见 `docs/slo.md` §9、helm `prometheusrule.yaml` 的 `data-dog.storage` 组）：
+`DataDogPartitionDdlSkipped`（24h 内有跳过）、`DataDogPartitionDdlLeaseStuck`（持有 > 30 分钟）与
+`DataDogPartitionDdlFailed`（**连续失败 > 0**）。三者都在 `partition.enabled=true` 时才渲染，与
+有效期那两条同一开关。
+
+**为什么失败要单独一组指标（②）**：崩溃/`exit 2` 此前只留在 CronJob 的 Job 日志里——
+`backoffLimit: 3` 重试完，Job 历史被 `failedJobsHistoryLimit` 冲掉，指标上**什么都没留下**；
+"迁移失败"恰恰是最该被看见的那件事。记账放在共享状态里（
+`partition_ddl.record_result(op, ok=..., kind=..., detail=...)`），因为**只有 service 会抓
+`/metrics`**，而跑 DDL 的是 CLI/Job——两者唯一的交汇点是状态存储（与租约同一后端，CronJob 通过
+`envFrom` 拿到同一份配置）。**退出码 3（跳过）不记账**：那什么都没做，不是失败，也**不该清掉**
+上一次成功的记录；记账失败本身被吞掉（`noqa: BLE001`）——台账不能变成新的失败源。
+**为什么连续失败用 Gauge 而不是 counter**：它要回答的是"**现在**是不是坏的"，counter 的
+`increase()` 答不了"还没恢复"。**为什么还留两个时间戳**：连续失败数会被下一次成功清零，
+复盘"什么时候坏过"只能靠时间戳。`op` 必须是有限枚举（无限标签 = 基数爆炸）。
 
 **为什么租约状态用两个 Gauge 而不是给 owner 打标签**：owner 是 `host:pid`，基数会随滚动发布
 无限增长——这正是本仓对 LLM 额度刻意避开的标签爆炸。"被谁挡的"要看日志/共享状态，不进指标。

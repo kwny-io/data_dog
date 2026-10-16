@@ -1062,3 +1062,156 @@ def test_recover_script_end_to_end_on_real_pg():
         with eng.begin() as c:
             c.execute(text(f"DROP TABLE IF EXISTS {table} CASCADE"))
         eng.dispose()
+
+
+# ------------------------------------------------- 容量预检 / 结果记账 的 CLI 接线（①②）
+
+def _fake_plan(monkeypatch):
+    """让 CLI 走到"计划通过、准备执行"那一步（SQLite 上 plan_conversion 是 PG 专用的）。"""
+    monkeypatch.setattr(partitioning, "plan_conversion",
+                        lambda _s, table=partitioning.PARTITION_TABLE, **_kw:
+                        {"table": table, "new_table": table + "_new", "blockers": [],
+                         "rows": 0, "partitions": [], "actions": ["INSERT ... SELECT"]})
+
+
+def _fake_convert(monkeypatch):
+    def fake(_s, table=partitioning.PARTITION_TABLE, **_kw):
+        return {"notes": ["ok"], "partitions": [table + "_202612"], "quiet": None,
+                "verified": True, "rows": 5}
+    monkeypatch.setattr(partitioning, "convert_to_partitioned", fake)
+
+
+def test_script_capacity_shortage_refuses_before_touching_the_table(
+        url, clean_state, monkeypatch, capsys):
+    """①：空间不够 → 退出码 2、一个 DDL 都不执行，缺口数字在 --json 里可见。"""
+    mod = _load_script("partition_telemetry")
+    _pretend_partitioned_pg(monkeypatch)
+    _fake_plan(monkeypatch)
+    touched: list[str] = []
+    monkeypatch.setattr(partitioning, "convert_to_partitioned",
+                        lambda *a, **k: touched.append("convert") or {})
+
+    def short(_s, table=partitioning.PARTITION_TABLE, **_kw):
+        raise partitioning.ConversionRefused(
+            ["磁盘空间不足：缺 1.0 GiB"], details={"verdict": "short", "shortfall_bytes": 1073741824})
+
+    monkeypatch.setattr(partitioning, "check_capacity", short)
+    code = mod.main(["--convert", "--confirm-table", partitioning.PARTITION_TABLE, "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 2 and touched == []
+    assert payload["refused"]["verdict"] == "short"
+    assert payload["refused"]["shortfall_bytes"] == 1073741824
+    assert "磁盘空间不足" in payload["refused"]["blockers"][0]
+    assert payload["capacity"]["verdict"] == "short"
+
+
+def test_script_require_free_space_refuses_when_unmeasurable(
+        url, clean_state, monkeypatch, capsys):
+    """--require-free-space：SQLite 上算不出需求 → 硬门（退出码 2），不许"不知道就开干"。"""
+    mod = _load_script("partition_telemetry")
+    _pretend_partitioned_pg(monkeypatch)
+    _fake_plan(monkeypatch)
+    code = mod.main(["--convert", "--confirm-table", partitioning.PARTITION_TABLE,
+                     "--require-free-space", "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 2
+    assert "require-free-space" in payload["refused"]["blockers"][0]
+    assert payload["refused"]["verdict"] == "unknown"
+
+
+def test_script_convert_dry_run_reports_capacity_without_refusing(
+        url, clean_state, monkeypatch, capsys):
+    """dry-run 只报不拒：它本来就不动结构，闸门要防的是"事务中间撞 ENOSPC"。"""
+    mod = _load_script("partition_telemetry")
+    _pretend_partitioned_pg(monkeypatch)
+    _fake_plan(monkeypatch)
+    monkeypatch.setattr(partitioning, "probe_free_bytes", lambda _s: (1, "test"))
+    monkeypatch.setattr(partitioning, "_relation_bytes", lambda _s, _t: 1000)
+    monkeypatch.setattr(partitioning, "_relation_rows", lambda _s, _t: 1)
+
+    code = mod.main(["--convert", "--dry-run", "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert payload["capacity"]["dry_run"] is True
+    assert payload["capacity"]["verdict"] == "short"
+    assert payload["actions"][0]["executed"] is False
+
+
+def test_script_records_a_real_failure_and_re_raises(url, clean_state, monkeypatch):
+    """②：真异常先记账（kind=error）再抛——崩溃只留在 Job 日志里就等于看不见。"""
+    from data_dog import partition_ddl
+
+    mod = _load_script("partition_telemetry")
+    _pretend_partitioned_pg(monkeypatch)
+    _fake_plan(monkeypatch)
+
+    def boom(*_a, **_k):
+        raise RuntimeError("PG 断了")
+
+    monkeypatch.setattr(partitioning, "convert_to_partitioned", boom)
+    with pytest.raises(RuntimeError):
+        mod.main(["--convert", "--confirm-table", partitioning.PARTITION_TABLE])
+
+    rec = partition_ddl.ddl_results()["convert"]
+    assert rec["ok"] is False and rec["fails"] == 1 and rec["kind"] == "error"
+    assert "PG 断了" in rec["detail"]
+
+
+def test_script_records_success_and_clears_the_failure_streak(url, clean_state, monkeypatch):
+    """成功把连续失败清零，但"上次什么时候坏过"留着。"""
+    from data_dog import partition_ddl
+
+    mod = _load_script("partition_telemetry")
+    _pretend_partitioned_pg(monkeypatch)
+    _fake_plan(monkeypatch)
+    _fake_convert(monkeypatch)
+    partition_ddl.record_result("convert", ok=False, kind="error", detail="上一轮坏了")
+
+    assert mod.main(["--convert", "--confirm-table", partitioning.PARTITION_TABLE]) == 0
+    rec = partition_ddl.ddl_results()["convert"]
+    assert rec["ok"] is True and rec["fails"] == 0
+    assert rec["fail_at"] > 0, "成功把失败历史抹了"
+
+
+def test_script_does_not_record_a_skipped_round(url, clean_state, monkeypatch):
+    """退出码 3（这轮不该我）不是失败：不记账，只在 skipped_total{reason} 里。"""
+    from data_dog import partition_ddl
+
+    mod = _load_script("partition_telemetry")
+    _pretend_partitioned_pg(monkeypatch)
+    _fake_plan(monkeypatch)
+    _fake_convert(monkeypatch)
+    holder = _hold_ddl_lease()
+    try:
+        assert mod.main(["--convert", "--confirm-table", partitioning.PARTITION_TABLE]) == 3
+    finally:
+        holder.release()
+    assert partition_ddl.ddl_results() == {}, "跳过被记成了失败"
+
+
+def test_script_does_not_record_a_dry_run(url, clean_state, monkeypatch):
+    """只读调用不记账：否则 dry-run 也会在指标里造出"失败"。"""
+    from data_dog import partition_ddl
+
+    mod = _load_script("partition_telemetry")
+    _pretend_partitioned_pg(monkeypatch)
+    _fake_plan(monkeypatch)
+    assert mod.main(["--convert", "--dry-run"]) == 0
+    assert partition_ddl.ddl_results() == {}
+
+
+def test_recover_script_records_a_refused_unpartition(url, clean_state, monkeypatch, capsys):
+    """恢复路径同样记账：缺确认令牌 → kind=refused（不是 error）。"""
+    from data_dog import partition_ddl
+
+    mod = _load_script("unpartition_telemetry")
+    _pretend_partitioned_pg(monkeypatch)
+    monkeypatch.setattr(partitioning, "unpartition",
+                        lambda _s, _t=partitioning.PARTITION_TABLE, **_kw: {})
+    code = mod.main(["--unpartition", "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 2
+    rec = partition_ddl.ddl_results()["unpartition"]
+    assert rec["ok"] is False and rec["kind"] == "refused"
+    assert "前置条件" in rec["detail"] or rec["detail"] == ""
+    assert payload["error"]

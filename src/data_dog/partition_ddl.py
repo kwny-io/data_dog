@@ -34,6 +34,7 @@
 """
 from __future__ import annotations
 
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -92,6 +93,74 @@ def record_skip(reason: str, sink: Any) -> None:
     sink.labels(reason=reason).inc()
 
 
+# 结构变更的**结果**（成功/失败）放在共享 state 里，而不是进程内变量。
+# 为什么必须共享：失败发生在 CronJob / 启动钩子那个进程里，而 Prometheus 抓的是 service 的
+# /metrics；两个进程之间只有共享 state（`DD_STATE_BACKEND`）能传话。key 只存一个 dict
+# （op -> 记录），一次 get 读全，避免多次往返与"读到一半"的中间态。
+#
+# 为什么跳过（租约 / 咨询锁被占）**不**记在这里：那是"这轮不该我干"（CLI 退出码 3），什么都
+# 没做，不欠谁一个解释；它已经有 `partition_ddl_skipped_total{reason}` 这个 counter。
+PARTITION_DDL_RESULT_KEY = "partition:ddl_result"
+
+# 允许出现在指标标签里的动作白名单。**有限枚举**：共享 state 里的脏值不能变成 Prometheus 的
+# 无限基数（与"租约 owner 不做标签"同一条纪律）。
+DDL_OPS = ("ensure", "drop", "convert", "unpartition", "backfill")
+
+
+def record_result(op: str, *, ok: bool, kind: str = "", detail: str = "") -> None:
+    """记一次结构变更的结果（幂等；只改共享 state 里的一个 key）。
+
+    `kind` 只在失败时有意义：`refused`（前置条件 / 能力边界不满足，CLI 退出码 2）、
+    `error`（真异常）。成功会把连续失败数**清零**，失败则 +1。成功也可以带 `detail`
+    （例：backfill 记 "updated=N batches=M"）——它是"这次做了什么"的唯一留痕。
+
+    写共享 state 失败**不影响主流程**——那是一条记账路径，不是 DDL 本身，把"记账失败"升级成
+    "迁移失败"只会更糟。真出错时这次结果就是没记上（指标里表现为没有变化），不撒谎。
+    """
+    now = time.time()
+
+    def _apply(cur: Any) -> tuple[Any, None]:
+        data = dict(cur) if isinstance(cur, dict) else {}
+        prev = dict(data.get(op) or {})
+        if ok:
+            data[op] = {"ok": True, "fails": 0, "at": now, "ok_at": now,
+                        # 失败历史不该被下一次成功抹掉：连续失败数会清零（它要回答"现在
+                        # 是不是坏的"），但"上次什么时候坏过"只能靠时间戳，得留着。
+                        "fail_at": prev.get("fail_at") or 0,
+                        "kind": "",
+                        "detail": str(detail)[:500]}   # 成功也留痕（例：backfill 更新了多少行）
+        else:
+            data[op] = {
+                "ok": False,
+                "fails": int(prev.get("fails") or 0) + 1,
+                "at": now,
+                "ok_at": prev.get("ok_at") or 0,     # 成功时间戳要跨失败保留
+                "fail_at": now,
+                "kind": kind,
+                "detail": str(detail)[:500],          # 日志里可以有长文本，状态里截断
+            }
+        return data, None
+
+    try:
+        get_state_store().mutate(PARTITION_DDL_RESULT_KEY, _apply)
+    except Exception:                        # noqa: BLE001 — 记账失败不该让迁移本身报错
+        return
+
+
+def ddl_results() -> dict[str, Any]:
+    """读回所有动作的结果记录（读不到 / 类型不对 → 空 dict）。
+
+    只返回白名单里的 op：共享 state 可能被手工改过或来自旧版本，脏 key 不该进指标标签。
+    """
+    try:
+        raw = get_state_store().get(PARTITION_DDL_RESULT_KEY)
+    except Exception:                        # noqa: BLE001
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    return {k: v for k, v in raw.items() if k in DDL_OPS and isinstance(v, dict)}
+
+
 @contextmanager
 def ddl_guard(*, lease: bool | None = None) -> Iterator[str | None]:
     """分区**结构变更**的单持有者互斥上下文。
@@ -120,10 +189,14 @@ def ddl_guard(*, lease: bool | None = None) -> Iterator[str | None]:
 
 
 __all__ = [
+    "DDL_OPS",
     "PARTITION_DDL_LEASE_KEY",
+    "PARTITION_DDL_RESULT_KEY",
+    "ddl_results",
     "acquire_ddl_lease",
     "ddl_guard",
     "ddl_lease_holder",
     "lease_age_seconds",
+    "record_result",
     "record_skip",
 ]

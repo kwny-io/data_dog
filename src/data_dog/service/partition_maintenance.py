@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 from .. import partition_ddl, settings
 from ..core import metrics
@@ -67,6 +68,24 @@ def report_lease() -> float | None:
     return age
 
 
+def report_ddl_results() -> dict[str, Any]:
+    """把共享 state 里记的**结构变更结果**搬进指标（连续失败 / 上次成功 / 上次失败）。
+
+    为什么由 service 转发、而不是跑 DDL 的那个进程直接 set：CronJob 与 service 是**两个进程**
+    （滚动发布时更是多份），而 Prometheus 抓的是 service 的 /metrics。这条"读共享 state → 写
+    Gauge"的转发正是 `lease_age_seconds` 用的同一机制——它让"CronJob 里失败了"这件事在服务
+    指标上可见。在 `/metrics` **每次抓取**时调用（Gauge 会陈旧，理由见 core/metrics.py）。
+    """
+    results = partition_ddl.ddl_results()
+    for op, rec in results.items():
+        metrics.partition_ddl_consecutive_failures.labels(op=op).set(float(rec.get("fails") or 0))
+        metrics.partition_ddl_last_success_timestamp_seconds.labels(op=op).set(
+            float(rec.get("ok_at") or 0))
+        metrics.partition_ddl_last_failure_timestamp_seconds.labels(op=op).set(
+            float(rec.get("fail_at") or 0))
+    return results
+
+
 def ensure_if_enabled() -> list[str]:
     """启动补齐未来分区，返回本次涉及的分区名；未开启 / 非分区表 → []。
 
@@ -104,7 +123,15 @@ def ensure_if_enabled() -> list[str]:
                 report_lease()
                 _log.info("分区自动补齐跳过：%s", exc)
                 return []
+            except Exception as exc:
+                # 真错误**照常抛**（调用方记日志），但先记一笔：否则"启动补齐失败"只在启动
+                # 日志里出现过一次，指标上什么也看不见——那正是本轮要补的洞。
+                partition_ddl.record_result("ensure", ok=False, kind="error",
+                                            detail=f"{type(exc).__name__}: {exc}")
+                raise
             # 顺便报一次：刚补完的进程不该等到下一次抓取才有"有效期"这个信号。
             report_horizon(s)
+        # 记账：CronJob 那边的失败走同一个 key，service 抓取时统一暴露成指标。
+        partition_ddl.record_result("ensure", ok=True)
         _log.info("分区有效期已补齐到未来 %d 个月：%s", months, ", ".join(created) or "(无变化)")
         return created

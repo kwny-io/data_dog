@@ -19,6 +19,10 @@
 
 边界：并发写入**不冲突**（新写入自带 `created_day`）；锁是协作式的（绕过它直接跑不会坏数据，
 只是白干一遍）；本脚本**不改结构**，改主键仍由迁移负责。
+
+失败会被记到共享状态（`partition_ddl.record_result`），service 抓 `/metrics` 时转成
+`data_dog_partition_ddl_consecutive_failures{op="backfill"}` 并触发 `DataDogPartitionDdlFailed`；
+成功则清零。`--check`（只读）与退出码 3（没抢到锁）不记账——跳过不是失败。
 """
 from __future__ import annotations
 
@@ -29,6 +33,7 @@ import sys
 from sqlalchemy import text
 from sqlalchemy.exc import ProgrammingError
 
+from data_dog.partition_ddl import record_result
 from data_dog.storage.db import session_scope
 from data_dog.storage.partitioning import PARTITION_TABLE, backfill_created_day
 from data_dog.storage.pg_locks import PARTITION_BACKFILL_LOCK_KEY, advisory_session_lock
@@ -37,6 +42,22 @@ from data_dog.storage.pg_locks import PARTITION_BACKFILL_LOCK_KEY, advisory_sess
 def _pending(session, table: str) -> int:
     return int(session.execute(text(f"SELECT count(*) FROM {table} WHERE created_day IS NULL")
                                ).scalar() or 0)
+
+
+def _backfill(session, table: str, batch: int, say) -> dict:
+    """跑一次分批回填，并把结果记进共享状态（失败照常抛，但先记下来）。
+
+    记账不能变成新的失败源：`record_result` 自己吞掉状态存储异常（见 partition_ddl）。
+    """
+    try:
+        rep = backfill_created_day(session, table, batch=batch, log=say)
+    except Exception as exc:
+        record_result("backfill", ok=False, kind="error",
+                      detail=f"{type(exc).__name__}: {exc}")
+        raise
+    record_result("backfill", ok=True,
+                  detail=f"updated={rep['updated']} batches={rep['batches']}")
+    return rep
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -58,6 +79,9 @@ def main(argv: list[str] | None = None) -> int:
             pending = _pending(session, table)
         except ProgrammingError as e:
             print(f"✗ 表或列不存在（先跑迁移建列）：{type(e).__name__}", file=sys.stderr)
+            if not args.check:          # 只读的 --check 不该被记成一次失败
+                record_result("backfill", ok=False, kind="refused",
+                              detail=f"表或列不存在: {type(e).__name__}")
             return 2
         if args.check:
             payload = {"check": True, "dialect": dialect, "pending": pending, "table": table}
@@ -67,14 +91,14 @@ def main(argv: list[str] | None = None) -> int:
         lock = None if args.no_lock else advisory_session_lock(
             session, PARTITION_BACKFILL_LOCK_KEY, wait=False)
         if lock is None:
-            rep = backfill_created_day(session, table, batch=args.batch, log=say)
+            rep = _backfill(session, table, args.batch, say)
         else:
             with lock as acquired:
                 if not acquired:
                     print("skipped=lock_held（另一个人正在回填；改 --no-lock 可强制并行）",
                           file=sys.stderr)
                     return 3
-                rep = backfill_created_day(session, table, batch=args.batch, log=say)
+                rep = _backfill(session, table, args.batch, say)
         payload = {"check": False, "table": table, "pending_before": pending, **rep}
         print(json.dumps(payload, ensure_ascii=False) if args.json
               else (f"完成：更新 {rep['updated']} 行 / {rep['batches']} 批（回填前待办 {pending}）"))

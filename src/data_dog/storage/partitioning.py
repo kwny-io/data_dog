@@ -99,7 +99,8 @@ def _day_bounds(start: datetime, end: datetime) -> tuple[int, int]:
     return day_of(start.timestamp()), day_of(end.timestamp())
 
 
-# 逐列内容指纹的聚合：PG 用 md5 的 64 位和 mod 素数；SQLite 回退成长度指纹。
+# 逐列内容指纹的聚合：PG 取逐行 md5 的 64 位和（**不取模**——精确累加，不做有损压缩，
+# 避免"和"被哈希后碰撞）；SQLite 回退成长度指纹。
 # 为什么是**聚合**而不是"整表拼一个串再哈希"：SQLite 构建没有 md5/sha256（实测），
 # 且 string_agg 会吃内存。逐行摘要求和 → 每张表只回 1 行，Python 侧不物化数据行。
 
@@ -684,6 +685,243 @@ def _data_horizon(session: Any, table: str, now: datetime | None) -> tuple[Any, 
         horizon = max(base, datetime.fromtimestamp(int(last) * 86400, tz=timezone.utc))
     return first, last, horizon, since
 
+
+# ---------------------------------------------------------------- 容量预检（A9 转换/恢复）
+#
+# 为什么需要它：转换（以及反向恢复）都是**先把整张表复制一份**——`LIKE ... INCLUDING ALL` 建
+# 新表 + `INSERT ... SELECT` 灌数据。复制期间**新旧两份同时在盘上**，再加上拷贝写出的 WAL，
+# 峰值占用远大于"表有多大"。空间不够的失败发生在**事务中间**（PG 报 `could not extend file
+# ... No space left on device`），那一刻旧表还在、新表是半成品，是最难收拾的时刻；而空间是
+# **事前就能算**的。
+#
+# 诚实的边界（本模块唯一"看情况能用"的检查）：**能不能测到"还剩多少"，取决于本进程能不能
+# 看见库的文件系统**。`SHOW data_directory` / `pg_tablespace_location` 给的是**库主机上的
+# 路径**；脚本跑在别的机器或别的容器里时那条路径根本不存在（本机 Windows → docker 里的 PG
+# 实测 `FileNotFoundError [WinError 3]`）。所以这里给两种来源，并把"数字是哪来的"如实报出去：
+#
+#   ① 显式传入 `free_bytes`（运维从监控/`df` 拿到，CLI 是 `--free-bytes`）——来源标 operator；
+#   ② 本进程能 stat 到库数据目录时直接量——来源标 `db_data_dir:<路径>`。
+#
+# 两者都拿不到 → `verdict="unknown"`，**默认不拦**（无从判断就不假装判断），但把需求量照常
+# 报出来；要硬门就 `--require-free-space`，那时光是"测不到"本身就拒绝。
+
+# WAL 系数 = 一次整表拷贝写出的 WAL ÷ 源表数据字节。**实测**：20 万行（源表 50,806,784 B，
+# 含主键与一个二级索引）转换期间 WAL 增量 73,609,064 B = **1.449×**；取 1.5 留余量。
+# 为什么不是 1.0：`INSERT ... SELECT` 同时写堆与索引的 WAL，索引越多越接近甚至超过数据量。
+DEFAULT_WAL_RATIO = 1.5
+# 新旧两份同时在盘上（旧表一直占到改名/删除那一刻）
+DEFAULT_PEAK_FACTOR = 2.0
+
+
+def wal_position(session: Any) -> Any | None:
+    """当前 WAL 写入位置（仅 PG；测不到返回 None）。"""
+    if not is_postgres(session):
+        return None
+    try:
+        return session.execute(text("SELECT pg_current_wal_lsn()")).scalar()
+    except Exception:                       # 权限不足 / 函数被函数白名单挡掉：当作"测不到"，不是错误
+        return None
+
+
+def wal_bytes_since(session: Any, start: Any) -> int | None:
+    """自 `start` 起写入的 WAL 字节数（尽力而为；测不到返回 None）。
+
+    边界：读的是**全库**的 WAL 插入位置，数值里含并发会话写入的噪声。它只用来回答"这次转换
+    大概写出多少 WAL"，**不参与任何判定**（判定用的是 DEFAULT_WAL_RATIO 那个静态系数）。
+    """
+    if start is None:
+        return None
+    try:
+        cur = session.execute(text("SELECT pg_current_wal_lsn()")).scalar()
+        return int(session.execute(
+            text("SELECT pg_wal_lsn_diff(:b, :a)"), {"a": start, "b": cur}).scalar())
+    except Exception:
+        return None
+
+
+def _relation_bytes(session: Any, table: str) -> int | None:
+    """表的**含索引**总字节；分区父表要把子分区加进去。
+
+    真 PG 实测（16.15）：`pg_total_relation_size('<分区父表>')` 返回 **0**——分区父表自己不存行。
+    所以对分区表必须显式求子和，否则"表多大"会算成 0，预检形同虚设。
+    """
+    if not is_postgres(session):
+        return None
+    name = _check_name(table)
+    try:
+        total = int(session.execute(
+            text("SELECT pg_total_relation_size(to_regclass(:t))"), {"t": name}).scalar() or 0)
+        if is_partitioned(session, table):
+            total += int(session.execute(
+                text("SELECT coalesce(sum(pg_total_relation_size(i.inhrelid)), 0) "
+                     "FROM pg_inherits i WHERE i.inhparent = to_regclass(:t)"),
+                {"t": name}).scalar() or 0)
+    except Exception:
+        return None
+    return total
+
+
+def _relation_rows(session: Any, table: str) -> int | None:
+    """行数**估计**（pg_class.reltuples），分区表求子和。
+
+    为什么不用 count(*)：预检要在**转换之前**、在 100M 行量级上跑，全表扫描本身就是一次事故级
+    的读放大。reltuples 是 planner 的统计值（ANALYZE 后准确），这里只用来报量级——报告里带
+    `rows_estimated: True`，别把它当精确值。
+    """
+    if not is_postgres(session):
+        return None
+    name = _check_name(table)
+    try:
+        if is_partitioned(session, table):
+            raw = session.execute(
+                text("SELECT coalesce(sum(c.reltuples), 0) FROM pg_inherits i "
+                     "JOIN pg_class c ON c.oid = i.inhrelid "
+                     "WHERE i.inhparent = to_regclass(:t)"),
+                {"t": name}).scalar()
+        else:
+            raw = session.execute(
+                text("SELECT reltuples FROM pg_class WHERE oid = to_regclass(:t)"),
+                {"t": name}).scalar()
+    except Exception:
+        return None
+    if raw is None:
+        return None
+    return max(0, int(float(raw)))
+
+
+def capacity_estimate(session: Any, table: str = PARTITION_TABLE, *,
+                      wal_ratio: float = DEFAULT_WAL_RATIO,
+                      peak_factor: float = DEFAULT_PEAK_FACTOR) -> dict[str, Any]:
+    """只读：这次"复制一遍"要多少空间。
+
+    `need_bytes = peak_factor × source_bytes + wal_ratio × source_bytes`：复制期间旧表与新表同时
+    在盘上，且拷贝本身写 WAL。**刻意保守**——宁可高估（多留空间不算损失），不可低估（低估的
+    下场是事务中间 ENOSPC，那时旧表还在、新表半成品）。
+
+    非 PG 或读不到大小时 `source_bytes=None`、`need_bytes=None`（调用方按"测不到"处理）。
+    """
+    source = _relation_bytes(session, table)
+    est: dict[str, Any] = {
+        "table": table,
+        "source_bytes": source,
+        "source_rows": _relation_rows(session, table),
+        "rows_estimated": True,                       # reltuples 是估计值，不是 count(*)
+        "wal_ratio": float(wal_ratio),
+        "peak_factor": float(peak_factor),
+        "measured": source is not None,
+    }
+    if source is None:
+        est.update({"copy_bytes": None, "peak_bytes": None, "wal_bytes_est": None,
+                    "need_bytes": None})
+        return est
+    peak = int(source * float(peak_factor))            # 旧表还在 + 新表一份
+    wal = int(source * float(wal_ratio))               # 拷贝写出的 WAL
+    est.update({"copy_bytes": int(source), "peak_bytes": peak, "wal_bytes_est": wal,
+                "need_bytes": peak + wal})
+    return est
+
+
+def format_bytes(n: float | None) -> str:
+    """人类可读的字节数（`None` → "未知"）——报告/拒绝理由共用。"""
+    if n is None:
+        return "未知"
+    units = ("B", "KiB", "MiB", "GiB", "TiB", "PiB")
+    v = float(n)
+    for unit in units:
+        if abs(v) < 1024 or unit == units[-1]:
+            return f"{int(v)} {unit}" if unit == "B" else f"{v:.1f} {unit}"
+        v /= 1024
+    return f"{v:.1f} PiB"
+
+
+def probe_free_bytes(session: Any) -> tuple[int | None, str]:
+    """尽力测出库数据目录所在文件系统的可用字节 → `(bytes | None, 来源说明)`。
+
+    路径来源：`SHOW data_directory`（需超级用户）→ 退到 `pg_tablespace_location(0)`（公共函数，
+    但默认表空间返回**空串**）。路径在**本进程**可见时才 stat。任何一步失败都把原因如实带回——
+    `verdict="unknown"` 时要靠它回答"为什么没测到"。
+    """
+    if not is_postgres(session):
+        return None, "非 PostgreSQL"
+    path = ""
+    try:
+        path = str(session.execute(text("SHOW data_directory")).scalar() or "")
+    except Exception:
+        path = ""
+    if not path:
+        try:
+            path = str(session.execute(
+                text("SELECT pg_tablespace_location(0)")).scalar() or "")
+        except Exception:
+            path = ""
+    if not path:
+        return None, ("库没给出数据目录路径（SHOW data_directory 需超级用户；"
+                      "默认表空间无独立路径）")
+    try:
+        import shutil
+
+        return int(shutil.disk_usage(path).free), f"db_data_dir:{path}"
+    except OSError as exc:
+        return None, (f"路径 {path} 在本进程不可见（{type(exc).__name__}）——"
+                      "脚本与库不在同一台机器/容器？用 --free-bytes 从监控侧喂数")
+
+
+def check_capacity(session: Any, table: str = PARTITION_TABLE, *,
+                   free_bytes: int | None = None,
+                   wal_ratio: float = DEFAULT_WAL_RATIO,
+                   peak_factor: float = DEFAULT_PEAK_FACTOR,
+                   require_free: bool = False) -> dict[str, Any]:
+    """容量闸门：把"复制一遍要多少"与"还剩多少"放在一起比；不够就抛 ConversionRefused。
+
+    **为什么不默认拦"测不到"**：测不到时拦与不拦都是错——拦会把本地/异地部署的正常转换挡死
+    （本机就是这种：脚本看不见 docker 里 PG 的 /var/lib/postgresql/data），放又等于没门。默认给
+    "需求量 + 数字来源 + verdict"，把判断交给人；`require_free=True`（CLI
+    `--require-free-space`）才升级成硬门：**不知道还剩多少，就不许动生产表**。
+
+    返回报告 `verdict ∈ {ok, short, unknown}`；`short` 时**抛 ConversionRefused**，异常的
+    `details` 就是本报告（CLI 的 --json 里原样可见）。
+    """
+    report = capacity_estimate(session, table, wal_ratio=wal_ratio, peak_factor=peak_factor)
+    if free_bytes is None:
+        free, source = probe_free_bytes(session)
+    else:
+        free, source = max(0, int(free_bytes)), "operator（--free-bytes）"
+    report["free_bytes"] = free
+    report["free_source"] = source
+    need = report.get("need_bytes")
+    if need is None:
+        report["verdict"] = "unknown"
+        report["message"] = f"读不到 {table} 的大小，容量预检不可用（非 PG 或权限不足）"
+        if require_free:
+            raise ConversionRefused(
+                [report["message"] + "——--require-free-space 要求必须能算出来"],
+                details=report)
+        return report
+    if free is None:
+        report["verdict"] = "unknown"
+        report["message"] = (f"可用空间测不到（{source}）：本次预计需要 {format_bytes(need)}，"
+                             "但剩多少不知道，不拦；要硬门就 --free-bytes 或 --require-free-space")
+        if require_free:
+            raise ConversionRefused(
+                [f"可用空间测不到（{source}），而 --require-free-space 要求先证明够"
+                 f"（本次预计需要 {format_bytes(need)}）"],
+                details=report)
+        return report
+    headroom = int(free) - int(need)
+    report["headroom_bytes"] = headroom
+    if headroom < 0:
+        report["verdict"] = "short"
+        report["shortfall_bytes"] = -headroom
+        raise ConversionRefused(
+            [f"磁盘空间不足：复制一遍预计需要 {format_bytes(need)}"
+             f"（源表 {format_bytes(report['source_bytes'])} × {peak_factor:g} 峰值"
+             f" + WAL × {wal_ratio:g}），可用 {format_bytes(free)}（{source}），"
+             f"缺 {format_bytes(-headroom)}——先把空间补齐或先归档旧数据，别在事务中间撞 ENOSPC"],
+            details=report)
+    report["verdict"] = "ok"
+    report["message"] = (f"空间充足：需要 {format_bytes(need)}，可用 {format_bytes(free)}"
+                         f"（{source}），余 {format_bytes(headroom)}")
+    return report
 
 def plan_conversion(session: Any, table: str = PARTITION_TABLE, *,
                     months: int = 3, now: datetime | None = None) -> dict[str, Any]:
