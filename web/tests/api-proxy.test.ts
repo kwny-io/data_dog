@@ -382,3 +382,39 @@ describe("proxy — 可信反代身份 + 用户级租户授权（A10）", () => 
     expect(spy).not.toHaveBeenCalled();
   });
 });
+
+// ------------------------------------- 防伪造：信任关闭时身份头不得提权（A10）
+
+describe("proxy — 防伪造：信任关闭时身份头不得提权（A10）", () => {
+  // 这是启用可信反代最真实的风险面：客户端能自封身份头。信任关闭时，这个头必须被
+  // **完全忽略**——既不参与选租户，也不能被转发给上游。这两条断言就是那把锁。
+  const SPOOF = "x-auth-request-user";
+  const OFF = {
+    ...BASE_ENV,
+    DD_WEB_TRUST_PROXY_AUTH: "", // 关
+    DD_WEB_USER_TENANTS: "alice:tenant-a", // 就算配了用户清单也不该生效
+  } as Record<string, string | undefined>;
+
+  it("resolveIdentity：伪造身份头不改变租户，仍是服务端租户", () => {
+    const who = resolveIdentity(new Headers({ [SPOOF]: "alice" }), resolveProxyConfig(OFF));
+    expect(who).toEqual({ ok: true, user: "", tenant: "tenant-from-server" });
+  });
+
+  it("proxyRequest：伪造身份头既不提权、也不被转发给上游", async () => {
+    let seen: Headers | undefined;
+    vi.stubGlobal("fetch", async (_url: string, init: RequestInit) => {
+      seen = new Headers(init.headers);
+      return new Response("{}", { status: 200 });
+    });
+    const req = new Request("http://console.local/api/dd/v1/candidates", {
+      headers: { [SPOOF]: "alice" },
+    });
+    const res = await proxyRequest(req, ["v1", "candidates"], {
+      ...OFF,
+      DD_WEB_ALLOW_ANONYMOUS: "1",
+    });
+    expect(res.status).toBe(200);
+    expect(seen?.get("x-tenant-id")).toBe("tenant-from-server");
+    expect(seen?.get(SPOOF)).toBeNull();
+  });
+});
