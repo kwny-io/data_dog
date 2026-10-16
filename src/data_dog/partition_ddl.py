@@ -36,6 +36,8 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import contextmanager
+from datetime import datetime, timezone
+from typing import Any
 
 from . import settings
 from .state import Lease, default_owner, get_state_store
@@ -60,6 +62,34 @@ def acquire_ddl_lease() -> Lease | None:
 def ddl_lease_holder() -> str:
     """当前持有者标识（无主/已过期返回空串）——用于报告"谁在做结构变更"。"""
     return _new_lease().holder()
+
+
+
+def lease_age_seconds() -> float | None:
+    """租约从上次获取/续期算起的秒数；无主/已过期 → None。
+
+    记录里只有 owner/expires_at，而 expires_at = 获取时刻 + TTL，所以能从当前配置反推；
+    **不改共享状态格式**，免得滚动发布中的新旧副本互相误读。若持有者用的是不同 TTL，
+    算出的 age 会偏——它只喂告警、不参与互斥判定，可接受。
+    """
+    rec = _new_lease().state.get(PARTITION_DDL_LEASE_KEY)
+    if not isinstance(rec, dict) or not rec.get("owner"):
+        return None
+    try:
+        expires_at = float(rec.get("expires_at", 0) or 0)
+    except (TypeError, ValueError):
+        return None
+    renewed_at = expires_at - settings.partition_ddl_lease_ttl_s()
+    return max(0.0, datetime.now(timezone.utc).timestamp() - renewed_at)
+
+
+def record_skip(reason: str, sink: Any) -> None:
+    """把这轮被让路记一笔到指定 counter（例：metrics.partition_ddl_skipped_total）。
+
+    counter 当参数传进来而不 import metrics：存储层不得 import core（分层断言），
+    而且 CLI 没有 Prometheus registry。
+    """
+    sink.labels(reason=reason).inc()
 
 
 @contextmanager
@@ -94,4 +124,6 @@ __all__ = [
     "acquire_ddl_lease",
     "ddl_guard",
     "ddl_lease_holder",
+    "lease_age_seconds",
+    "record_skip",
 ]

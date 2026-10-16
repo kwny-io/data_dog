@@ -137,6 +137,34 @@ partition_end_timestamp_seconds = Gauge(
     registry=registry,
 )
 
+# 分区**结构变更（DDL）**互斥的可见性（A9）：租约/咨询锁让"谁在动结构"可查，但它们此前
+# 在 Prometheus 里**完全不存在**——"今天补分区被跳过"只能翻日志，"租约被一个死进程占了"
+# 更是看不见。这两条把静默失败补上信号（本仓纪律：每条静默失败都要有信号 + 告警）。
+#
+# 为什么 skip 用 counter：被跳过是**事件**（该发生而没发生），累计计数才能 answer "一直有人挡着"。
+partition_ddl_skipped_total = Counter(
+    "data_dog_partition_ddl_skipped_total",
+    "分区结构变更本轮被跳过/让路的次数（label reason：lease_held=租约在别人手里、"
+    "convert_busy=库层咨询锁显示另一个转换在跑）",
+    labelnames=("reason",),
+    registry=registry,
+)
+
+# 为什么租约状态用**两个** Gauge 而不是一个带 owner 标签的：owner 是 host:pid，
+# 基数会随滚动发布无限增长——正是本仓对 LLM 额度刻意避开的标签爆炸。
+# held 是布尔（'此刻有没有人持有'），age 是"从上次获取算起多久"（由 expires_at - TTL 推出，
+# 不需要改共享状态格式）。二者都在 /metrics **每次抓取**时重算，Gauge 陈旧问题见上文。
+partition_ddl_lease_held = Gauge(
+    "data_dog_partition_ddl_lease_held",
+    "分区 DDL 单持有者租约此刻是否被持有（1=有主，0=无主/已过期）",
+    registry=registry,
+)
+partition_ddl_lease_age_seconds = Gauge(
+    "data_dog_partition_ddl_lease_age_seconds",
+    "分区 DDL 租约从上次获取/续期算起的秒数（无主时不上报）",
+    registry=registry,
+)
+
 # 单次异步调查的执行耗时（从 worker 领取到落终态）
 investigation_job_duration_seconds = Histogram(
     "data_dog_investigation_job_duration_seconds",

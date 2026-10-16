@@ -263,3 +263,92 @@ def test_startup_ensure_releases_the_lease_even_when_ddl_raises(monkeypatch, cle
     with pytest.raises(RuntimeError):
         pm.ensure_if_enabled()
     assert ddl_lease_holder() == "", "异常路径没释放租约"
+
+
+# --------------------------------------------- 分区 DDL 可见性（③：指标 + 告警）
+
+def _download_metrics() -> str:
+    """直接把注册表渲染成文本——比起 /metrics 端点轻，且测的是同一份 registry。"""
+    from prometheus_client import generate_latest
+
+    from data_dog.core import metrics
+
+    return generate_latest(metrics.registry).decode()
+
+
+def _gauge_value(name: str) -> float:
+    line = next(ln for ln in _download_metrics().splitlines() if ln.startswith(name + " "))
+    return float(line.rsplit(" ", 1)[1])
+
+
+def test_report_lease_is_zero_when_nobody_holds_it(clean_state):
+    """无主 → held=0、age=0（无标签 Gauge 不支持 remove；0 语义准确：没有主=年龄 0）。"""
+    assert pm.report_lease() is None
+    assert _gauge_value("data_dog_partition_ddl_lease_held") == 0
+    assert _gauge_value("data_dog_partition_ddl_lease_age_seconds") == 0
+
+
+def test_report_lease_exposes_hold_age_while_held(clean_state):
+    """被持有 → held=1 且 age 精确等于「now - 上次续期」。"""
+    from data_dog.partition_ddl import PARTITION_DDL_LEASE_KEY
+    from data_dog.state import get_state_store
+
+    ttl = pm.settings.partition_ddl_lease_ttl_s()
+    now = datetime.now(timezone.utc).timestamp()
+    # 直接写一条「110 秒前被获取」的记录：比真实 Lease 更可控（不受构造参数/TTL 影响）。
+    rec = {"owner": "replica-1:99", "expires_at": now - 110.0 + ttl}
+    get_state_store().mutate(PARTITION_DDL_LEASE_KEY, lambda _cur: (rec, None))
+
+    age = pm.report_lease()
+    assert age == pytest.approx(110.0, abs=1.0)
+    assert _gauge_value("data_dog_partition_ddl_lease_held") == 1
+    assert _gauge_value("data_dog_partition_ddl_lease_age_seconds") == pytest.approx(age, abs=0.01)
+
+
+def test_startup_skip_is_counted(monkeypatch, clean_state):
+    """被别的副本挡住 → 启动跳过要**计数**（“今天补分区被跳过了”必须能被 Prometheus 看见）。"""
+    from data_dog.core import metrics
+
+    before = metrics.partition_ddl_skipped_total.labels(reason="lease_held")._value.get()
+    monkeypatch.setenv("DD_PARTITION_AUTO_ENSURE", "1")
+    monkeypatch.setattr(pm, "_log", _RecordingLog())
+    monkeypatch.setattr(pm, "session_scope", _boom_scope)
+    holder = _hold_ddl_lease()
+    try:
+        assert pm.ensure_if_enabled() == []
+    finally:
+        holder.release()
+    after = metrics.partition_ddl_skipped_total.labels(reason="lease_held")._value.get()
+    assert after - before == 1
+
+
+def _lease_held_in(body: str) -> float:
+    """从 /metrics 文本取 held 的值——float 解析，避免 "1" vs "1.0" 这种脆弱断言。"""
+    line = next((ln for ln in body.splitlines()
+                 if ln.startswith("data_dog_partition_ddl_lease_held ")), None)
+    assert line is not None, "租约指标根本没出现在 /metrics 里"
+    return float(line.rsplit(" ", 1)[1])
+
+
+def test_metrics_scrape_reports_lease_state(clean_state, tmp_path, monkeypatch):
+    """`/metrics` 每次抓取都刷新租约状态——租约在 Prometheus 里不该缺席。"""
+    from fastapi.testclient import TestClient
+
+    from data_dog.service.app import create_app
+    from data_dog.state import default_owner
+    from data_dog.storage.db import init_db, reset_engine
+
+    url = f"sqlite:///{(tmp_path / 'lease_metrics.db').as_posix()}"
+    monkeypatch.setenv("DD_DATABASE_URL", url)
+    reset_engine()
+    init_db(url)
+    # 用**本进程的 owner**抢：`holder()` 要求 owner 非空且未过期，与实现里的默认 owner 一致。
+    holder = _hold_ddl_lease(owner=default_owner())
+    try:
+        with TestClient(create_app()) as c:
+            body = c.get("/metrics").text
+    finally:
+        holder.release()
+        reset_engine()
+    assert _lease_held_in(body) == 1.0, "抓取 /metrics 没上报租约被持"
+    assert any(ln.startswith("data_dog_partition_ddl_lease_age_seconds ") for ln in body.splitlines())

@@ -336,6 +336,29 @@ python scripts/partition_telemetry.py --check              # 应为"分区表，
 多副本必须让 `DD_STATE_BACKEND` 落在 postgres/redis——`data-dog config check` 对"自动补分区 +
 memory"直接报警。
 
+### 8.4.1 互斥的可见性：租约/跳过在 Prometheus 里（③）
+
+互斥（§8.4 的租约）此前让"谁在动结构"**可查**，但那是在共享状态与日志里——Prometheus
+侧完全不存在："今天补分区被跳过了"只能翻日志，"租约被一个死进程占了"更是看不见。现在补齐：
+
+| 指标 | 类型 | 口径 | 在哪刷新 |
+|---|---|---|---|
+| `data_dog_partition_ddl_skipped_total{reason}` | counter | 本轮被让路的次数；`reason` ∈ `{lease_held, convert_busy}` | 启动路径 + CLI |
+| `data_dog_partition_ddl_lease_held` | gauge | 此刻租约是否有主（1/0） | `/metrics` 每次抓取 |
+| `data_dog_partition_ddl_lease_age_seconds` | gauge | 从上次获取/续期算起的秒数（无主 = 0） | 同上 |
+
+两条对应告警（见 `docs/slo.md` §9、helm `prometheusrule.yaml` 的 `data-dog.storage` 组）：
+`DataDogPartitionDdlSkipped`（24h 内有跳过）与 `DataDogPartitionDdlLeaseStuck`（持有 > 30 分钟）。
+两者都在 `partition.enabled=true` 时才渲染，与有效期那两条同一开关。
+
+**为什么租约状态用两个 Gauge 而不是给 owner 打标签**：owner 是 `host:pid`，基数会随滚动发布
+无限增长——这正是本仓对 LLM 额度刻意避开的标签爆炸。"被谁挡的"要看日志/共享状态，不进指标。
+**为什么 age 从 `expires_at - TTL` 反推**：不改共享状态格式（改了会让滚动发布中的新旧副本互读
+出错）；副作用是"改过 TTL 但没重启"的持有者算出的 age 会偏，而它只喂告警、不参与互斥判定。
+
+**为什么无主时 age 写 0 而不是删样本**：prometheus_client 的**无标签** Gauge 不支持
+`remove()`（实测 `ValueError`）；0 的语义在这里也准确（没有主 = 年龄 0），而阈值是 30 分钟，不会误报。
+
 ### 8.5 诚实边界
 
 - **只在 PostgreSQL 上有效**；SQLite（测试/单机演示）走原路径。非 PG 上执行维护 CLI 会明确

@@ -210,6 +210,8 @@ loadgen 客户端实测能推 **997 req/s**，故客户端也不是瓶颈）。
 | `DataDogOutboxBacklog` | `max(data_dog_db_rows{table="outbox_pending"})` | > `prometheusRule.outboxBacklogThreshold`（默认 100）持续 15m | warning | 告警产生了但没送出去；与 `DataDogAuditWriteFailed` 互补（一个写不进、一个送不出） |
 | `DataDogEvidenceResolveFailed` | `increase(data_dog_evidence_resolve_total{outcome="execution_failed"}[15m])` | > 0 | warning | 数据源没配好/不可达（如 rawlog 未配置）。此前只表现为"用户打不开原始日志" |
 | `DataDogEvidenceDeniedSpike` | `increase(data_dog_evidence_resolve_total{outcome="denied"}[15m])` | > `prometheusRule.evidenceDeniedThreshold`（默认 20） | warning | 正常应为 0；涨起来=越权探测信号。定位靠审计（指标刻意不带租户标签） |
+| `DataDogPartitionDdlSkipped` | `increase(data_dog_partition_ddl_skipped_total[24h])` | > 0 | warning | A9 互斥：滚动发布时的少量 `lease_held` 属预期；**持续**出现说明持有者卡在长 DDL 或崩了没释放。`convert_busy` = 库层咨询锁被另一个转换占着（有意**不排队**，见 storage.md §8.3.1） |
+| `DataDogPartitionDdlLeaseStuck` | `max(data_dog_partition_ddl_lease_age_seconds)` | > 1800s（2× 默认 TTL）持续 5m | warning | 租约被一个进程占着超过 30 分钟：要么长 DDL 卡住、要么持有者死了但租约还没过期——这期间**没人会补分区**。0（无主）不会触发 |
 
 **诚实边界**：
 

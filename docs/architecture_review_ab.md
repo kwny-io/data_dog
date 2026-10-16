@@ -150,6 +150,8 @@ CLI 报 `skipped=lease_held` + `lease_owner` + **退出码 3**（不是 0 成功
 `pg_try_advisory_xact_lock`（`lock_wait=False` 默认）：抢不到就 `ConversionBusy` + `skipped=convert_busy` + 退出码 3，
 **不排队**——会话上的 `statement_timeout`（15s）会把"排队"变成看不懂的 `QueryCanceled`（迁移入口仍排队，因为迁移不可分割）。
 
+**互斥的可见性（本轮）**：租约与「跳过」此前只在共享状态/日志里，Prometheus 侧完全缺席。补三条：`data_dog_partition_ddl_skipped_total{reason}`（区别 lease_held / convert_busy）、`..._lease_held`（0/1）与 `..._lease_age_seconds`（从上次续期算起），后两条在 `/metrics` 每次抓取时重算；两条告警 `DataDogPartitionDdlSkipped`（24h 内有跳过）与 `DataDogPartitionDdlLeaseStuck`（持有 > 2×TTL）落在 helm `data-dog.storage` 组、仅在 `partition.enabled=true` 时渲染。**刻意不给 owner 打标签**：是 host:pid，基数随滚动发布无限增长（同 LLM 额度那条纪律）；「被谁挡的」看日志/共享状态。**age 从 `expires_at - TTL` 反推**，不改共享状态格式。
+
 ### A10 控制台收敛 + 多租户身份（已落地：收敛 + 租户选择 + 用户级授权最小步；OIDC 为边界）
 
 **已落地（本轮）**：

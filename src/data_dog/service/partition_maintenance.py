@@ -22,9 +22,9 @@ from __future__ import annotations
 
 import logging
 
-from .. import settings
+from .. import partition_ddl, settings
 from ..core import metrics
-from ..partition_ddl import ddl_guard
+from ..partition_ddl import ddl_guard, lease_age_seconds
 from ..storage import partitioning
 from ..storage.db import session_scope
 
@@ -48,6 +48,25 @@ def report_horizon(session, table: str = partitioning.PARTITION_TABLE) -> float 
     return end
 
 
+def report_lease() -> float | None:
+    """上报分区 DDL 租约的持有状态：`lease_held`（0/1）与 `lease_age_seconds`。
+
+    在 `/metrics` **每次抓取**时调用（与 `report_horizon` 同一处）。为什么需要它：租约让
+    "谁在动结构"可查，但此前在 Prometheus 里完全不存在——"今天补分区被跳过"只能翻日志，
+    "一个死进程占着租约、15 分钟后才被别人接管"更是完全看不见。返回持有年龄秒数（无主 → None）。
+    """
+    age = lease_age_seconds()
+    metrics.partition_ddl_lease_held.set(1 if age is not None else 0)
+    if age is not None:
+        metrics.partition_ddl_lease_age_seconds.set(age)
+    else:
+        # 无主时写 0 而不是删样本：prometheus_client 的**无标签** Gauge 不支持 remove()
+        # （实测 ValueError）。0 在这里语义也准确——"没有主"就是年龄 0；
+        # 而 age 告警阈值是 2×TTL（默认 30 分钟），0 永远不会误触发。
+        metrics.partition_ddl_lease_age_seconds.set(0)
+    return age
+
+
 def ensure_if_enabled() -> list[str]:
     """启动补齐未来分区，返回本次涉及的分区名；未开启 / 非分区表 → []。
 
@@ -63,6 +82,9 @@ def ensure_if_enabled() -> list[str]:
     # （或马上会），都去抢表锁只会白干、还让日志变吵。
     with ddl_guard() as blocker:
         if blocker is not None:
+            # 静默失败要配信号（本仓纪律）：跳过是事件，计入 counter 并上报租约状态。
+            partition_ddl.record_skip("lease_held", metrics.partition_ddl_skipped_total)
+            report_lease()
             _log.info("分区结构变更由 %s 持有，本次启动跳过自动补齐", blocker)
             return []
         with session_scope(system=True) as s:

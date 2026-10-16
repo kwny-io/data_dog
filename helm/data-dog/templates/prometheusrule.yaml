@@ -273,5 +273,32 @@ spec:
               该规则组只在 partition.enabled=true 时渲染；此时没有样本说明
               /metrics 没刷新到（抓取失败？）或 telemetry_events 并不是分区表。
               两种都会让"有效期不足"那条变成死规则。
+        - alert: DataDogPartitionDdlSkipped
+          # 结构变更**被跳过**是可预期的（滚动发布时 N 个副本只有一个能抢到租约），
+          # 但"一直在被跳过"就说明那个持有者卡住了/崩了：分区该补而没补，只是没人说。
+          for: 0m
+          expr: increase(data_dog_partition_ddl_skipped_total[24h]) > 0
+          labels:
+            severity: warning
+          annotations:
+            summary: "分区结构变更 24 小时内出现过跳过（reason 见标签）"
+            description: >-
+              滚动发布期间的少量 lease_held 属预期；持续出现要查持有者是否卡在长 DDL /
+              进程崩了但租约未过期。reason=convert_busy 表示库层咨询锁被另一个转换占着，
+              本轮**没有排队**（有意：排队会变成 statement_timeout 后的 QueryCanceled）。
+              要看"被谁挡的"得看日志/共享状态（Prometheus 不带 owner 标签，避免基数爆炸）。
+        - alert: DataDogPartitionDdlLeaseStuck
+          # 默认 TTL 900s。持有超过 30 分钟 = 要么长 DDL 卡住，要么持有者死了但租约还没到期
+          # （崩溃到接管之间至多空窗一个 TTL）。0（无主）不会触发这条。
+          for: 5m
+          expr: max(data_dog_partition_ddl_lease_age_seconds) > 1800
+          labels:
+            severity: warning
+          annotations:
+            summary: "分区 DDL 租约被持有超过 30 分钟"
+            description: >-
+              转换含整表拷贝，慢是可能的；但"远超 TTL 还在持有"通常意味着持有者卡在
+              锁等待/网络，或进程崩了。此时别的副本/定时任务都**不会**补分区。
+              先看共享状态里的 owner，再决定是等它跑完还是做人工处置。
     {{- end }}
 {{- end }}

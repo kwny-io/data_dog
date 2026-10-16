@@ -44,8 +44,9 @@ import sys
 from datetime import datetime, timezone
 from typing import Any
 
+from data_dog.core import metrics
 from data_dog.core.console import ensure_utf8_console
-from data_dog.partition_ddl import ddl_guard
+from data_dog.partition_ddl import ddl_guard, record_skip
 
 
 def parse_cutoff(raw: str) -> float:
@@ -114,6 +115,7 @@ def main(argv: list[str] | None = None) -> int:
         out["refused"]["blockers"] = list(exc.blockers)
     except partitioning.ConversionBusy as exc:
         # 库层咨询锁被别人持有：这轮不该我干（3），不是错误。
+        record_skip("convert_busy", metrics.partition_ddl_skipped_total)
         out["skipped"] = "convert_busy"
         out["busy"] = str(exc)
 
@@ -125,6 +127,7 @@ def main(argv: list[str] | None = None) -> int:
         exit_code = 0
 
     if lease_blocker:
+        record_skip("lease_held", metrics.partition_ddl_skipped_total)
         out["skipped"] = "lease_held"
         out["lease_owner"] = lease_blocker
 

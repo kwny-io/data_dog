@@ -18,6 +18,7 @@ from ...storage import models as M
 from ...storage import repository as repo
 from ...storage.db import session_scope
 from ..partition_maintenance import report_horizon as _report_partition_horizon
+from ..partition_maintenance import report_lease as _report_partition_lease
 from ..runtime import (
     _STARTED_AT,
     _VERSION,
@@ -122,6 +123,8 @@ def metrics_endpoint() -> Response:
     metrics.auth_enabled.set(1 if settings.api_key() else 0)
     metrics.resolver_ready.set(1 if _state.resolver is not None else 0)
     metrics.uptime_seconds.set(round(time.time() - _STARTED_AT, 1))
+    # 分区 DDL 租约状态：共享状态读取，**不依赖 DB**，所以放在库内计数那个 try 之外。
+    _report_partition_lease()
     _runner, _src, _thr, _stop = _stream_handle()
     metrics.stream_up.set(1 if (_thr is not None and _thr.is_alive()) else 0)
     # 异步调查：队列深度（共享队列里的待办数）+ 各状态 job 数
