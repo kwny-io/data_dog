@@ -54,7 +54,8 @@ def delete_in_batches(session: Session, table: Any, cond: Any, *,
             stmt = delete(table).where(pk[0].in_([k[0] for k in keys]))
         else:
             stmt = delete(table).where(tuple_(*pk).in_(keys))
-        deleted += int(session.execute(stmt).rowcount or 0)
+        res = session.execute(stmt)
+        deleted += int(getattr(res, "rowcount", 0) or 0)   # CursorResult 有 rowcount，Result 的存根没有
         batches += 1
     return deleted, batches
 
@@ -153,7 +154,8 @@ def _upsert_stmt(model: Any, dialect: str) -> Any:
     if dialect == "postgresql":
         from sqlalchemy.dialects.postgresql import insert as _insert
     elif dialect == "sqlite":
-        from sqlalchemy.dialects.sqlite import insert as _insert
+        # 两种方言的 insert 变体是同名不同类型：mypy 会判"不兼容导入"，运行时无碍。
+        from sqlalchemy.dialects.sqlite import insert as _insert  # type: ignore[assignment]
     else:
         return None
 

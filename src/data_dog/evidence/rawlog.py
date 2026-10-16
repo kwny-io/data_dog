@@ -114,11 +114,13 @@ def _open_beneath(root: Path, rel: Path):
     Returns: (已打开的文件对象 | None, 完整字节数 | None)；None 表示"这条不存在"。
     """
     parts = rel.parts
+    # POSIX 专有常量：Windows 上没有，用 getattr 取值（行为不变，同时让 Windows 上的 mypy 说得通）
+    o_dir, o_nofollow = getattr(os, "O_DIRECTORY", 0), getattr(os, "O_NOFOLLOW", 0)
     posix_walk = (hasattr(os, "O_NOFOLLOW") and hasattr(os, "O_DIRECTORY")
                   and os.open in getattr(os, "supports_dir_fd", set()))
     if posix_walk:
         try:
-            dir_fd = os.open(str(root), os.O_RDONLY | os.O_DIRECTORY)
+            dir_fd = os.open(str(root), os.O_RDONLY | o_dir)
         except FileNotFoundError:
             return None, None
         except OSError as e:
@@ -126,7 +128,7 @@ def _open_beneath(root: Path, rel: Path):
         try:
             for part in parts[:-1]:
                 try:
-                    nxt = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                    nxt = os.open(part, os.O_RDONLY | o_dir | o_nofollow,
                                   dir_fd=dir_fd)
                 except FileNotFoundError:
                     return None, None
@@ -135,7 +137,7 @@ def _open_beneath(root: Path, rel: Path):
                 os.close(dir_fd)
                 dir_fd = nxt
             try:
-                file_fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW, dir_fd=dir_fd)
+                file_fd = os.open(parts[-1], os.O_RDONLY | o_nofollow, dir_fd=dir_fd)
             except FileNotFoundError:
                 return None, None
             except OSError as e:
