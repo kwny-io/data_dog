@@ -64,3 +64,18 @@ pytest tests/test_e2e.py -q                 # 5 项
 | §19.3 真实回放验收路径（文档→…→SaaS→反馈） | ✅ 本地确定性回放贯通 |
 | §6.5 反馈闭环 | 🟡 回灌本身已实现于服务侧（`service/routes/feedback.py` false_positive→rejected / repaired→closed；`/v1/eval/feedback` 评估闭环）；但**回放链路里的假 SaaS 只记录、不触发回灌**——“接进回放”待做 |
 | 真实脱敏 Fixture 回放（§19.3 要求"只用合成数据不能上线验收"） | ❌ 待真实硬件 Fixture |
+---
+
+## 6. 回放里的替身 ↔ 它们对应的真实现
+
+`replay_demo` 为了让链路**离线、确定、可复现**，把外部依赖换成同接口的假实现。「桩」只说明**那个外部依赖**是假的，不说明周围功能是假的——P1/P2/P3 都是真代码路径。按「真实现是否存在」分三类：
+
+| 类别 | 回放里的替身 | 真实现 | 含义 |
+|---|---|---|---|
+| A 只是替身，真实现已在 | `_CandidateAwareProvider`（`replay.py:76-111`，裁决是确定性桩） | `providers/client.py:112 class Provider`（OpenAI SDK，`:134` 真建 client）；`providers/registry.py:20-45` 三个真 base_url（deepseek / openai / zhipu） | LLM 接入层**没有缺**，缺的只是回放没走它（本机 key 余额为零，无法实跑） |
+| A 只是替身，真实现已在 | `SaaSTestAdapter`（`alerting/saas.py:28`，只 append） | **到人**的通知层是真的：`alerting/notifiers.py:1-25` webhook / 邮件 / 飞书·钉钉，SSRF 走 `data_plane/fetch` 校验、默认失败关闭、凭据走环境变量 | 「发给人」这最后一公里有真实现 |
+| B 真实现确实没有 | 同上（SaaS 适配器） | **无**：`service/alerting.py:24` 原文「投递目标仍是 `SaaSTestAdapter`——项目里**没有真实 SaaS**」，生产装配 `service/runtime.py:75` 用的也是它 | 告警事件的**投递 / 回执 / 反馈拉取**没有真实对接 |
+| B 真实现确实没有 | 6 个合成 Fixture（`operator_factory/fixtures/*.json`） | **采集 + 脱敏真实设备日志** | 这是**数据活**，不是写代码 |
+| C 已实现、只是没接进回放 | `saas.py:53` 只 append 的人工反馈 | `service/routes/feedback.py:22-72`（`false_positive→rejected` / `repaired→closed`）、`:86-102 /v1/eval/feedback`、`eval_feedback.py:47 classify` | 是「接线」，不是从零做 |
+
+**所以别把「e2e passed」读成「生产就绪」**。要真做的最小清单：① 真实 SaaS 适配器（或明确以 `notifiers` + 回执落库**替代** SaaS 平台）；② 把 `/v1/feedback` + `eval_feedback` 接进回放/评估，让「反馈→状态机/评估」变成可断言的闭环；③ 采集并脱敏真实硬件 Fixture。**LLM provider 不用重做。**
