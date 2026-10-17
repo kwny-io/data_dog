@@ -74,7 +74,7 @@ pytest tests/test_e2e.py -q                 # 5 项
 |---|---|---|---|
 | A 只是替身，真实现已在 | `_CandidateAwareProvider`（`replay.py:76-111`，裁决是确定性桩） | `providers/client.py:112 class Provider`（OpenAI SDK，`:134` 真建 client）；`providers/registry.py:20-45` 三个真 base_url（deepseek / openai / zhipu） | LLM 接入层**没有缺**，缺的只是回放没走它（本机 key 余额为零，无法实跑） |
 | A 只是替身，真实现已在 | `SaaSTestAdapter`（`alerting/saas.py:28`，只 append） | **到人**的通知层是真的：`alerting/notifiers.py:1-25` webhook / 邮件 / 飞书·钉钉，SSRF 走 `data_plane/fetch` 校验、默认失败关闭、凭据走环境变量 | 「发给人」这最后一公里有真实现 |
-| B 真实现确实没有 | 同上（SaaS 适配器） | **无**：`service/alerting.py:24` 原文「投递目标仍是 `SaaSTestAdapter`——项目里**没有真实 SaaS**」，生产装配 `service/runtime.py:75` 用的也是它 | 告警事件的**投递 / 回执 / 反馈拉取**没有真实对接 |
+| B 真实现确实没有 | 同上（SaaS 适配器） | **无**：`service/alerting.py:24` 原文「投递目标仍是 `SaaSTestAdapter`——项目里**没有真实 SaaS**」，生产装配 `service/runtime.py:75` 用的也是它 | 告警事件的**投递 / 回执 / 反馈拉取**没有真实对接。注：**到人**的通知 / 值班 / 升级栈已实现并有测试（`alerting/notifiers.py:125`、`alerting/escalation.py`、`service/routes/notify.py:19/36/56/92`；`tests/test_notifiers*.py` + `tests/test_escalation.py` → 40 passed），只是 `DD_NOTIFY_ENABLED` 默认关（`settings.py:1266`）——所以这更像一个**决策**（接平台客户端，还是正式以 notifiers + 回执台账替代）|
 | B 真实现确实没有 | 6 个合成 Fixture（`operator_factory/fixtures/*.json`） | **采集 + 脱敏真实设备日志** | 这是**数据活**，不是写代码 |
 | C 已实现、只是没接进回放 | `saas.py:53` 只 append 的人工反馈 | `service/routes/feedback.py:22-72`（`false_positive→rejected` / `repaired→closed`）、`:86-102 /v1/eval/feedback`、`eval_feedback.py:47 classify` | 是「接线」，不是从零做 |
 

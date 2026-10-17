@@ -15,7 +15,7 @@
 | 告警生命周期 | `alerting/lifecycle.py` | `AlertLifecycle`；**已含 `escalated` 状态** |
 | 投递适配器 | `alerting/saas.py` | `SaaSTestAdapter.deliver` —— **测试替身（mock）** |
 
-**缺**：真实 notifier（webhook/邮件/IM）；值班表；升级 SLA 计时器；`/v1/outbox` 只查询不投递。
+**（2026-10-17 复核：本节所列缺口均已落地）** 真实 notifier（webhook / 邮件 / 飞书·钉钉，`alerting/notifiers.py:125` 协议，:177 Webhook / :192 IM / :216 Email / :250 Registry）、值班表（`alerting/oncall.py:104 current_oncall` + `storage/models.py:415 oncall_rota`，`tenant_data.py:49` 已列入）、升级 SLA 计时器（`alerting/escalation.py`，含单持有者租约 :303）、API（`service/routes/notify.py:19 /v1/alerts/{id}/ack`、`:36/:56 /v1/oncall`、`:92 /v1/notifications`；`routes/__init__.py:22` 注册）、主链调用（`service/runtime.py:793 report_alert`、`:805 notify_alert`；`service/app.py:107` 启动 sweeper）都已实现；测试 `tests/test_notifiers.py tests/test_notifiers_paths.py tests/test_escalation.py` → **40 passed**。**但它默认关**：`src/data_dog/settings.py:1266` `DD_NOTIFY_ENABLED` default=False，关时 `service/alerting.py:206-207` 返回 `{"dispatched":False,"reason":"disabled"}`，所以默认告警流仍**止于 `SaaSTestAdapter`**。真正还缺的只剩**到 SaaS 平台的投递 / 回执 / 反馈拉取**——那是一个决策（接真实平台客户端，还是正式以 notifiers + 回执台账为交付物并把它默认打开）。另：`GET /v1/outbox`（`service/routes/queries.py:96-104`，只列行）**仍然只查询不投递**——投递是 `AlertReportingService.process` **内联**做的（`service/alerting.py:166-178` `repo.upsert_outbox(...)` 后直接 `adapter.deliver(...)`，再由 `alerting/outbox.py:160-180` `AlertOutbox.deliver` 重试到成功或死信），**没有单独的「重投」端点**。
 
 ## 3. 设计
 
