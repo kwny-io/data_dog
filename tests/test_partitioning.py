@@ -20,7 +20,7 @@ import pytest
 
 from data_dog import retention
 from data_dog.core import metrics
-from data_dog.storage import partitioning
+from data_dog.storage import migrations, partitioning
 from data_dog.storage.db import init_db, reset_engine
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -555,12 +555,16 @@ def test_real_table_writes_land_in_partition_and_retention_drops(monkeypatch):
 
     from data_dog.storage import migrations
     from data_dog.storage import repository as R
-    from data_dog.storage.db import init_db, reset_engine, session_scope
+    from data_dog.storage.db import reset_engine, session_scope
     from data_dog.storage.models import day_of
 
     monkeypatch.setenv("DD_DATABASE_URL", _PG_URL)
     reset_engine()
-    init_db(_PG_URL)                       # alembic upgrade head（含日桶迁移）
+    # 与生产启动路径同源：走 alembic 版本化迁移（`service/app.py` 用的就是这个）。
+    # 不能换成 `init_db()`：它是 `create_all`，建表但不写 `alembic_version`，
+    # 于是库里出现"表都在、版本表空"的楞子，同一 session 里 `test_state_store`
+    # 的 PG fixture 再 `upgrade_head()` 就是 DuplicateTable。
+    migrations.upgrade_head(_PG_URL)
     assert migrations.current_revision(_PG_URL)
 
     with session_scope(system=True) as s:
@@ -1018,7 +1022,21 @@ def test_recover_script_dry_run_executes_nothing(url, clean_state, monkeypatch, 
 @pytest.mark.postgres
 @pytest.mark.skipif(not _PG_URL, reason="未设 DD_TEST_PG_URL，跳过 PG 恢复 CLI 集成测试")
 def test_recover_script_end_to_end_on_real_pg():
-    """真 PG：转换后跑恢复 CLI，表回到普通表且主键/行数不变。"""
+    """真 PG：转换后跑恢复 CLI，表回到普通表且主键/行数不变。
+
+    **为什么用改名舞而不是"删了重建"**：`scripts/unpartition_telemetry.py` 硬编码
+    `partitioning.PARTITION_TABLE`，所以这条 e2e 必须用真实表名 `telemetry_events`。
+    旧写法先 `DROP TABLE telemetry_events`，测完 finally 里又 DROP 一次就不管了——
+    结果库里 **alembic 停在 head，但表没了**：
+
+    - 同一套 PG 跑第二遍，`test_real_table_writes_land_in_partition_and_retention_drops`
+      报 `ConversionRefused(['表不存在：telemetry_events'])`（`upgrade_head` 在已迁移库上是
+      no-op，补不回被删的表）；
+    - 本地跑完 `make pg-test` 的库对服务启动是坏的（迁移说 head，查询报 relation 不存在）。
+
+    现在：真表改名暂存 → 真名下建探针表 → 跑 e2e → finally 删探针、把真表**改回来**。
+    破坏只发生在临时名上，还原是改名而不是重建（同一个对象，行/索引/策略都跟着回来）。
+    """
     import subprocess
     import sys
 
@@ -1031,8 +1049,26 @@ def test_recover_script_end_to_end_on_real_pg():
     day = day_of(datetime(2026, 11, 15, tzinfo=timezone.utc).timestamp())
     env = dict(os.environ, DD_DATABASE_URL=_PG_URL)
     eng = create_engine(_PG_URL, future=True)
+
+    def _reset_to_head() -> None:
+        """把库重置为"刚迁到 head"——本用例独占这个状态。
+
+        为什么必须重置而不是就地改名：这条用例要把 `telemetry_events` 换成 4 列探针表。
+        先试过改名暂存，但改名**不会**改名下的索引/约束（`pk_telemetry_events` 是 schema
+        级唯一的）→ `DuplicateTable: relation "pk_telemetry_events" already exists`；
+        换 schema 暂存又撞到旧跑残留的分区（`telemetry_events_202611 already exists`）。
+        直接重建 public schema 既没有残留，也让本用例的**首尾状态与 CI 每个 job 完全一致**：
+        之前它把表删了不还，于是全量跑第二遍必红（`ConversionRefused(['表不存在：telemetry_events'])`），
+        本地跑完 `make pg-test` 的库对服务启动也是坏的。
+        """
+        with eng.begin() as c:
+            c.execute(text("DROP SCHEMA IF EXISTS public CASCADE"))
+            c.execute(text("CREATE SCHEMA public"))
+        migrations.upgrade_head(_PG_URL)
+
+    _reset_to_head()
     with eng.begin() as c:
-        c.execute(text(f"DROP TABLE IF EXISTS {table} CASCADE"))
+        c.execute(text(f"DROP TABLE IF EXISTS {table} CASCADE"))   # 换成 4 列探针表
         c.execute(text(
             f"CREATE TABLE {table} (tenant_id varchar(80) NOT NULL, event_id varchar(80) NOT NULL, "
             "created_day bigint NOT NULL, created_at double precision NOT NULL, "
@@ -1059,8 +1095,7 @@ def test_recover_script_end_to_end_on_real_pg():
             assert pk == "PRIMARY KEY (tenant_id, event_id)", pk
             assert s.execute(text(f"SELECT count(*) FROM {table}")).scalar() == 1
     finally:
-        with eng.begin() as c:
-            c.execute(text(f"DROP TABLE IF EXISTS {table} CASCADE"))
+        _reset_to_head()          # 跑完还给下一个用例一个"刚迁到 head"的库
         eng.dispose()
 
 

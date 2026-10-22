@@ -352,6 +352,56 @@ def test_cors_enabled_when_configured(monkeypatch, tmp_path):
     reset_engine()
 
 
+def test_schema_present_detects_missing_table(tmp_path, monkeypatch):
+    """`_schema_present` 必须能发现"表没了"——版本到 head 不等于表在里面。
+
+    这条守的是 `/readyz` 的可用性：真发生过（本仓 PG 测试删了 telemetry_events 不还，
+    alembic_version 仍是 head）→ 旧 `/readyz` 报 migration.ok=true，业务查询全 500。
+    """
+    from contextlib import contextmanager
+
+    from sqlalchemy import create_engine, text
+    from sqlalchemy.orm import Session
+
+    from data_dog.service.routes import health as H
+
+    eng = create_engine(f"sqlite:///{(tmp_path / 'schema.db').as_posix()}")
+    from data_dog.storage.models import Base
+    Base.metadata.create_all(eng)
+
+    @contextmanager
+    def _scope(**_kw):
+        with Session(eng) as s:
+            yield s
+
+    monkeypatch.setattr(H, "session_scope", _scope)
+
+    out = H._schema_present()
+    assert out["ok"] is True and out["missing"] == [], out
+
+    with eng.begin() as c:
+        c.execute(text("DROP TABLE candidates"))
+    out = H._schema_present()
+    assert out["ok"] is False, "少了表还报 ok=true，等于把静默故障藏起来"
+    assert "candidates" in out["missing"], out
+
+
+def test_readyz_503_when_schema_tables_are_missing(client, monkeypatch):
+    """表缺了 → `/readyz` 必须 503（编排层摘流量），而不是带着空 schema 接客。"""
+    from data_dog.service.routes import health as H
+
+    r = client.get("/readyz")
+    assert r.status_code == 200, r.text              # 基线：全表在 → 就绪
+    assert r.json()["checks"]["schema"]["ok"] is True
+
+    monkeypatch.setattr(H, "_schema_present",
+                        lambda: {"ok": False, "missing": ["telemetry_events"], "expected": 18})
+    r = client.get("/readyz")
+    assert r.status_code == 503, r.text
+    body = r.json()
+    assert body["checks"]["schema"]["missing"] == ["telemetry_events"]
+
+
 def test_json_logging_emits_parseable_lines(capsys):
     """结构化日志必须是可解析的 JSON 行，且带 request_id。"""
     import json as _json

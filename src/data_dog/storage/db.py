@@ -12,6 +12,7 @@
 """
 from __future__ import annotations
 
+import logging
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -23,6 +24,8 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from ..paths import data_dir
+
+_log = logging.getLogger(__name__)
 
 # 当前请求的租户上下文（RLS 用）。由服务中间件/调用方设置；`session_scope`
 # 读取它并在事务内注入 PG 的 `app.tenant_id`。用 ContextVar 而非线程局部：
@@ -261,8 +264,23 @@ def session_scope(url: str | None = None, *, tenant_id: str | None = None,
 
 
 def init_db(url: str | None = None) -> None:
-    """建表（幂等）。应用启动或测试前调用。"""
+    """建表（幂等）。**仅供测试 / SQLite 快速建表**。
+
+    不要在生产或任何真 PostgreSQL 路径上用它——`create_all` 建了表却**不写
+    `alembic_version`**，于是库里出现"表都在、版本表为空"的楔子状态；之后任何人跑
+    `migrations.upgrade_head()` 都会 `DuplicateTable`（本仓库的 PG 测试腿就踩过这个：
+    `init_db()` 先建表、`test_state_store` 再 `upgrade_head` → 14 个 error）。
+    真库请走 `migrations.upgrade_head()`（生产启动路径 `service/app.py` 用的就是它）。
+    """
     from . import models  # noqa: F401  确保模型已注册到 Base.metadata
+
+    target = url or database_url()
+    if not target.startswith("sqlite"):
+        _log.warning(
+            "init_db() 正在对非 sqlite 库执行 create_all：它不会写 alembic_version，"
+            "后续 upgrade_head() 会 DuplicateTable。真库请改用 migrations.upgrade_head()",
+            extra={"url_scheme": target.split(":", 1)[0]},
+        )
     engine = get_engine(url)
     Base.metadata.create_all(engine)
 

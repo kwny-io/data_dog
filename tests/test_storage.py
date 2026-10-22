@@ -27,6 +27,60 @@ def db_url(tmp_path):
 T1 = "t1"
 T2 = "t2"
 
+def test_init_db_warns_on_non_sqlite_target(monkeypatch):
+    """`init_db()` 打非 sqlite 库必须**发出警告**（它不写 alembic_version）。
+
+    这条守的是 `db.init_db` 的边界：`create_all` 建表但不写 `alembic_version`，
+    库里于是出现"表都在、版本表为空"的楔子状态，之后任何 `upgrade_head()` 都 DuplicateTable
+    （见问题台账 §A43）。真库应走 `migrations.upgrade_head()`。
+    这里不真连库：`get_engine` 被替成不落地的假引擎，只验"警告分支有没有走到"。
+
+    **不用 `caplog`**（第一版用了，单跑绿、全量红）：全量跑时别的用例会 `setup_logging`
+    改全局 handler/propagate，caplog 就啥也拓不到——这是项目里已记录过的坑
+    （`test_partition_maintenance.py:30` 的 `_RecordingLog`）。这里照同一约定：替掉模块 logger。
+    """
+
+    class _FakeEngine:
+        def dispose(self):        # noqa: D102 - 仅占位
+            pass
+
+    def _fake_get_engine(url):    # noqa: ANN001, ARG001 - 假实现
+        return _FakeEngine()
+
+    class _RecordingLog:
+        def __init__(self):
+            self.warnings: list[str] = []
+
+        def warning(self, msg, *args, **_kw):
+            self.warnings.append(msg % args if args else msg)
+
+        def info(self, *_a, **_kw):
+            pass
+
+    calls = {"create_all": 0}
+
+    from data_dog.storage import db as dbmod
+
+    rec = _RecordingLog()
+    monkeypatch.setattr(dbmod, "_log", rec)
+    monkeypatch.setattr(dbmod, "get_engine", _fake_get_engine)
+    monkeypatch.setattr(
+        dbmod.Base.metadata, "create_all",
+        lambda *_a, **_k: calls.__setitem__("create_all", calls["create_all"] + 1))
+
+    dbmod.init_db("postgresql+psycopg://u:p@127.0.0.1:1/x")
+
+    assert any("alembic_version" in m for m in rec.warnings), (
+        "对非 sqlite 库调用 init_db() 必须警告：create_all 不写 alembic_version")
+    assert calls["create_all"] == 1, "警告之后仍应按原语义建表（不改变行为，只加可观测性）"
+
+    rec.warnings.clear()
+    dbmod.init_db("sqlite://")
+    assert not [m for m in rec.warnings if "alembic_version" in m], \
+        "sqlite 是 init_db 的正当用途，不应警告"
+
+
+
 
 def _cand(cid="cand_1"):
     return CandidateEvent(

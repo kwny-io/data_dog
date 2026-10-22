@@ -13,7 +13,7 @@
 | | 亮点 | 证据 |
 |---|---|---|
 | 🔗 | **全链闭环，一条命令跑通** | 厂商文档 →[P1]→ 算子 →[P2]→ 候选 →[Agent]→ 报告 →[P3]→ 策略门 → SaaS 反馈，`python -m data_dog.e2e.replay_demo` |
-| 🧪 | **1503 项测试，全离线确定性** | `pytest -q` → `1462 passed, 41 skipped`（113 个测试文件，fake provider，无需 API Key、不联网；41 skipped **全部是按环境条件跳过**：未设 `DD_TEST_PG_URL` 的真 PostgreSQL 用例、未设 `DD_TEST_REDIS_URL` 的真 Redis 契约用例，以及"本机已装可选依赖/平台相关"的分支——两类集成用例由 CI 的 `postgres` / `redis` 腿实测；Redis 后端的行为测试另由 `.[dev]` 里的 `fakeredis` 离线跑。这里刻意不再写逐文件条数：那些数字脚本守不住，会漂） |
+| 🧪 | **1503 项测试，全离线确定性** | `pytest -q` → `1462 passed, 41 skipped`（114 个测试文件，fake provider，无需 API Key、不联网；41 skipped **全部是按环境条件跳过**：未设 `DD_TEST_PG_URL` 的真 PostgreSQL 用例、未设 `DD_TEST_REDIS_URL` 的真 Redis 契约用例，以及"本机已装可选依赖/平台相关"的分支——两类集成用例由 CI 的 `postgres` / `redis` 腿实测；Redis 后端的行为测试另由 `.[dev]` 里的 `fakeredis` 离线跑。这里刻意不再写逐文件条数：那些数字脚本守不住，会漂） |
 | 🔒 | **热路径确定性：上报不交给模型判断** | 上不上报由**确定性策略门**（四条件决策表 + 冲突消解）决定，同输入永远同结论；模型只出现在"调查报告"那一步 |
 | 🧱 | **不拿 `eval` 执行厂商字符串** | 自建**受限 DSL**：词法 → AST 解释器，无动态执行原语、函数闭集白名单、编译期类型检查 |
 | 🔍 | **诚实抽取，区分"能证实 / 待确认"** | 官方 SDK 头文件明写电机 **90°C 触发保护** → `verified`；无出处的 75°C → `unconfirmed`，**不冒充厂商事实** |
@@ -23,7 +23,7 @@
 | 📊 | **带 ground truth 的规模化评估（双栏）** | **忠实 MuJoCo 数据集 10 万条**，分层抽跑真实 Agent：**确定性 provider** n=2000 → **准确率 0.818**（Wilson 95% CI 0.801–0.834）、normal 误报率 **0.064**；**真 LLM** n=500 → **0.708**（0.667–0.746）、normal 误报率 **0.72**（故障召回反而更高）。逐类召回一并如实报（**F4 偏置 0.43 为当前最低**）；误报根因（裁决口径把"证据不足"与"证据充分但正常"混为一谈）**已定位并改口径，效果标注为未实测**（本机 key 余额为零）；另有 7 个评估 case（含 2 个对抗性：提示注入 / 身份伪装） |
 | 🚚 | **能交付：服务 + 容器 + HTTPS** | FastAPI（liveness / readiness 分离）+ Dockerfile + compose（含 Caddy 自动申请 HTTPS）+ Makefile |
 
-**规模**：源码 158 个 Python 文件 / 30483 行，测试 113 个文件 / 26343 行；前端 `web/` 为 Next.js 15 控制台（70 个 TS/TSX 文件）；5 份正式事件 JSON Schema；36 个 `make` 命令（另有 `help`）。
+**规模**：源码 158 个 Python 文件 / 30576 行，测试 114 个文件 / 26687 行；前端 `web/` 为 Next.js 15 控制台（70 个 TS/TSX 文件）；5 份正式事件 JSON Schema；36 个 `make` 命令（另有 `help`）。
 
 ---
 
@@ -39,7 +39,7 @@
 （a）`storage/models.py` 的 docstring 一直写"PostgreSQL 为 JSONB"，但 baseline 迁移用 `sa.JSON()` → PG 上落的是 **`json`**
 （不能建 GIN 索引、不去重、取值重新解析）。现改方言变体 + 迁移 `f2a3b4c5d6e7` ALTER 既有库，并加两条 meta 测试把
 **"声明 == 事实"**钉住（逐列按 PG 方言编译检查 + 迁移清单与模型元数据逐条比对）。**已在真 PostgreSQL 16 上验证**：
-24/24 列 `jsonb`、5 条复合索引存在、downgrade→0 / 再 upgrade→24/24 可逆；PG 测试腿 **22 passed**。
+24/24 列 `jsonb`、5 条复合索引存在、downgrade→0 / 再 upgrade→24/24 可逆；PG 测试腿 `pytest -m postgres` 在**干净库**上全绿（这里只写"全绿"不写条数——条数会随用例增加而漂，`readme_counts` 守不住；现为 37 passed）。
 （b）列表查询是"租户过滤 + created_at 排序"，而索引只有单列：补 `(tenant_id, created_at[, tiebreaker])`
 （telemetry/candidates/reports/alerts/jobs）。（c）`http_request_duration_seconds` 顶格只有 2.5s，而**同步**调查要等
 一次真 LLM（10–60s）→ 那条路的 P95/P99 全落 `+Inf`、**实际不可观测**；补到 120s（异步路另有 job 直方图）。
@@ -462,7 +462,7 @@ docker compose ps
 | 端点 | 方法 | 作用 |
 |---|---|---|
 | `/healthz` | GET | 存活探针（进程活着即 200，不查依赖） |
-| `/readyz` | GET | 就绪探针（数据库不通 → 503，摘流量不重启） |
+| `/readyz` | GET | 就绪探针（数据库不通 → 503；**表缺失也 503**——版本到 head ≠ 表在库里；摘流量不重启） |
 | `/metrics` | GET | 进程内指标（全局运维口径，不分租户） |
 | `/v1/telemetry` | POST | 接入原始日志 → 候选异常 → 落库 |
 | `/v1/summary` | GET | 聚合：候选 / 告警按状态 / 出箱各计数 |

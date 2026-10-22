@@ -21,7 +21,7 @@
 | 端点 | 方法 | 作用 |
 |---|---|---|
 | `/healthz` | GET | **存活探针**：进程活着就 200，不查依赖 |
-| `/readyz` | GET | **就绪探针**：探数据库连通；不通 → 503 |
+| `/readyz` | GET | **就绪探针**：数据库通不通 + **表在不在** + 启用了流式/异步调查时线程与池子还活不活；任一不满足 → 503（**迁移版本到 head 不等于表在库里**，所以除了版本号还要核对表） |
 | `/metrics` | GET | 进程内指标（计数，JSON；全局口径不分租户） |
 | `/v1/telemetry` | POST | 接入原始日志 → 候选异常 → 落库 |
 | `/v1/summary` | GET | 聚合：候选 / 告警按状态 / 出箱各计数 |
@@ -84,6 +84,7 @@
 
 - **存活（liveness）**：问"进程是不是死了"。死了才该重启。它**不该查数据库**——否则数据库抖一下，编排层会把好好的进程反复杀掉重启，雪上加霜。
 - **就绪（readiness）**：问"现在能不能接流量"。数据库不通就返回 503，编排层把流量摘掉，但**不重启进程**。
+- **就绪里那张表检查是干吗的**：`alembic_version` 显示在 head，库里的表也可能已经被删掉（测试/人工操作/误迁移都会）。这时每个业务查询都 500，而只看版本号的探针会报"就绪"。所以 `/readyz` 还会把 `Base.metadata` 的表名与实际库内表名做差集，缺一张就 503。`upgrade_head()` 治不了这种状态（版本已在 head 时它是 no-op），重启能治（启动时会重迁）。
 
 这个区分是"服务能稳定跑"的关键，也是新手最容易做错的地方（把两个探针写成一样）。
 
@@ -134,7 +135,12 @@ docker run --rm -p 8000:8000 \
 
 ```bash
 curl http://127.0.0.1:8000/healthz     # {"status":"ok",...}
-curl http://127.0.0.1:8000/readyz      # {"status":"ready","checks":{"database":{"ok":true}}}
+curl http://127.0.0.1:8000/readyz
+# {"status":"ready","checks":{"database":{"ok":true,"url_scheme":"sqlite"},
+#  "schema":{"ok":true,"missing":[],"expected":18},
+#  "migration":{"ok":true,"revision":"a9c1d2e3f4b5"},
+#  "resolver":{"ok":true},
+#  "investigation_workers":{"ok":true,"queue_depth":0}}}
 curl http://127.0.0.1:8000/metrics     # 计数指标
 ```
 

@@ -34,6 +34,33 @@ from ..runtime import (
 router = APIRouter()
 
 
+def _schema_present() -> dict[str, Any]:
+    """表真的在库里吗？——`migration.revision == head` **不等于**表在里面。
+
+    反例（本仓真发生过）：一个 PG 测试把 `telemetry_events` 删了却没还，
+    `alembic_version` 仍是 head，`/readyz` 于是报 `migration.ok=true`，
+    而每个业务查询都 500——正是本文件反复在防的那种"看起来就绪、其实坏了"。
+    `upgrade_head()` 也治不了它：版本已在 head 时它是 no-op。
+
+    做法：拿 ORM 元数据的表名集合与实际库里的表名集合做差集（一次目录查询，
+    探针轮询频率下成本可忽略）。用 SQLAlchemy inspector 而不是 PG 专属 catalog，
+    因为本服务也跑 SQLite（`relnamespace` 在那边不存在，直接查 catalog 会恒失败）。
+    本仓没有按扩展/开关条件建表的情形（十八张全在 `Base.metadata` 里），
+    所以差集非空就是真缺表，不是误报。
+    """
+    try:
+        from sqlalchemy import inspect as _sa_inspect
+
+        from ...storage.models import Base
+        expected = set(Base.metadata.tables)
+        with session_scope(system=True) as s:
+            actual = set(_sa_inspect(s.get_bind()).get_table_names())
+        missing = sorted(expected - actual)
+        return {"ok": not missing, "missing": missing[:5], "expected": len(expected)}
+    except Exception as e:                        # noqa: BLE001
+        return {"ok": False, "error": redact(f"{type(e).__name__}: {e}")}
+
+
 @router.get("/healthz", tags=["probe"])
 def healthz() -> dict[str, Any]:
     """存活探针：进程活着即 200，不触碰任何外部依赖。"""
@@ -41,9 +68,26 @@ def healthz() -> dict[str, Any]:
             "version": _VERSION, "uptime_s": round(time.time() - _STARTED_AT, 1)}
 @router.get("/readyz", tags=["probe"])
 def readyz() -> JSONResponse:
-    """就绪探针：探测数据库连通性。不通 → 503（编排层摘流量，但不重启）。"""
+    """就绪探针：能不能接流量就回答能不能。
+
+    分层探测，任一硬依赖不满足 → 503（编排层摘流量，但不重启进程）：
+
+    * `database` —— 数据库连得上吗
+    * `schema`   —— `Base.metadata` 的表**真的在库里**吗（版本到 head 不等于表在）
+    * `migration` —— 迁移版本号（供排查，`ok` 不参与就绪判定）
+    * `stream` / `investigation_workers` —— 仅启用时：线程/池子还活着吗
+
+    `resolver` / `escalation` 只报告不拦流量（降级可用，不是不可用）。
+    """
     checks: dict[str, Any] = {"database": _db_reachable()}
     ready = bool(checks["database"]["ok"])
+
+    # 表在不在（版本到 head 只是必要条件，不是充分条件）
+    if checks["database"]["ok"]:
+        checks["schema"] = _schema_present()
+        ready = ready and bool(checks["schema"]["ok"])
+    else:
+        checks["schema"] = {"ok": False, "error": "数据库不可达，无法核对表"}
 
     # 迁移版本（库 schema 是否已到 head）
     try:

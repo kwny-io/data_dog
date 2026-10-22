@@ -142,7 +142,7 @@ def _start_stream_if_enabled() -> None:
     except Exception:                                # noqa: BLE001
         pass
     _log.info("流式接入已启动", extra={
-        "source": source.name, "thread": thread.name,
+        "source": source.name, "thread_name": thread.name,
         "sharding": bool(router and router.enabled)})
 def _stop_stream() -> None:
     runner, source, _thread, stop = _stream_handle()

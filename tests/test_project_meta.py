@@ -44,6 +44,34 @@ def _pyproject() -> dict:
     return tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
 
 
+def test_tests_never_create_schema_on_real_pg_with_create_all():
+    """测试不得用 `init_db()`（`create_all`）打真 PostgreSQL。
+
+    为什么：`init_db()` 建表但**不写 `alembic_version`**，于是库里出现"表都在、
+    版本表为空"的楔子状态；同一个 session 里后续任何 `upgrade_head()` 都会
+    `DuplicateTable`。2026-10-15 实锤：干净库上 `pytest -m postgres` 是
+    `22 passed + 1 failed + 14 errors`（14 个 error 全是 state_store 的 PG fixture
+    在 `upgrade_head` 时撞已存在的表），改成 `migrations.upgrade_head()` 后 37 passed。
+
+    真库一律走 `migrations.upgrade_head()`——与生产启动路径 `service/app.py` 同源。
+    """
+    offenders: list[str] = []
+    _self = pathlib.Path(__file__).name          # 本文件里的匹配模式会自匹配，跳过它
+    for f in sorted((ROOT / "tests").glob("*.py")):
+        if f.name == _self:
+            continue
+        for i, line in enumerate(f.read_text(encoding="utf-8").splitlines(), 1):
+            if line.lstrip().startswith("#"):        # 注释不算
+                continue
+            if "init_db(" in line and ("_PG_URL" in line or "DD_TEST_PG_URL" in line):
+                offenders.append(f"{f.name}:{i}: {line.strip()}")
+    assert not offenders, (
+        "测试里用 init_db() 打真 PG：create_all 不写 alembic_version，"
+        "随后 upgrade_head() 会 DuplicateTable。请改用 migrations.upgrade_head()。违规点："
+        + " | ".join(offenders)
+    )
+
+
 def test_readme_scale_numbers_match_reality():
     """README 里的规模数字必须与磁盘一致（不一致就跑 scripts/readme_counts.py）。"""
     rc = _load_script("readme_counts")

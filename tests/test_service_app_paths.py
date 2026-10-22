@@ -472,6 +472,13 @@ def test_readyz_with_real_file_stream_reports_lease_holder(tmp_path, monkeypatch
     monkeypatch.setenv("DD_STREAM_SOURCE", "file")
     monkeypatch.setenv("DD_STREAM_FILE_PATH", str(log))
     reset_engine()
+    # 先把表建好：`/readyz` 现在除了查"迁移版本到 head"，还会核对
+    # `Base.metadata` 里的表是否**真的在库里**（见 health.py `_schema_present`）。
+    # `DD_AUTO_MIGRATE=0` + 空库 = 一个真坏掉的部署，那时 503 才是对的。
+    # 本用例要测的是"流式租约持有者能被报告"，所以按生产姿势（迁移由部署流程
+    # 先跑完、应用侧 AUTO_MIGRATE=0）把库迁到 head。
+    from data_dog.storage import migrations
+    migrations.upgrade_head(f"sqlite:///{(tmp_path / 'svc.db').as_posix()}")
     try:
         app = app_mod.create_app()
         with TestClient(app, raise_server_exceptions=False) as c:

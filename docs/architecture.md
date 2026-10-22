@@ -156,7 +156,7 @@ eval_feedback.py  回灌：人工标签 vs Agent 处置 → 一致率 / 误报�
 
 - **日志**：JSON 结构化（`core/logging.py`），带 `request_id` / `trace_id` / `tenant_id`。
 - **指标**：Prometheus 文本（`core/metrics.py`），`/metrics` 暴露，**全局口径不分租户**（避免 label 基数爆炸）。
-- **探针**：`/healthz` 存活（不查依赖）、`/readyz` 就绪（数据库不通 → 503）。
+- **探针**：`/healthz` 存活（不查依赖）、`/readyz` 就绪（数据库不通 → 503；**表在不在**也查——迁移版本到 head ≠ 表在库里）。
 
 ---
 
