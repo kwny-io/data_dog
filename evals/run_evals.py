@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """data_dog Agent 评估命令行入口。
 
 用法：
@@ -9,7 +8,6 @@
 from __future__ import annotations
 
 import json
-import os
 import sys
 from pathlib import Path
 
@@ -115,8 +113,8 @@ def main():
             for c in CASES:
                 results.append(run_case(c, providers[c.case_id]))
     else:
-        from data_dog.providers.config import load_config
         from data_dog.providers.client import Provider
+        from data_dog.providers.config import load_config
         cfg = load_config()
         key = cfg["api_key"]
         if not key:

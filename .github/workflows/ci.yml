@@ -51,8 +51,10 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev,postgres]"
       - name: ruff
-        # alembic/ 也纳入：迁移是生产路径的一部分（此前不在门禁里，攒了 65 条）
-        run: ruff check src tests scripts alembic
+        # 全仓扫描（不再枚举子目录）：此前枚举法漏过 alembic/（攒了 65 条），
+        # 又漏了 evals/ mcp_servers/ ui/ schemas/tools/（攒了 53 条）。
+        # 范围由 .gitignore + ruff 默认 exclude 决定，与 `make lint` / scripts/gates.ps1 逐字一致。
+        run: ruff check .
       - name: mypy
         run: mypy src
       - name: 依赖清单与元数据一致性（漂移即红）

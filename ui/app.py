@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """data_dog 调查演示台（Streamlit）。
 
 布局（仪表盘式，尽量一眼看懂）：
@@ -25,7 +24,11 @@ sys.path.insert(0, ROOT)
 
 from data_dog.agent.loop import AgentLoop  # noqa: E402
 from data_dog.data_plane.scenarios import (  # noqa: E402
-    DEMO_DEVICE_SN, SCENARIOS, component_cn, match_scenarios, run_all,
+    DEMO_DEVICE_SN,
+    SCENARIOS,
+    component_cn,
+    match_scenarios,
+    run_all,
 )
 from data_dog.e2e.bridge import CandidateEvidenceBridge  # noqa: E402
 from data_dog.tools.investigation import InvestigationTools  # noqa: E402
@@ -104,8 +107,8 @@ def _model_label() -> str:
 
 
 def run_investigation(run, cand):
-    from data_dog.providers.config import load_config
     from data_dog.providers.client import Provider
+    from data_dog.providers.config import load_config
     from data_dog.providers.offline_demo import DeterministicEvidenceProvider
 
     cfg = load_config()

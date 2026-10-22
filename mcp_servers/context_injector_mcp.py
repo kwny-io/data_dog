@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 可信身份注入 MCP Server（A4：运行时身份注入，架构 13.3）
 =========================================================
@@ -50,7 +49,7 @@ from __future__ import annotations
 import json
 import os
 import sys
-from typing import Any, Dict, Optional
+from typing import Any
 
 # ---------------------------------------------------------------------------
 # 1. 可信上下文（与 data_dog/context.py 的 RuntimeContext 结构一致）
@@ -69,7 +68,7 @@ _ALLOWED = os.environ.get(
 ALLOWED_COMPONENTS = frozenset(x.strip() for x in _ALLOWED.split(",") if x.strip())
 
 
-def build_runtime_context() -> Dict[str, Any]:
+def build_runtime_context() -> dict[str, Any]:
     """构造可信 RuntimeContext（结构对齐 data_dog/context.py）。"""
     return {
         "tenant_id": DEFAULT_TENANT,
@@ -105,7 +104,7 @@ class MinimalMcpServer:
         ]
 
     # ---- JSON-RPC 分发 ----
-    def handle(self, msg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    def handle(self, msg: dict[str, Any]) -> dict[str, Any] | None:
         method = msg.get("method", "")
         params = msg.get("params") or {}
         req_id = msg.get("id")
@@ -141,7 +140,7 @@ class MinimalMcpServer:
         return self._error(req_id, -32601, f"method not found: {method}")
 
     # ---- 工具实现 ----
-    def _get_runtime_context(self, _args: Dict[str, Any]) -> Dict[str, Any]:
+    def _get_runtime_context(self, _args: dict[str, Any]) -> dict[str, Any]:
         """返回可信上下文。签名：不接受任何参数（身份不是入参，是注入）。"""
         # 若调用方试图传任何东西，直接拒绝——身份绝不来自参数
         if _args:
@@ -151,11 +150,11 @@ class MinimalMcpServer:
 
     # ---- JSON-RPC 工具 ----
     @staticmethod
-    def _result(req_id, result: Dict[str, Any]) -> Dict[str, Any]:
+    def _result(req_id, result: dict[str, Any]) -> dict[str, Any]:
         return {"jsonrpc": "2.0", "id": req_id, "result": result}
 
     @staticmethod
-    def _error(req_id, code: int, message: str) -> Dict[str, Any]:
+    def _error(req_id, code: int, message: str) -> dict[str, Any]:
         return {"jsonrpc": "2.0", "id": req_id,
                 "error": {"code": code, "message": message}}
 

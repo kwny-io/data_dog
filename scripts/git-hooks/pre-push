@@ -20,7 +20,7 @@ else
 fi
 
 echo "[pre-push] 与 CI 的 lint/test 腿同口径：ruff / mypy / pytest（可能要几分钟）"
-"$PY" -m ruff check src tests scripts
+"$PY" -m ruff check .
 "$PY" -m mypy src
 "$PY" -m pytest -q
 echo "[pre-push] 全部通过（覆盖率与单模块下限由 CI 的 test 腿把关）"

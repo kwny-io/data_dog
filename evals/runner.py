@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Eval 运行与打分：把一个 EvalCase 交给 AgentLoop 调查，按软约束评分。
 
 支持两种 provider：
@@ -10,17 +9,15 @@
 """
 from __future__ import annotations
 
-from typing import Dict, List
-
 from data_dog.agent.loop import AgentLoop
 from data_dog.evidence.store import EvidenceStore
 from data_dog.schemas.events import CandidateEvent
 from data_dog.tools.investigation import InvestigationTools
 
-from .cases import EvalCase, CASES
+from .cases import CASES, EvalCase
 
 
-def run_case(case: EvalCase, provider, model=None) -> Dict:
+def run_case(case: EvalCase, provider, model=None) -> dict:
     """跑单个 case，返回：report dict + 各项评分。"""
     candidate = CandidateEvent(**case.candidate)
     tools = InvestigationTools(EvidenceStore())
@@ -29,7 +26,7 @@ def run_case(case: EvalCase, provider, model=None) -> Dict:
     return _score(case, report.to_dict(), report)
 
 
-def _score(case: EvalCase, report_dict: Dict, report) -> Dict:
+def _score(case: EvalCase, report_dict: dict, report) -> dict:
     disposition = report_dict.get("disposition", "")
     checks = {}
 
@@ -75,7 +72,7 @@ def _score(case: EvalCase, report_dict: Dict, report) -> Dict:
     }
 
 
-def run_all(provider, model=None, only: List[str] | None = None) -> List[Dict]:
+def run_all(provider, model=None, only: list[str] | None = None) -> list[dict]:
     cases = [c for c in CASES if only is None or c.case_id in only]
     results = []
     for c in cases:
@@ -83,7 +80,7 @@ def run_all(provider, model=None, only: List[str] | None = None) -> List[Dict]:
     return results
 
 
-def summarize(results: List[Dict]) -> Dict:
+def summarize(results: list[dict]) -> dict:
     if not results:
         return {"n": 0, "pass_rate": 0.0}
     passed = sum(1 for r in results if r["passed"])

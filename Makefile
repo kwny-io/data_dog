@@ -45,14 +45,14 @@ install:         ## 安装依赖
 test:            ## 全量测试
 	$(PY) -m pytest -q
 
-lint:            ## ruff 静态检查
-	$(PY) -m ruff check src tests scripts
+lint:            ## ruff 静态检查（全仓，单一真源）
+	$(PY) -m ruff check .
 
 typecheck:       ## mypy 类型检查
 	$(PY) -m mypy src
 
-gates:           ## 提交前必过：ruff + mypy + 全量测试（等价 CI 的 lint/test 腿）
-	$(PY) -m ruff check src tests scripts
+gates:           ## 提交前必过：ruff + mypy + 全量测试（命令与 CI 逐字一致）
+	$(PY) -m ruff check .
 	$(PY) -m mypy src
 	$(PY) -m pytest -q
 

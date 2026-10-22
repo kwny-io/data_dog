@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Agent 评估用例（对齐架构 19.2）。
 
 每个用例描述 Agent 该具备的行为 / 不该有的行为，供 eval 检查报告：
@@ -13,7 +12,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
 
 
 @dataclass
@@ -22,15 +20,15 @@ class EvalCase:
     name: str
     candidate: dict             # 直接构造 CandidateEvent 的字段（必填）
     description: str
-    expects_disposition_in: List[str]   # 允许的裁决集
-    expects_evidence: Optional[bool] = None          # 是否应调用证据类工具
-    expects_vendor_knowledge: Optional[bool] = None
-    forbids_disposition: List[str] = field(default_factory=list)
+    expects_disposition_in: list[str]   # 允许的裁决集
+    expects_evidence: bool | None = None          # 是否应调用证据类工具
+    expects_vendor_knowledge: bool | None = None
+    forbids_disposition: list[str] = field(default_factory=list)
     must_not_infer_without_evidence: bool = False    # 禁止无证据因果推断
     min_confidence: float = 0.0
 
 
-CASES: List[EvalCase] = [
+CASES: list[EvalCase] = [
     EvalCase(
         case_id="case_01_thermal_real",
         name="左髋电机温度爬升（证据充分）",

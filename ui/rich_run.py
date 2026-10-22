@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """精美 CLI：用 rich 渲染 ReAct 轨迹 + InvestigationReport。
 
 不替换脚本逻辑，只负责"好看的输出"。AgentLoop 的 trace_cb 把每步
@@ -7,7 +6,7 @@
 from __future__ import annotations
 
 import json
-from typing import Callable, List
+from collections.abc import Callable
 
 from rich.console import Console
 from rich.panel import Panel
@@ -32,9 +31,9 @@ _DISPOSITION_STYLE = {
 }
 
 
-def make_trace_cb() -> (List[dict], Callable[[dict], None]):
+def make_trace_cb() -> (list[dict], Callable[[dict], None]):
     """返回 (轨迹列表, 回调)。回调收到每步时立刻渲染到控制台。"""
-    steps: List[dict] = []
+    steps: list[dict] = []
 
     def _on_step(step: dict) -> None:
         steps.append(step)
@@ -160,7 +159,9 @@ def render_compare(results) -> None:
     t.add_column("候选")
     t.add_column("裁决", justify="center")
     t.add_column("置信度", justify="right")
-    for label, source, report in results:
+    # 注：results 的元素是 (label, source, report)；当前表格只展示候选/裁决/置信度，
+    # 故 source 未使用（B007）。若将来要区分"同一候选、不同数据源"，这里需要加一列。
+    for label, _source, report in results:
         d = report.to_dict()
         disp = d.get("disposition", "?")
         color = _DISPOSITION_STYLE.get(disp, "white")

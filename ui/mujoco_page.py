@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """data_dog —— MuJoCo 仿真数据源演示页（Streamlit）。
 
 一个像"产品 demo"的网页：点按钮，自动：
@@ -28,14 +27,14 @@ st.title("🤖 MuJoCo 仿真数据源 —— Go2 遥测 → Agent 调查")
 
 def run_and_capture(duration_s: float):
     """跑 mujoco_eval，返回样本级结果 + 遥测细节 + 汇总。"""
-    from data_dog.mujoco_sim.simulate import simulate
-    from data_dog.mujoco_sim.to_sample import to_synth_sample
+    from data_dog.agent.loop import AgentLoop
     from data_dog.mujoco_sim.mujoco_eval import (
-        build_mujoco_samples, MujocoDeterministicProvider,
+        MujocoDeterministicProvider,
         summarize_synth,
     )
+    from data_dog.mujoco_sim.simulate import simulate
+    from data_dog.mujoco_sim.to_sample import to_synth_sample
     from data_dog.synth.evidence_source import SyntheticEvidenceSource
-    from data_dog.agent.loop import AgentLoop
     from data_dog.tools.investigation import InvestigationTools
 
     faults = ["normal"] + ["F1_stall", "F2_temp_rise", "F3_packet_loss",
@@ -100,13 +99,12 @@ if run:
                     delta=f"{summary['hit']}/{summary['n']}")
 
     st.subheader("🌡️ 12 个关节的电机温度（热模型）")
-    import numpy as np
     chart = st.container()
     with chart:
         st.bar_chart(sim.temperature.mean(axis=0),
                      x_label="关节", y_label="平均温度 °C")
-    st.caption(f"初值全是 25°C 环境温度；膝盖(承重、电流大)明显发热，髋关节(不出力)基本不热"
-               f"——每个关节按自己那份电流用一阶热模型独立升温，物理自洽。")
+    st.caption("初值全是 25°C 环境温度；膝盖(承重、电流大)明显发热，髋关节(不出力)基本不热"
+               "——每个关节按自己那份电流用一阶热模型独立升温，物理自洽。")
 
     st.subheader("🔬 Agent 逐段调查结果")
     rows = []

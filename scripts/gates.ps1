@@ -12,7 +12,7 @@
   It runs ruff check -> mypy -> pytest in order and exits immediately with the failing step's
   exit code, so a failure is never masked.
 
-  CI mapping: `ruff check src tests scripts` + `mypy src` (lint job), `pytest -q` (test job).
+  CI mapping: `ruff check .` + `mypy src` (lint job), `pytest -q` (test job) —— 三处逐字一致。
   CI additionally enforces coverage (--cov-fail-under) and a per-module floor
   (scripts/cov_gate.py); run `make cov` or add those flags locally when you want them.
 
@@ -37,7 +37,7 @@ function Invoke-Gate {
     }
 }
 
-Invoke-Gate "ruff check src tests scripts" @("-m", "ruff", "check", "src", "tests", "scripts")
+Invoke-Gate "ruff check ." @("-m", "ruff", "check", ".")
 Invoke-Gate "mypy src" @("-m", "mypy", "src")
 Invoke-Gate "pytest -q" @("-m", "pytest", "-q")
 
