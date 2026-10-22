@@ -19,8 +19,21 @@ else
     PY=python
 fi
 
-echo "[pre-push] 与 CI 的 lint/test 腿同口径：ruff / mypy / pytest（可能要几分钟）"
+echo "[pre-push] 与 CI 的 lint 腿同口径：ruff check . / mypy src；测试用 -rs，跳过原因会打出来"
 "$PY" -m ruff check .
 "$PY" -m mypy src
-"$PY" -m pytest -q
-echo "[pre-push] 全部通过（覆盖率与单模块下限由 CI 的 test 腿把关）"
+"$PY" -m pytest -q -rs
+
+# 未设 DD_TEST_PG_URL 时，PG/redis 腿的测试是**被跳过**而不是通过。
+# 所以回显不许说谎：不说这句，“全绿”很容易被读成“连库也验了”。
+if [ -z "${DD_TEST_PG_URL:-}" ]; then
+    echo ""
+    echo "[pre-push] ⚠ 未设 DD_TEST_PG_URL：PG/redis 相关测试本次被跳过（没跑 ≠ 通过）。"
+    echo "           CI 真跑这两条腿：postgres:16 + \`pytest -m postgres\`、redis:7 + \`pytest -m redis\`。"
+    echo "           本机想验：先放开 compose.yaml 里 db 的 ports（默认注释），然后"
+    echo "             docker compose up -d db"
+    echo "             export DD_TEST_PG_URL=postgresql+psycopg://data_dog:data_dog_dev_pw@127.0.0.1:5432/data_dog"
+    echo "             make pg-test"
+fi
+
+echo "[pre-push] 全部通过（覆盖率与单模块下限由 CI 的 test 腿把关；PG/redis 腿见上）"

@@ -42,8 +42,8 @@ help:            ## 显示所有命令
 install:         ## 安装依赖
 	$(PY) -m pip install -e ".[dev,postgres]"
 
-test:            ## 全量测试
-	$(PY) -m pytest -q
+test:            ## 全量测试（-rs：把跳过原因打出来，不把 skip 当 passed）
+	$(PY) -m pytest -q -rs
 
 lint:            ## ruff 静态检查（全仓，单一真源）
 	$(PY) -m ruff check .
@@ -54,7 +54,8 @@ typecheck:       ## mypy 类型检查
 gates:           ## 提交前必过：ruff + mypy + 全量测试（命令与 CI 逐字一致）
 	$(PY) -m ruff check .
 	$(PY) -m mypy src
-	$(PY) -m pytest -q
+	$(PY) -m pytest -q -rs
+	@test -n "$${DD_TEST_PG_URL:-}" || echo "[gates] ⚠ 未设 DD_TEST_PG_URL：PG/redis 相关测试被跳过（没跑 ≠ 通过）。CI 的 postgres/redis 腿会真跑；本机验：make pg-test"
 
 hooks:           ## 装 git 钩子（pre-commit: ruff 变更文件；pre-push: make gates）
 	git config core.hooksPath scripts/git-hooks
@@ -109,6 +110,9 @@ cov-gate:        ## 单模块覆盖率门禁（默认腿；先 make cov 产出 c
 
 cov-gate-pg:     ## PG 腿门禁：只查 SQLite 跑不到的 PG-only 文件（先跑 -m postgres --cov）
 	$(PY) scripts/cov_gate.py --json coverage-pg.json --only storage/partitioning.py,state/pg.py --no-allow --min 80
+
+pg-test:         ## PG 腿真库测试（先放开 compose.yaml 里 db 的 ports，再 export DD_TEST_PG_URL）
+	$(PY) -m pytest -q -rs -m postgres
 
 partition:       ## 分区维护（A9）：确保未来 N 个月分区存在（幂等 DDL；MONTHS=3）
 	$(PY) scripts/partition_telemetry.py --ensure-months $(or $(MONTHS),3)
