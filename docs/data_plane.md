@@ -54,6 +54,44 @@ raw envelope
 | `fetch.py` | **SSRF 安全**：`validate_url` 受控引用校验（仅 http/https，拒绝内网/环回/保留）+ `safe_request` 安全取数（逐跳复验重定向、连接钉 IP） |
 | `pipeline.py` | 端到端编排 |
 
+### 3.5 响应语义：`ok` / `partial` / `stats`（#102）
+
+`POST /v1/telemetry` 是**批处理**接口，且限流做在批内**每个事件**上（`gateway.ingest`），
+所以"HTTP 200"与"数据都落了库"是两件事：
+
+| 字段 | 含义 | 常见误读 |
+|---|---|---|
+| `ok` | **请求被正常处理**（没抛异常、没触发失败关闭的 503） | 当成"全部事件已入库" |
+| `partial` | 批内**有**事件被拒（等价于 `stats.rejected > 0`） | —— |
+| `stats.ingested` | **收到**的事件数，**含被拒的**（`process_one` 入口就 `+= 1`） | 当成"成功接入数" |
+| `stats.normalized` | 规范化成功、进入落库的条数 | 最接近"真正落库"的 stats 字段 |
+| `stats.rejected` + `stats.rejected_by_reason` | 被拒条数与细分原因（`rate_limited` / `bad_encoding` / `too_large` / `resolve` / `no_parser` …） | 不看 → 静默丢数据 |
+| `persisted.telemetry` / `persisted.candidates` | **同步落库**后的实际行数。write-behind 模式下换成 `{"mode": "write_behind", "queued": true}`，此时**不保证**已落库 | —— |
+
+所以接入方该看的组合是 `persisted` 与 `partial`：
+
+```python
+body = post("/v1/telemetry", events).json()
+if body["partial"]:
+    log.warning("部分事件被拒", reasons=body["stats"]["rejected_by_reason"])
+landed = body["persisted"]["telemetry"]      # write-behind 模式下看 queued，不看这个字段
+```
+
+反面例子（**稳态路径**，不是罕见情形）：配额耗尽时 100 条事件全被限流 →
+
+```json
+200 {"ok": true, "partial": true,
+     "stats": {"ingested": 100, "rejected": 100, "normalized": 0,
+               "rejected_by_reason": {"rate_limited": 100}},
+     "persisted": {"telemetry": 0, "candidates": 0}, "candidates": []}
+```
+
+只看 `ok`（或只看 `ingested`）的实现会把这次**全丢**记成**全成**——后果是"几周后发现某段时间数据缺一段"，
+而事后无法从 200 里回溯。
+
+> 历史：`partial` 字段与本小节是缺陷 #102 的修复产物。在此之前 `rejected_by_reason` 在 README 与
+> `docs/` 里零提及，而限流本身是设计上要丢数据的路径。
+
 ---
 
 ## 4. 三个关键设计（面试能讲）

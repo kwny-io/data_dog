@@ -118,6 +118,7 @@ def test_ingest_produces_candidate_and_persists(client):
     assert len(body["candidates"]) == 1
     assert body["candidates"][0]["severity_hint"] == "critical"
     assert body["persisted"]["candidates"] == 1
+    assert body["partial"] is False, "全部落库不该标 partial"
 
     # 落库可查
     q = client.get("/v1/candidates", headers=_AUTH)
@@ -1123,3 +1124,28 @@ def test_feedback_unknown_alert_404(client):
     r = client.post("/v1/feedback", headers=_Q,
                     json={"event_id": "nope", "kind": "repaired"})
     assert r.status_code == 404
+
+
+def test_ingest_marks_partial_when_events_rejected(client, monkeypatch):
+    """#102：批内有事件被拒时，`ok` 仍是 true——所以必须另有机器可读的信号。
+
+    把共享网关的 burst 改成 0（令牌桶空），于是每个事件都被限流拒掉。响应仍为
+    200 + `ok: true`（请求被正常处理），但调用方若只读 `ingested` 会以为 1 条进了。
+    断言：`partial` 为 true、`stats.normalized == 0`（真的没落库）、原因细分里有限流的痕迹。
+    """
+    from data_dog.service.runtime import _state
+
+    monkeypatch.setattr(_state.gateway, "burst", 0, raising=False)
+    monkeypatch.setattr(_state.gateway, "rate_per_sec", 0.0, raising=False)
+
+    r = client.post("/v1/telemetry", headers=_AUTH, json={"events": [_raw("e1")]})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True, "ok 表示请求被处理，不表示全部落库"
+    assert body["partial"] is True, "有事件被拒却没标 partial"
+    assert body["stats"]["normalized"] == 0, "被限流的事件不该落库"
+    assert body["stats"]["ingested"] == 1, "ingested 计的是收到条数（含被拒）"
+    assert any("rate" in str(k).lower()
+               for k in body["stats"]["rejected_by_reason"]), \
+        f"限流原因没细分：{body['stats']['rejected_by_reason']!r}"
+    assert body["persisted"] == {"telemetry": 0, "candidates": 0}
