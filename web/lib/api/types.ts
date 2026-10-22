@@ -103,7 +103,11 @@ export interface CandidateEvent {
   detector_provenance: string; // "operator_id:version"
   /** Added by the tenant refactor; present on multi-tenant rows only. */
   tenant_id?: string;
-  created_at?: string;
+  /** **epoch 秒（float）**，不是 ISO 字符串。`/v1/telemetry` 刚接入的候选没有这个字段，
+   *  `/v1/candidates` 回落时才带上（后端 `storage/models.py` 里 `created_at: Mapped[float]`）。
+   *  要展示就 `new Date(created_at * 1000)`；按字符串处理（`.slice()` / `new Date(str)`）会拿到
+   *  `Invalid Date`——而 TypeScript 又不会报错，因为这里曾经写的就是 `string`。 */
+  created_at?: number;
 }
 
 export type Disposition =
@@ -295,7 +299,9 @@ export interface OutboxRow {
   event_id?: string;
   status?: string;
   attempts?: number;
-  created_at?: string;
+  /** **epoch 秒（float）**，同 `CandidateEvent.created_at`：后端 `outbox.created_at` 是
+   *  `Mapped[float]`，`repository.list_outbox()` 原样带出。展示要 `* 1000`。 */
+  created_at?: number;
   [k: string]: unknown;
 }
 
