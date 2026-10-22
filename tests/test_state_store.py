@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import os
+import time
 from typing import Any
 
 import pytest
@@ -218,6 +219,30 @@ def test_rate_limit_writes_caller_clock_into_shared_state(store):
     """进去的值必须是**可跨副本比较**的那一枚（即调用方的时钟），否则限流一致性无从谈起。"""
     store.rate_limit_allow("dev", now=123.5, rate_per_sec=1.0, burst=2)
     assert store.get("rate:dev")["last"] == 123.5
+
+
+def test_gateway_rate_limit_uses_wall_clock(store):
+    """接入网关注进共享桶的时间戳必须是**墙钟**，不能是 monotonic。
+
+    这一条钉住 #100 的**第二层**：`StateStore.rate_limit_allow` 的默认时钟改成墙钟
+    之后，生产路径其实仍由网关显式注入 `time.monotonic()`（`data_plane/gateway.py`
+    的 `self._clock`），于是跨副本共享的 `last` 依旧是“各主机自开机以来的秒数”：
+    A 主机 6.5e5、B 主机 5e6，落后的一方 elapsed ≤ 0，令牌只扣不补——副本被锁在
+    全 429。单元级用例都是显式传 `now=`，所以两层都没被挡下来过。
+
+    断言方式：让网关真的跑一次限流，看桶里写进去的时间戳的量级。monotonic 是
+    “开机时长”（几十天 = 1e5~1e6），墙钟是 1.7e9，差三个数量级，没有巧合空间。
+    """
+    from data_dog.data_plane.gateway import TelemetryGateway
+
+    gw = TelemetryGateway(rate_per_sec=1.0, burst=2, state_store=store)
+    assert gw._allow("t1", "dev") is True
+    last = store.get("rate:t1|dev")["last"]
+    now_wall = time.time()
+    assert abs(last - now_wall) < 5.0, (
+        f"桶里的 last={last!r} 不是墙钟量级（time.time()≈{now_wall:.0f}）——"
+        "跨副本无法比较，落在“开机更久”的主机上的客户端会被永久 429"
+    )
 
 
 def test_rate_limit_per_key_isolated(store):

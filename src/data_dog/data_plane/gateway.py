@@ -70,7 +70,13 @@ class TelemetryGateway:
             state_store = get_rate_store()
         self._state = state_store
         self.stats = GatewayStats()
-        self._clock = time.monotonic
+        # 限流桶的时间戳必须是**墙钟**（`time.time()`），不能是 `time.monotonic()`：
+        # 桶经共享后端（PG/Redis）跨副本共用，而 monotonic 的基准是「本机开机时刻」，
+        # 两台主机的值根本不可比（实测 A 主机 ≈6.5e5、B 主机 ≈5e6）。老实现把 monotonic
+        # 写进共享桶，落后的一方算出的 elapsed ≤ 0 —— 令牌只扣不补，该副本被锁死在
+        # 全 429，而且不会自愈。monotonic 只适合量「同一进程内的时长」（延迟、超时），
+        # 不适合做任何会被别的进程读到的时刻标记。
+        self._clock = time.time
         # 兼容旧字段：快照里报告的桶数（共享后端下无进程内桶，恒为 0）
         self._buckets: dict[str, _Bucket] = {}
 

@@ -202,9 +202,16 @@ ruff/mypy 之外，用以下检索定位候选点（`src/` 下）：
 - 跨副本限流的时钟边界：令牌桶的 `last` 是跨副本共享值，故必须用**墙钟**（与租约同一条
   边界，生产须跑 NTP）。曾经它用的是 `time.monotonic()`——各进程私有纪元，主机 B 写下的
   空桶会让主机 A 算出负 elapsed，令牌被倒扣到 -4.35e6（按 1 req/s 就是该副本约 50 天全量
-  429）。回归断言：`tests/test_state_store.py::test_rate_limit_default_clock_is_wall_clock_not_monotonic`
-  与 `tests/test_state_store.py::test_rate_limit_backward_clock_does_not_lock_out`
-  （两条均在旧实现下确定性变红）。
+  429）。这里有**两层**，别只修一层：
+  1. `StateStore.rate_limit_allow` 的**默认时钟**（调用方不传 `now=` 时）；
+  2. `data_plane/gateway.py` 的 `self._clock`——它是限流的**唯一生产入口**，曾经显式注入
+     `time.monotonic`，于是只修默认值等于没修（修完仍会“只扣不补、永久 429”）。
+  回归断言：`tests/test_state_store.py::test_rate_limit_default_clock_is_wall_clock_not_monotonic`、
+  `::test_rate_limit_backward_clock_does_not_lock_out`（存储层），以及
+  `::test_gateway_rate_limit_uses_wall_clock`（**走生产接线**：构造真 `TelemetryGateway`
+  调 `_allow`，断言桶内时间戳是墙钟量级）；三条在旧实现下均确定性变红。
+  同一条边界也决定了 `StreamMessage.enqueued_at` 的适用前提：它用 monotonic 打点，
+  所以**打点与消费必须在同一进程**；将来若让源在另一个进程打点，消费延迟会算错。
 - 本轮加固的回归断言：`tests/test_reliability_hardening.py`（29 条：PG 三段超时 + SQLite 行为
   不变 + 变更源失败关闭/demo 开关 + 流式源轮询预算 + outbox 投递预算 + LLM `max_retries=0` +
   MCP 看门狗/退避/总预算，均含"预算耗尽 → 显式失败/可观测"与"正常路径不变"两侧）。
