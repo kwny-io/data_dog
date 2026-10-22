@@ -194,7 +194,12 @@ ruff/mypy 之外，用以下检索定位候选点（`src/` 下）：
 - 规范样板的实现与理由：`src/data_dog/state/redis.py`（模块 docstring + `_RETRY_*` 注释）。
 - 失败关闭的行为断言：`tests/test_failure_injection.py`（22 条非 HTTP 层故障注入用例：
   并发不丢更新、限流不超发、outbox 不重复、变更源/水位线/MCP 失败关闭）。
-- **跨副本限流的时钟边界**：令牌桶的 `last` 是跨副本共享值，故必须用**墙钟**（与租约同一条
+- **跨进程一致性**（不是"单进程里假装多副本"）：`tests/test_state_multiprocess.py` 用
+  `multiprocessing` 真开进程打同一个 PG，盯三件事：租约赢家唯一、限流配额共享（4 副本 × 5 次
+  只放行 burst 次，而非每副本一份）、`mutate` 跨进程不丢更新。文件头带**变异矩阵**：
+  去掉 `state/pg.py` 的 `FOR UPDATE` → 限流超发（12 次）且计数器 33≠100；把桶 key 按 pid 分片
+  → 放行 20 次。也如实写明**租约那条对原子性变异不敏感**（靠计数器那条兜）。
+- 跨副本限流的时钟边界：令牌桶的 `last` 是跨副本共享值，故必须用**墙钟**（与租约同一条
   边界，生产须跑 NTP）。曾经它用的是 `time.monotonic()`——各进程私有纪元，主机 B 写下的
   空桶会让主机 A 算出负 elapsed，令牌被倒扣到 -4.35e6（按 1 req/s 就是该副本约 50 天全量
   429）。回归断言：`tests/test_state_store.py::test_rate_limit_default_clock_is_wall_clock_not_monotonic`
