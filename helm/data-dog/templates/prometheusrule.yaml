@@ -309,9 +309,14 @@ spec:
           labels:
             severity: warning
           annotations:
-            summary: "分区结构变更连续失败（op={{ $labels.op }}）"
+            # 注意：这里是 Prometheus 的注解模板（Prometheus 自己会用 $labels / $value 渲染），
+            # 不是 Helm 的。但 Helm **先**把整个文件当自己的模板解析——连注释里的双花括号也会被
+            # 执行，报 undefined variable "$labels"，整个 chart lint 直接失败（ledger #106）。
+            # 所以用 Helm 的字符串字面量把“原文”包一层：渲染结果仍是双花括号包着 $labels.op，
+            # 由 Prometheus 在告警时展开。下面两处之外的任何地方都不要再写裸的双花括号。
+            summary: '分区结构变更连续失败（op={{ "{{ $labels.op }}" }}）'
             description: >-
-              {{ $labels.op }} 在上一次成功之后又连续失败，且还没恢复。退出码 2（前置条件
+              {{ "{{ $labels.op }}" }} 在上一次成功之后又连续失败，且还没恢复。退出码 2（前置条件
               不满足：确认令牌、静默窗口、容量不足）与真异常都计入；退出码 3（租约/咨询锁
               被别人持有）**不计**——那是跳过，不是失败。首行异常同时记在共享状态里
               （partition:ddl_result），脚本/Job 日志里也有。

@@ -146,9 +146,13 @@ def main() -> int:
     if rc != 0:
         print(err, file=sys.stderr)
         return 1
-    ds = docs(out)
+    # 生产渲染**必须**另起一个名字。曾经这里也写 `ds = docs(out)`，把 109 行默认渲染的
+    # 文档集覆盖掉了 → 179 行那条“默认不渲染 PrometheusRule”实际在检查**生产值**
+    # （`values.prod.yaml:61` 恰好是 `enabled: true`），不变量一直在测错的输入；而它又被前面
+    # lint 的 parse error 掩着（一个红挡住另一个红），所以从来没人发现它一直是错的（ledger #107）。
+    ds_prod = docs(out)     # values.prod.yaml 的文档集
 
-    stream = _by_kind(ds, "Deployment", "stream")
+    stream = _by_kind(ds_prod, "Deployment", "stream")
     check(len(stream) == 1, "启用了 1 个消费者 Deployment")
     if stream:
         st = stream[0]["spec"]
@@ -156,9 +160,9 @@ def main() -> int:
         env = _env_names(st["template"]["spec"]["containers"][0])
         check({"DD_STREAM_ENABLED", "DD_STREAM_SOURCE", "DD_STREAM_SHARDS"} <= env,
               "消费者自带 DD_STREAM_* 环境变量（覆盖 envFrom）")
-    hpa = _by_kind(ds, "HorizontalPodAutoscaler")
+    hpa = _by_kind(ds_prod, "HorizontalPodAutoscaler")
     check(len(hpa) == 1, "生产开了 HPA")
-    api = _by_kind(ds, "Deployment", "api")
+    api = _by_kind(ds_prod, "Deployment", "api")
     if hpa and api:
         check("replicas" not in api[0]["spec"],
               "HPA 开启时 API Deployment **不**写死 replicas（避免两者打架）")
