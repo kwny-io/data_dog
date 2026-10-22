@@ -187,6 +187,39 @@ def test_rate_limit_bucket_enforced(store):
     assert store.rate_limit_allow("dev", now=101.0, **kw) is False
 
 
+def test_rate_limit_default_clock_is_wall_clock_not_monotonic(store):
+    """默认时钟必须与其它副本可比——否则跨主机限流会把客户端锁死几十天。
+
+    桶里的 `last` 是**跨副本共享**的。曾经的实现用 `time.monotonic()` 写它，
+    而 monotonic 是各进程私有的纪元：主机 B 开机 58 天（monotonic≈5e6）写了空桶后，
+    主机 A（monotonic≈6.5e5）算出的 elapsed 是负的，令牌被倒扣到 -4.35e6。
+    这个用例用一个不可能来自 monotonic 的 last（1e9 s ≈ 31 年开机时长）钉住它：
+    墙钟（≈ 1.7e9）必然大于它 → 算得 elapsed>0 → 补满即放行；
+    反之若实现又退回 monotonic，本断言会确定性变红。
+    """
+    store.mutate("rate:dev", lambda c: ({"tokens": 0.0, "last": 1e9}, None))
+    assert store.rate_limit_allow("dev", rate_per_sec=1.0, burst=5) is True
+
+
+def test_rate_limit_backward_clock_does_not_lock_out(store):
+    """`last` 大于 `now`（NTP 回拨/新旧副本混跑）时不得倒扣令牌。
+
+    照算 `tokens + (now-last)*rate` 会得到 -3597，于是一个还剩 3 个令牌的桶
+    被判成超限，并且接下来每小时才能勉强爬回来——回拨 1 小时 = 锁死 1 小时。
+    负的 elapsed 一律当 0：本轮不补，但已有令牌照用。
+    """
+    now = 1000.0
+    store.mutate("rate:dev", lambda c: ({"tokens": 3.0, "last": now + 3600.0}, None))
+    assert store.rate_limit_allow("dev", now=now, rate_per_sec=1.0, burst=5) is True
+    assert store.get("rate:dev")["tokens"] == pytest.approx(2.0)
+
+
+def test_rate_limit_writes_caller_clock_into_shared_state(store):
+    """进去的值必须是**可跨副本比较**的那一枚（即调用方的时钟），否则限流一致性无从谈起。"""
+    store.rate_limit_allow("dev", now=123.5, rate_per_sec=1.0, burst=2)
+    assert store.get("rate:dev")["last"] == 123.5
+
+
 def test_rate_limit_per_key_isolated(store):
     kw = {"rate_per_sec": 0.0, "burst": 1}
     assert store.rate_limit_allow("a", now=0.0, **kw) is True

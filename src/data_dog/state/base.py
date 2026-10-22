@@ -81,13 +81,30 @@ class StateStore(ABC):
 
         跨副本一致：多实例共享同一 key 的桶，任一实例扣掉的令牌对其它实例可见，
         因此限流不再"各挡各的"。
+
+        时钟必须用**墙钟** `time.time()`，不能用 `time.monotonic()`
+        ---------------------------------------------------------
+        桶里存的 `last` 是**跨副本共享**的值，而 `monotonic` 是各进程私有的、
+        跨机器毫无可比性（`Lease` 的模块 docstring 已经把这个道理写过一遍）。
+        曾经这里用的是 `monotonic`，后果不是"限流有偏差"而是**限流变成事故**：
+        主机 B（开机 58 天，monotonic≈5e6）写下空桶后，主机 A（monotonic≈6.5e5）
+        算 `elapsed = 6.5e5 - 5e6 < 0`，令牌被**倒扣**到 -4.35e6 枚——按 1 req/s
+        算就是这台副本**约 50 天全量 429**。而单进程测试永远发现不了：它们都显式
+        传 `now=`，默认时钟一次都没被执行过。
+
+        负的 `elapsed` 一律当 0（而不是照算）：墙钟被 NTP 回拨、或滚动升级期间
+        新旧副本混跑（旧值来自 monotonic 纪元）时，`last` 可能比 `now` 还大。
+        照算会把令牌扣成负数，进而把客户端锁死；当 0 只是"这一轮不补"，
+        最坏退化为短暂的 fail-open，不会 fail-lockout。
+
+        代价（诚实说明）：与租约同一条边界——依赖各副本时钟大致同步（生产须跑 NTP）。
         """
-        ts = time.monotonic() if now is None else now
+        ts = time.time() if now is None else now
 
         def fn(cur: Any) -> tuple[Any, Any]:
             st = cur if isinstance(cur, dict) else {"tokens": float(burst), "last": ts}
-            tokens = min(float(burst),
-                         float(st["tokens"]) + (ts - float(st["last"])) * rate_per_sec)
+            elapsed = max(0.0, ts - float(st["last"]))
+            tokens = min(float(burst), float(st["tokens"]) + elapsed * rate_per_sec)
             allowed = tokens >= 1.0
             if allowed:
                 tokens -= 1.0
