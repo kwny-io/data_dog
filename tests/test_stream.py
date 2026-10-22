@@ -177,6 +177,52 @@ def test_http_push_rejects_bad_json_and_wrong_path():
         src.close()
 
 
+def test_wrong_path_returns_clean_404_when_body_arrives_late():
+    """错路径必须回**干净的 404**，不能退化成"连接被重置"。
+
+    旧实现：`_handle_post` 见到路径不对就 `send_error(404)`，从不读请求体。
+    未读的请求体留在内核接收缓冲区里，连接关闭时 TCP 回 **RST 而非 FIN** →
+    客户端 `urlopen` 拿到的是 `RemoteDisconnected`，404 在客户端侧凭空消失。
+    全量套件下（机器变慢、请求体晚到）这条路径会随机红，单跑永远绿。
+
+    这里不复现"偶发"，而是**确定性**地制造它：先发完请求行与头，等 150ms 让服务端
+    已经决定回 404，再发请求体。旧实现此刻必然 RST；新实现会先排空请求体再回 404。
+    """
+    import socket as _socket
+    import time
+
+    from data_dog.stream.http import HttpPushSource
+    src = HttpPushSource(tenant_id="t", host="127.0.0.1", port=0)
+    host, port = src.address
+    try:
+        sock = _socket.create_connection((host, port), timeout=5)
+        try:
+            request = (b"POST /wrong HTTP/1.1\r\n"
+                       b"Host: x\r\n"
+                       b"Content-Length: 2\r\n\r\n")
+            sock.sendall(request)
+            time.sleep(0.15)
+            try:
+                sock.sendall(b"{}")
+            except (ConnectionResetError, ConnectionAbortedError):
+                pass                      # 旧实现：写体时就被 RST
+            chunks = []
+            try:
+                while True:
+                    c = sock.recv(4096)
+                    if not c:
+                        break
+                    chunks.append(c)
+            except (ConnectionResetError, ConnectionAbortedError):
+                pass
+        finally:
+            sock.close()
+        raw = b"".join(chunks)
+        assert b"404" in raw, f"期望干净 404，实际收到 {raw[:80]!r}"
+    finally:
+        src.close()
+
+
 def test_http_push_survives_client_disconnect():
     """客户端半途断开不得在 handler 线程抛未捕获异常（曾经让全量测试随机红）。
 
@@ -404,3 +450,43 @@ def test_factory_kafka_multi_replica_allowed(monkeypatch):
 def _has(mod: str) -> bool:
     import importlib.util
     return importlib.util.find_spec(mod) is not None
+
+
+def test_stalled_body_does_not_hold_the_handler_thread():
+    """客户端声明 1000 字节却只发 10 字节、然后挂着不动 → 服务端必须有上限等待。
+
+    回错误响应前要排空请求体（否则连接被 RST、404 在客户端侧消失，见
+    `test_wrong_path_returns_clean_404_when_body_arrives_late`）。但排空不能没有尽头：
+    `ThreadingHTTPServer` 每个连接一条线程，慢速客户端能把线程耗干。
+    这条测试把 `read_timeout` 打进 0.5s —— 如果超时被删掉，服务端会一直阻塞在
+    `rfile.read(1000)`，客户端这边要等到自己的 5s 超时，断言 elapsed < 3.0 就红。
+    """
+    import socket
+    import time as _time
+
+    from data_dog.stream.http import HttpPushSource
+
+    src = HttpPushSource(tenant_id="t", host="127.0.0.1", port=0, read_timeout=0.5)
+    host, port = src.address
+    s = socket.create_connection((host, port), timeout=5)
+    try:
+        s.sendall(
+            b"POST /wrong HTTP/1.1\r\nHost: x\r\nContent-Length: 1000\r\n\r\n0123456789"
+        )
+        t0 = _time.monotonic()
+        s.settimeout(5)
+        got = b""
+        while True:                       # 读到服务端收尾为止（FIN → recv 空 / RST → 异常）
+            try:
+                chunk = s.recv(4096)
+            except ConnectionError:
+                break
+            if not chunk:
+                break
+            got += chunk
+        elapsed = _time.monotonic() - t0
+        assert elapsed < 3.0, f"服务端没有在 read_timeout 内收尾，等了 {elapsed:.1f}s"
+        assert b"404" in got, f"排空超时后仍应把 404 发出去，实际收到 {got[:120]!r}"
+    finally:
+        s.close()
+        src.close()

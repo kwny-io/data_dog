@@ -42,12 +42,13 @@ class HttpPushSource(QueueSource):
     def __init__(self, *, tenant_id: str, host: str = "127.0.0.1",
                  port: int = 8099, device_from_field: str = "",
                  path: str = "/ingest", max_body: int = 256 * 1024,
-                 maxsize: int = 10_000) -> None:
+                 maxsize: int = 10_000, read_timeout: float = 10.0) -> None:
         super().__init__(maxsize=maxsize)
         self._tenant = tenant_id
         self._device_field = device_from_field
         self._path = path
         self._max_body = max_body
+        self._read_timeout = read_timeout
         src = self
 
         class _Handler(BaseHTTPRequestHandler):
@@ -63,8 +64,38 @@ class HttpPushSource(QueueSource):
                 except (ConnectionError, TimeoutError) as e:
                     _log.debug("HTTP 推送客户端断开：%s", e)
 
+            # 读请求体必须有上限等待：客户端可以声明 1MB 却只发 10 字节然后挂在半路，
+            # `rfile.read(n)` 会一直阻塞——`ThreadingHTTPServer` 下每个这样的连接
+            # 吃掉一个线程（慢速攻击）。`StreamRequestHandler.setup()` 会把这个类属性
+            # 应用到 socket 上，超时后 `handle_one_request` 收尾关连接。
+            # 可配（`read_timeout`）而不是写死：测试要能在 0.5s 内验证超时真的生效。
+            timeout = src._read_timeout
+
+            def _drain(self) -> None:
+                """回错误响应前把请求体读掉。
+
+                为什么不直接 `send_error`：没读完的请求体留在内核接收缓冲区里，
+                连接关闭时（Linux/Windows 都一样）回的是 **RST 而不是 FIN**，
+                客户端拿到 `RemoteDisconnected` / `ConnectionResetError`，
+                而不是我们刚发出的 404/400——错误码在客户端侧凭空消失。
+                `test_http_push_rejects_bad_json_and_wrong_path` 曾因此在全量套件
+                （变慢、写入晚到）下随机红，单跑却永远绿。
+                超大声明长度（413 路径）不排空：排空它等于帮攻击者把带宽吃满，
+                那种情况就该直接断开。
+                """
+                try:
+                    n = int(self.headers.get("Content-Length", "0") or 0)
+                except ValueError:
+                    return
+                if 0 < n <= src._max_body:
+                    try:
+                        self.rfile.read(n)
+                    except (ConnectionError, TimeoutError) as e:
+                        _log.debug("排空请求体时客户端已断开：%s", e)
+
             def _handle_post(self):
                 if self.path.split("?", 1)[0] != src._path:
+                    self._drain()
                     self.send_error(404)
                     return
                 try:
