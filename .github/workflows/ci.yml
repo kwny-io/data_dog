@@ -18,6 +18,11 @@
 #   它补的正是 jsdom 单测**测不到**的那一段：服务端代理与密钥注入、租户 cookie、
 #   异步轮询（提交→轮询→取结果）、refs 面板的懒解析。宁可慢，也不假装这一层被覆盖了。
 #   边界：上游是 devmock 而非真实 data_dog 服务——证明的是链路与交互，不是后端语义。
+# - **前端真后端 E2E 腿**（`web-e2e-real-backend`）：把上一条的上游换成**真实
+#   `python -m data_dog.service`**（独立 SQLite + 独立 `.next-e2e-real`），因此它证明的是
+#   "浏览器 → Next 服务端代理 → 真 FastAPI"整段：不带密钥直连真服务必须 401、经代理必须
+#   可用、租户 cookie 白名单外必须 403，以及一条"对端真是真服务"的探针（devmock 专属
+#   `/v1/whoami` 在真服务上 404）。没有这条腿，前三条结论只能靠人手工跑一次，下次就失效。
 # - **覆盖率门禁**：总分 ≥85%（实测约 88%）+ **单模块 ≥70%**（scripts/cov_gate.py）；
 #   PG-only 文件（分区 DDL / PG StateStore）在默认 SQLite 腿口径不适用，由 postgres 腿的
 #   `--only storage/partitioning.py,state/pg.py --no-allow --min 80` 单独把关（同一文件默认腿 35%、PG 腿 87%）。
@@ -268,6 +273,53 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: playwright-report
+          path: |
+            web/playwright-report
+            web/test-results
+          retention-days: 7
+          if-no-files-found: ignore
+
+
+  web-e2e-real-backend:
+    name: 前端 E2E（真后端：浏览器 → Next 代理 → 真实 Python 服务）
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      # 后端要真起一个 data_dog 服务，所以这条腿要先把 Python 包装上（真服务进程由
+      # playwright.config.ts 拉起：`python -m data_dog.service`，独立 SQLite + 独立构建目录）。
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: 安装后端（真服务腿的运行时依赖）
+        working-directory: .
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: 安装依赖（按 lock 精确安装）
+        run: npm ci
+      - name: 安装 Chromium（含系统依赖）
+        run: npx playwright install --with-deps chromium
+      # E2E_REAL_PYTHON=python：Linux runner 上没有 .venv，config 的默认会回落到 "python"，
+      # 这里显式写出来，避免有朝一日给仓库带上 .venv 时静默换解释器。
+      - name: 跑真后端 E2E
+        run: npm run e2e
+        env:
+          E2E_REAL_BACKEND: "1"
+          E2E_REAL_PYTHON: python
+      - name: 失败时上传报告与轨迹
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-real-backend
           path: |
             web/playwright-report
             web/test-results
