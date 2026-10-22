@@ -48,12 +48,17 @@ test:            ## 全量测试（-rs：把跳过原因打出来，不把 skip 
 lint:            ## ruff 静态检查（全仓，单一真源）
 	$(PY) -m ruff check .
 
-typecheck:       ## mypy 类型检查
+typecheck:       ## mypy 类型检查（两个平台都查：CI 在 Ubuntu 上跑，只看 Windows 会漏）
 	$(PY) -m mypy src
+	$(PY) -m mypy --platform linux src
 
 gates:           ## 提交前必过：ruff + mypy + 全量测试（命令与 CI 逐字一致）
 	$(PY) -m ruff check .
 	$(PY) -m mypy src
+	# 两个平台都查：CI 的静态腿跑在 Ubuntu 上。只在本机 Windows 上查会漏掉
+	# “平台条件属性”（ctypes.WinDLL / msvcrt.open_osfhandle / os.O_BINARY …）——
+	# 2026-10-17 的 CI 就是这样红了一个月而本机全绿（ledger #103）。
+	$(PY) -m mypy --platform linux src
 	$(PY) -m pytest -q -rs
 	@test -n "$${DD_TEST_PG_URL:-}" || echo "[gates] ⚠ 未设 DD_TEST_PG_URL：PG/redis 相关测试被跳过（没跑 ≠ 通过）。CI 的 postgres/redis 腿会真跑；本机验：make pg-test"
 

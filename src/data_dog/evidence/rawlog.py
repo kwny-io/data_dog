@@ -52,6 +52,7 @@ import ctypes
 import hashlib
 import os
 import stat
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -188,6 +189,39 @@ class _ByHandleFileInformation(ctypes.Structure):
                 ("nFileIndexLow", ctypes.c_uint32)]
 
 
+def _win_kernel32_dll():
+    """Windows 专属：装载 kernel32。
+
+    为什么要有这层薄包装：CI 的静态腿跑在 Linux 上，`mypy --platform linux` 看不到
+    `ctypes.WinDLL` / `ctypes.get_last_error` / `msvcrt.open_osfhandle` / `os.O_BINARY`
+    这几个**平台条件属性**，于是 CI 报 “Module has no attribute”，而本机 Windows 的 mypy 是绿的——
+    两边看到的类型环境不同，这是真实存在的“本地绿 ≠ CI 绿”。
+
+    mypy 认 `sys.platform` 平台窄化：把属性访问圈进 `sys.platform == "win32"` 分支后，
+    非 win32 环境（含 CI）不分析那一支，两边都干净。运行时行为零变化：
+    非 Windows 永远进不来（`_win_kernel32()` 已先行拒绝）。
+    """
+    if sys.platform == "win32":
+        return ctypes.WinDLL("kernel32", use_last_error=True)
+    raise RuntimeError("只有 Windows 才有 Win32 句柄 API")   # pragma: no cover - 平台互斥
+
+
+def _win_last_error() -> int:
+    """同上：`ctypes.get_last_error` 只存在于 Windows 的类型环境。"""
+    if sys.platform == "win32":
+        return ctypes.get_last_error()
+    raise RuntimeError("只有 Windows 才有 Win32 句柄 API")   # pragma: no cover - 平台互斥
+
+
+def _win_fd_from_handle(handle) -> int:
+    """句柄→fd。`msvcrt.open_osfhandle` 与 `os.O_BINARY` 同样只存在于 Windows。"""
+    if sys.platform == "win32":
+        import msvcrt
+
+        return msvcrt.open_osfhandle(handle, os.O_RDONLY | os.O_BINARY)
+    raise RuntimeError("只有 Windows 才有 Win32 句柄 API")   # pragma: no cover - 平台互斥
+
+
 def _win_kernel32():
     """惰性装好 Win32 原型（只在 Windows 上真正用到）。"""
     global _K32
@@ -196,7 +230,7 @@ def _win_kernel32():
     if _K32 is None:
         import ctypes.wintypes as wt
 
-        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32 = _win_kernel32_dll()
         k32.CreateFileW.restype = wt.HANDLE
         k32.CreateFileW.argtypes = [wt.LPCWSTR, wt.DWORD, wt.DWORD, ctypes.c_void_p,
                                    wt.DWORD, wt.DWORD, wt.HANDLE]
@@ -244,7 +278,6 @@ def _open_beneath_windows(root: Path, rel: Path):
     根自身是符号链接/挂载点没问题——`cfg.base_dir` 在配置加载时就 `resolve()` 过了。
     """
     k32 = _win_kernel32()
-    import msvcrt
 
     full = root / rel
     handle = k32.CreateFileW(
@@ -253,7 +286,7 @@ def _open_beneath_windows(root: Path, rel: Path):
         None,
     )
     if handle == _INVALID_HANDLE_VALUE:
-        err = ctypes.get_last_error()
+        err = _win_last_error()
         if err in (_ERROR_FILE_NOT_FOUND, _ERROR_PATH_NOT_FOUND):
             return None, None
         if err == _ERROR_ACCESS_DENIED and full.is_dir():
@@ -272,7 +305,7 @@ def _open_beneath_windows(root: Path, rel: Path):
             raise RawLogRefused("句柄实际指向 " + repr(actual)
                                 + "，与受控路径不一致（拒绝读取）")
         size = (int(info.nFileSizeHigh) << 32) | int(info.nFileSizeLow)
-        fd = msvcrt.open_osfhandle(handle, os.O_RDONLY | os.O_BINARY)
+        fd = _win_fd_from_handle(handle)
         if fd == -1:                                    # pragma: no cover - 极罕见
             raise RawLogRefused("句柄转 fd 失败：" + repr(str(rel)))
         handle = None                                   # 所有权已交给 fd

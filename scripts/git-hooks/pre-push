@@ -19,9 +19,13 @@ else
     PY=python
 fi
 
-echo "[pre-push] 与 CI 的 lint 腿同口径：ruff check . / mypy src；测试用 -rs，跳过原因会打出来"
+echo "[pre-push] 与 CI 的 lint 腿同口径：ruff check . / mypy src（两个平台）；测试用 -rs，跳过原因会打出来"
 "$PY" -m ruff check .
 "$PY" -m mypy src
+# 第二个平台：CI 的静态腿跑在 Ubuntu 上，只查本机平台会漏“平台条件属性”
+# （ctypes.WinDLL / msvcrt.open_osfhandle / os.O_BINARY …）。ledger #103：
+# 2026-10-17 的 CI 静态腿红了一个月，而本机 Windows 的 mypy 一直是 Success。
+"$PY" -m mypy --platform linux src
 "$PY" -m pytest -q -rs
 
 # 未设 DD_TEST_PG_URL 时，PG/redis 腿的测试是**被跳过**而不是通过。
