@@ -7,9 +7,13 @@
 
 from __future__ import annotations
 
+import os
 import re
+import shutil
+import subprocess
 from pathlib import Path
 
+import pytest
 import yaml
 
 REPO = Path(__file__).resolve().parents[1]
@@ -141,3 +145,104 @@ def test_kubeconform_summary_assertion_catches_zero_validation():
     # 生产值里 2 个 CRD 跳过是预期的
     assert run("Summary: 10 resources - Valid: 8, Invalid: 0, Errors: 0, Skipped: 2", 2) == 0
 
+
+
+PYPROJECT = REPO / "pyproject.toml"
+PRE_PUSH = REPO / "scripts" / "git-hooks" / "pre-push"
+
+
+def _marker_gates() -> list[tuple[str, str]]:
+    """从 pyproject 的 markers 声明里取 (marker, 门控环境变量) 对。
+
+    markers 里写的是「redis: 需要真实 Redis 的集成测试（设 DD_TEST_REDIS_URL 才运行）」,
+    所以 pyproject 本身就是"哪条腿靠哪个变量"的单一真源，测试不再抄一份。
+    """
+    text = PYPROJECT.read_text(encoding="utf-8")
+    block = re.search(r"markers\s*=\s*\[(.*?)\]", text, re.S)
+    assert block, "pyproject.toml 里找不到 pytest markers 声明"
+    pairs = re.findall(r'"(\w+):[^"]*?设\s*(\w+)\s*才运行', block.group(1))
+    assert pairs, "markers 声明里没有匹配到「设 XXX 才运行」的门控变量"
+    return pairs
+
+
+def _skip_warning_output(**overrides: str) -> str:
+    """**真的执行** pre-push 的提示出口，拿到它实际打印的文本。
+
+    行为级而非文本级：断言"钩子文件里有 DD_TEST_REDIS_URL"是弱守卫——
+    把分支改成 `if false` 断言照样绿（实测过）。执行出口才能证明提示可达。
+    """
+    bash = shutil.which("bash")
+    if not bash:
+        pytest.skip("本机没有 bash，跳过 pre-push 行为断言")
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("DD_TEST_PG_URL", "DD_TEST_REDIS_URL")}
+    env.update(overrides)
+    r = subprocess.run(
+        [bash, str(PRE_PUSH), "--print-skip-warnings"],
+        # 钩子输出是 UTF-8；Windows 默认按 GBK 解码会炸（cp936 解不开中文提示）。
+        capture_output=True, encoding="utf-8", errors="replace", env=env,
+        timeout=60, cwd=str(REPO),
+    )
+    assert r.returncode == 0, f"提示出口非零退出：{r.returncode} / {r.stderr}"
+    return r.stdout
+
+
+def test_pre_push_actually_warns_about_every_marker_gate():
+    """每条需要真服务的腿，push 时都必须被**真的提示**出来（没跑 ≠ 通过）。"""
+    out = _skip_warning_output()
+    missing = [
+        f"{marker}→{env}"
+        for marker, env in _marker_gates()
+        if env not in out or marker not in out
+    ]
+    assert not missing, (
+        "pre-push 的跳过提示漏了这些腿/门控变量：" + ", ".join(missing)
+        + "。实际输出：" + out
+    )
+
+
+def test_pre_push_does_not_conflate_marker_gates():
+    """门控变量不能互相冒充：redis 的提示里不许出现 PG 的变量名（反之亦然）。"""
+    out = _skip_warning_output()
+    gates = dict(_marker_gates())
+    pg_env, redis_env = gates.get("postgres"), gates.get("redis")
+    if not (pg_env and redis_env):
+        return  # marker 声明不完整时由上面的用例负责报错
+    for line in out.splitlines():
+        if not line.strip():
+            continue
+        assert not (pg_env in line and redis_env in line), (
+            f"同一行同时出现两个门控变量（提示语在冒充）：{line}"
+        )
+    # 反向对照：两边的提示确实各出现过一次，否则上面的断言会空转
+    assert any(pg_env in ln for ln in out.splitlines()), f"没有 {pg_env} 的提示"
+    assert any(redis_env in ln for ln in out.splitlines()), f"没有 {redis_env} 的提示"
+
+
+def test_each_gate_is_controlled_only_by_its_own_variable():
+    """**环境矩阵**：每条腿的提示只由自己的门控变量决定。
+
+    这条用例是为一个真实的 bug 写的：redis 的提示曾挂在 `DD_TEST_PG_URL` 名下，
+    于是"设了 PG 变量、没设 redis"的人永远收不到 redis 被跳过的警告（静默跳过）。
+    只看"两行提示都出现过"是抓不到的——必须按组合验。
+    """
+    gates = dict(_marker_gates())
+    pg_env, redis_env = gates.get("postgres"), gates.get("redis")
+    if not (pg_env and redis_env):
+        pytest.skip("markers 声明不完整，无法按变量名做矩阵断言")
+    pg_marker, redis_marker = "postgres", "redis"
+
+    # 1) 只设 PG：redis 必须被提示，PG 不许被提示
+    out = _skip_warning_output(**{pg_env: "postgresql+psycopg://x/y"})
+    assert redis_env in out and redis_marker in out, f"只设 PG 时没提示 redis：{out}"
+    assert "未设 " + pg_env not in out, f"设了 {pg_env} 却仍提示未设：{out}"
+
+    # 2) 只设 redis：PG 必须被提示，redis 不许被提示
+    out = _skip_warning_output(**{redis_env: "redis://127.0.0.1:6379/0"})
+    assert pg_env in out and pg_marker in out, f"只设 redis 时没提示 PG：{out}"
+    assert "未设 " + redis_env not in out, f"设了 {redis_env} 却仍提示未设：{out}"
+
+    # 3) 两个都设：一条提示都不该有
+    out = _skip_warning_output(**{pg_env: "postgresql+psycopg://x/y",
+                                  redis_env: "redis://127.0.0.1:6379/0"})
+    assert "未设 " not in out, f"两个门都设了却仍提示未设：{out}"

@@ -23,7 +23,7 @@
 | 📊 | **带 ground truth 的规模化评估（双栏）** | **忠实 MuJoCo 数据集 10 万条**，分层抽跑真实 Agent：**确定性 provider** n=2000 → **准确率 0.818**（Wilson 95% CI 0.801–0.834）、normal 误报率 **0.064**；**真 LLM** n=500 → **0.708**（0.667–0.746）、normal 误报率 **0.72**（故障召回反而更高）。逐类召回一并如实报（**F4 偏置 0.43 为当前最低**）；误报根因（裁决口径把"证据不足"与"证据充分但正常"混为一谈）**已定位并改口径，效果标注为未实测**（本机 key 余额为零）；另有 7 个评估 case（含 2 个对抗性：提示注入 / 身份伪装） |
 | 🚚 | **能交付：服务 + 容器 + HTTPS** | FastAPI（liveness / readiness 分离）+ Dockerfile + compose（含 Caddy 自动申请 HTTPS）+ Makefile |
 
-**规模**：源码 158 个 Python 文件 / 30731 行，测试 117 个文件 / 27637 行；前端 `web/` 为 Next.js 15 控制台（70 个 TS/TSX 文件）；5 份正式事件 JSON Schema；39 个 `make` 命令（另有 `help`）。
+**规模**：源码 158 个 Python 文件 / 30731 行，测试 117 个文件 / 27742 行；前端 `web/` 为 Next.js 15 控制台（70 个 TS/TSX 文件）；5 份正式事件 JSON Schema；39 个 `make` 命令（另有 `help`）。
 
 ---
 
@@ -175,6 +175,14 @@ pytest -q -rs -m postgres     # 等价于 make pg-test
 > Windows 上很多机器**没装 make**（`make: command not found`），直接跑上面的 `pytest`
 > 命令即可，别因没 make 以为库测试跑不了；另：Windows 的 `make` 调到的 `bash` 可能是 WSL，
 > 看不到 `D:\`，所以本仓库的 Windows 验证入口是 `.bat`/`.sh` 而不是 `make`。
+
+redis 腿同理（门控变量是 **`DD_TEST_REDIS_URL`**，不是 PG 那个）：
+
+```bash
+docker run -d --name dd-redis -p 6379:6379 redis:7-alpine   # 与 CI 同口径，注意不是 redis:7
+export DD_TEST_REDIS_URL=redis://127.0.0.1:6379/0
+pytest -q -rs -m redis
+```
 
 ---
 

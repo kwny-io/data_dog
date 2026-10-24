@@ -60,7 +60,8 @@ gates:           ## 提交前必过：ruff + mypy + 全量测试（命令与 CI 
 	# 2026-10-17 的 CI 就是这样红了一个月而本机全绿（ledger #103）。
 	$(PY) -m mypy --platform linux src
 	$(PY) -m pytest -q -rs
-	@test -n "$${DD_TEST_PG_URL:-}" || echo "[gates] ⚠ 未设 DD_TEST_PG_URL：PG/redis 相关测试被跳过（没跑 ≠ 通过）。CI 的 postgres/redis 腿会真跑；本机验：make pg-test"
+	@test -n "$${DD_TEST_PG_URL:-}" || echo "[gates] ⚠ 未设 DD_TEST_PG_URL：postgres 腿被跳过（没跑 ≠ 通过）。本机验：pytest -q -rs -m postgres（或 make pg-test）"
+	@test -n "$${DD_TEST_REDIS_URL:-}" || echo "[gates] ⚠ 未设 DD_TEST_REDIS_URL：redis 腿被跳过（没跑 ≠ 通过）。本机验：docker run -d -p 6379:6379 redis:7-alpine && export DD_TEST_REDIS_URL=redis://127.0.0.1:6379/0 && pytest -q -rs -m redis"
 
 hooks:           ## 装 git 钩子（pre-commit: ruff 变更文件；pre-push: make gates）
 	git config core.hooksPath scripts/git-hooks

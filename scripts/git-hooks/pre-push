@@ -4,7 +4,8 @@
 # 为什么放在 push 而不是 commit：全量测试约 3 分钟，每次提交都等一遍没人受得了；
 # 而"推上去才发现红"才是最贵的（CI 排队 + 上下文切换）。切在 push 这一步性价比最高。
 #
-# 启用：make hooks   （等价于 git config core.hooksPath scripts/git-hooks）
+# 启用：make hooks   （等价于 git config core.hooksPath scripts/git-hooks；没装 make 就直接
+#       跑 git config core.hooksPath scripts/git-hooks）
 # 临时跳过：git push --no-verify  （不建议）
 set -e
 
@@ -19,28 +20,57 @@ else
     PY=python
 fi
 
+# PG 与 redis 是**两个独立的门**：PG 看 DD_TEST_PG_URL、redis 看 DD_TEST_REDIS_URL
+# （见 pyproject.toml 的 markers 声明与 tests/test_state_redis_real.py）。
+# 早先的版本把两者归到同一个变量名下，于是「只设了 PG 变量」的人恰好**收不到**
+# redis 被跳过的警告——静默跳过，正是这条钩子当初要防的东西。
+#
+# 为什么做成函数 + `--print-skip-warnings` 出口：光断言"提示文本里含 DD_TEST_REDIS_URL"
+# 是弱守卫（把分支改成 `if false`，断言照样绿；实测这么改过，断言没红）。
+# 测试执行 `pre-push --print-skip-warnings` 并断言输出，才能证明这段提示**可达且真的打印**，
+# 而且测的就是 push 时走的同一段代码。
+print_skip_warnings() {
+    if [ -z "${DD_TEST_PG_URL:-}" ]; then
+        echo "[pre-push] ⚠ 未设 DD_TEST_PG_URL：PG 腿的用例本次被跳过（没跑 ≠ 通过）。"
+        echo "           本机想验（镜像与 CI 同口径 postgres:16-alpine）："
+        echo "             docker run -d --name dd-pg -p 5432:5432 -e POSTGRES_USER=data_dog \\"
+        echo "               -e POSTGRES_PASSWORD=data_dog_dev_pw -e POSTGRES_DB=data_dog postgres:16-alpine"
+        echo "             export DD_TEST_PG_URL=postgresql+psycopg://data_dog:data_dog_dev_pw@127.0.0.1:5432/data_dog"
+        echo "             \"$PY\" -m pytest -q -rs -m postgres"
+        echo "           有 make 的可走捷径：make pg-test（它就是上面那条 pytest）。"
+    fi
+    if [ -z "${DD_TEST_REDIS_URL:-}" ]; then
+        echo "[pre-push] ⚠ 未设 DD_TEST_REDIS_URL：redis 腿的用例本次被跳过（没跑 ≠ 通过）。"
+        echo "           本机想验（镜像与 CI 同口径 redis:7-alpine；注意不是 redis:7）："
+        echo "             docker run -d --name dd-redis -p 6379:6379 redis:7-alpine"
+        echo "             export DD_TEST_REDIS_URL=redis://127.0.0.1:6379/0"
+        echo "             \"$PY\" -m pytest -q -rs -m redis"
+    fi
+    echo "           ⚠ Windows 上常常根本没装 make：那就直接跑上面的 pytest 命令，别因"
+    echo "             'make: command not found' 以为跑不了库测试（实测这两条 pytest 路径可用）。"
+}
+
+# 行为出口：只打印跳过提示然后退出。必须在跑 ruff/mypy/pytest 之前，否则测试得等 7 分钟。
+# 不 unset 任何变量：调用方传进来的环境就是被测环境，测试才能用「只设 PG」「只设 redis」
+# 「两个都设」三种组合验证**每个门只由自己的变量控制**（否则把条件写错变量也能骗过断言）。
+if [ "${1:-}" = "--print-skip-warnings" ]; then
+    print_skip_warnings
+    exit 0
+fi
+
 echo "[pre-push] 与 CI 的 lint 腿同口径：ruff check . / mypy src（两个平台）；测试用 -rs，跳过原因会打出来"
 "$PY" -m ruff check .
 "$PY" -m mypy src
-# 第二个平台：CI 的静态腿跑在 Ubuntu 上，只查本机平台会漏“平台条件属性”
+# 第二个平台：CI 的静态腿跑在 Ubuntu 上，只查本机平台会漏"平台条件属性"
 # （ctypes.WinDLL / msvcrt.open_osfhandle / os.O_BINARY …）。ledger #103：
 # 2026-10-17 的 CI 静态腿红了一个月，而本机 Windows 的 mypy 一直是 Success。
 "$PY" -m mypy --platform linux src
 "$PY" -m pytest -q -rs
 
-# 未设 DD_TEST_PG_URL 时，PG/redis 腿的测试是**被跳过**而不是通过。
-# 所以回显不许说谎：不说这句，“全绿”很容易被读成“连库也验了”。
-if [ -z "${DD_TEST_PG_URL:-}" ]; then
+# 未见过的真服务门禁要说出来：跳过不等于通过。
+if [ -z "${DD_TEST_PG_URL:-}" ] || [ -z "${DD_TEST_REDIS_URL:-}" ]; then
     echo ""
-    echo "[pre-push] ⚠ 未设 DD_TEST_PG_URL：PG/redis 相关测试本次被跳过（没跑 ≠ 通过）。"
-    echo "           CI 真跑这两条腿：postgres:16 + \`pytest -m postgres\`、redis:7 + \`pytest -m redis\`。"
-    echo "           本机想验：先放开 compose.yaml 里 db 的 ports（默认注释），然后"
-    echo "             docker compose up -d db"
-    echo "             export DD_TEST_PG_URL=postgresql+psycopg://data_dog:data_dog_dev_pw@127.0.0.1:5432/data_dog"
-    echo "             \"$PY\" -m pytest -q -rs -m postgres"
-    echo "           有 make 的可走捷径：make pg-test（它就是上面那条 pytest）。"
-    echo "           ⚠ Windows 上常常根本没装 make：那就直接跑上面的 pytest 命令，别因"
-    echo "             'make: command not found' 以为跑不了库测试（实测这条 pytest 路径可用）。"
+    print_skip_warnings
 fi
 
 echo "[pre-push] 全部通过（覆盖率与单模块下限由 CI 的 test 腿把关；PG/redis 腿见上）"
