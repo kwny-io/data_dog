@@ -205,10 +205,25 @@ export interface IngestStats {
 }
 
 export interface IngestResult {
-  ok: true;
+  /** 请求是否被正常处理。**503/207 时也会返回 200 形状的对象，此处为 false**（见 error/detail）。 */
+  ok: boolean;
+  /**
+   * 批内**有**事件被拒（等价于 `stats.rejected > 0`）。
+   *
+   * 后端是批处理接口、限流做在批内每个事件上，所以 **HTTP 200 + ok:true 不等于“全部落库”**。
+   * 判断“真落库”请看 `persisted` 与 `stats.normalized`。语义详见 `docs/data_plane.md` §3.5（#102）。
+   * 这个字段曾经在后端有、在这个 interface 里没有，于是本仓库自己的 TS 客户端**看不到它**，
+   * 而文档却要求调用方看它——契约漂移已由 `tests/test_web_api_contract.py` 盯住。
+   */
+  partial: boolean;
   stats: IngestStats;
-  persisted: { telemetry: number; candidates: number };
+  /** 同步路径是 {telemetry, candidates}；write-behind 路径是 {mode:"write_behind", queued:true}，
+   *  此时**不保证已落库**；失败路径（503/207）下不存在。 */
+  persisted?: { telemetry: number; candidates: number } | { mode: "write_behind"; queued: boolean };
   candidates: CandidateEvent[];
+  /** 仅失败路径存在：write_behind_unavailable / write_behind_queue_full / persist_failed。 */
+  error?: string;
+  detail?: string;
 }
 
 // ------------------------------------------------- investigation (spec §3.5)

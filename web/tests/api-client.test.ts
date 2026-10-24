@@ -49,6 +49,9 @@ describe("API client — header injection", () => {
         return HttpResponse.json({
           ok: true,
           stats: { ingested: 0, resolved: 0, rejected: 0, rejected_by_reason: {}, normalized: 0, candidates: 0 },
+          // partial 是 #102 的机读标记，后端必返；fixture 也照实带上，
+          // 免得 mock 与真响应的形状越差越远（tests/test_web_api_contract.py 盯契约字段）。
+          partial: false,
           persisted: { telemetry: 0, candidates: 0 },
           candidates: [],
         });
