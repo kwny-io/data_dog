@@ -200,11 +200,20 @@ def _payload(env: RawLogEnvelope) -> tuple[dict[str, Any], dict[str, Any] | None
     if env.payload_inline:
         import json
         try:
-            return json.loads(env.payload_inline), None
+            parsed = json.loads(env.payload_inline)
         except (json.JSONDecodeError, TypeError) as e:
             return {}, err(ToolErrorCode.INVALID_INPUT,
                            f"payload_inline 不是合法 JSON: {e}",
                            reason="payload_malformed")
+        # 合法 JSON **不等于**合法载荷：`42`、`[1,2]`、`"text"`、`true` 都能被
+        # json.loads 接受，但下文全部按 mapping 用（`payload.get(...)`）。放过它们就是
+        # 让一条 vendor 发来的数组把**整批**打成 500（AttributeError）。所以这里和
+        # “不是合法 JSON”同样处理：失败关闭 + 给出可行动的原因。
+        if not isinstance(parsed, dict):
+            return {}, err(ToolErrorCode.INVALID_INPUT,
+                           f"payload_inline 必须是 JSON 对象，实际是 {type(parsed).__name__}",
+                           reason="payload_not_object")
+        return parsed, None
     return {}, None
 
 

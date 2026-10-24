@@ -152,6 +152,12 @@ class TelemetryGateway:
 
         # 大小限制
         inline = raw.get("payload_inline")
+        # 类型先验：`payload_inline` 只会被当**文本**用（`.encode()` 算大小、下游 `json.loads`），
+        # 但 JSON 里它可以是数字/对象/数组。不先卡类型就会在 `inline.encode` 这行抛
+        # AttributeError → 整批 500。与“缺必需字段”同属调用方错误，必须 4xx。
+        if inline is not None and not isinstance(inline, str):
+            return self._reject("payload_inline_not_string", ToolErrorCode.INVALID_INPUT,
+                                f"payload_inline 必须是字符串，实际是 {type(inline).__name__}")
         if inline is not None:
             size = len(inline.encode("utf-8", errors="replace"))
             if size > _MAX_PAYLOAD_BYTES:
