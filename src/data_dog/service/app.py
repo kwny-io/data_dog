@@ -46,10 +46,12 @@ from .runtime import (
     ServiceState,  # noqa: F401
     _log,
     _route_template,
+    _set_migration_outcome,
     _set_stream,
     _start_checkpoint_if_enabled,
     _start_escalation_if_enabled,
     _start_job_runner_if_needed,
+    _startup_mark,
     _state,
     _stop_checkpoint,
     _stop_escalation,
@@ -68,15 +70,30 @@ async def _lifespan(app: FastAPI):
         # 加列/改类型在生产库上不生效且不报错，是典型的"看起来跑通了"）
         if migrations.auto_migrate_enabled():
             migrations.upgrade_head()
-            _log.info("迁移完成", extra={"revision": migrations.current_revision()})
+            rev = migrations.current_revision()
+            _set_migration_outcome(revision=rev)
+            _log.info("迁移完成", extra={"revision": rev})
         else:
             # 生产多副本场景：多个实例同时启动会并发跑迁移、互相竞争，
             # 故显式关闭，由部署流程执行 `make migrate`
             _log.info("自动迁移已关闭（DD_AUTO_MIGRATE=0），请确保部署流程已执行 alembic upgrade head")
     except Exception as e:                           # noqa: BLE001
         # 迁移失败不阻止启动：由 /readyz 报未就绪，编排层据此摘流量
+        detail = f"{type(e).__name__}: {e}"
+        _set_migration_outcome(error=detail)
         _log.error("迁移失败（服务仍启动，/readyz 将报未就绪）",
-                   extra={"error": f"{type(e).__name__}: {e}"})
+                   extra={"error": detail})
+        # **关键**：这条不能只进 logging。实测（compose 起旧卷库）迁移失败时，
+        # `_log.error` 被调用了但记录到不了 `docker logs`（lifespan 期间根 handler
+        # 的 stream 被换过）。启动失败的“为什么”必须无条件可见，否则现场只看到
+        # 其它告警刷屏。同时给一条可直接照做的下一步。
+        _startup_mark(
+            "[data-dog] 启动：数据库迁移失败，服务将以未就绪（/readyz 503）运行。\n"
+            f"[data-dog] 原因：{detail.splitlines()[0]}\n"
+            "[data-dog] 若报表已存在（DuplicateTable）而库里有旧表却没版本表，说明这是"
+            "“迁移前就存在的库”：先 `alembic stamp <与旧表匹配的 revision>`，再 `alembic upgrade head`；"
+            "或者在可丢弃的库上 `docker compose down -v && docker compose up -d`。"
+        )
     try:
         # A9：分区有效期。默认关（结构变更由集群 CronJob 做）；开了就先补齐未来 N 个月。
         # 失败不阻止启动，但必须记 error——跨月写入会直接报 no partition of relation。

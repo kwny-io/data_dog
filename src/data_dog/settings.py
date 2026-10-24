@@ -449,6 +449,19 @@ def auto_migrate() -> bool:
     return _get_bool("DD_AUTO_MIGRATE", default=True)
 
 
+def migration_lock_timeout_s() -> float:
+    """迁移咨询锁的最长等待（秒）。默认 60s。
+
+    为什么需要一个上界（2026-10-25 实测）：之前用的是阻塞式 `pg_advisory_lock`，
+    有别的会话持锁时就一直等。在 compose 里起服务（旧库卷 + 残留会话）时实际看到的是：
+    alembic 打印完 `Running upgrade -> …` 就再无下文，**无 ERROR、无超时、不退出**；
+    而 `/healthz` 仍然是 200（进程活着），于是“服务起来了但永远不 ready”，
+    现场只看到其他告警刷屏，根本看不出卡在迁移锁上。
+    60s 足够覆盖正常迁移（秒级到几十秒级），又能把“卡住了”变成一条明确错误。
+    """
+    return max(0.0, _get_float("DD_MIGRATION_LOCK_TIMEOUT", default=60.0))
+
+
 # 为什么这三个超时默认 5s（而不是库默认的"无限/30s"）：见 storage/db.py 的
 # `engine_kwargs` docstring。要点是——建连/拿连接的等待必须有上界，且上界要与
 # 本仓其它"快速失败"预算同量级（redis 状态冲突重试 5s、通知 HTTP 5s），

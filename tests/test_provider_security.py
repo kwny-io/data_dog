@@ -118,3 +118,18 @@ def test_save_config_sets_0600(tmp_path):
     p = save_config("deepseek", "sk-test-1234567890", "deepseek-chat", root=tmp_path)
     assert (p.stat().st_mode & 0o777) == 0o600
     print("PASS test_save_config_sets_0600")
+
+
+def test_redact_masks_password_inside_connection_url():
+    """连接串里的口令必须遮掉（DSN 几乎总会出现在数据库异常消息里）。
+
+    为什么单独测：`/readyz` 是**公开探针**。SQLAlchemy/psycopg 的报错形如
+    `... (postgresql+psycopg://data_dog:hunter2@db:5432/data_dog)`，而既有的
+    `password=xxx` 类规则只认 `key=value`，认不出 URL 里的 `:password@`
+    —— 于是初始口令会原样回给任何未认证调用方。2026-10-25 由
+    `test_startup_migration_visibility.py::test_startup_error_is_redacted` 抓出。
+    """
+    out = redact("could not connect (postgresql+psycopg://data_dog:hunter2@db:5432/data_dog)")
+    assert "hunter2" not in out, out
+    # 只遮口令：宿主/库名要留着，否则排查时看不出连的是谁
+    assert "db:5432" in out and "data_dog" in out, out

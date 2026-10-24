@@ -46,6 +46,38 @@ from ..state.base import StateStore
 
 _log = logging.getLogger(__name__)
 
+
+class _FailureThrottle:
+    """同类失败**限频报日志**：首次与每 `window_s` 一条，并带累计次数。
+
+    为什么需要它（2026-10-25 实测）：compose 起服务时库缺表，worker 每轮都失败，
+    几分钟就打了 **5919 条** `取件失败（共享队列不可用）`。后果不是日志太大，而是：
+    真正的原因（迁移卡在咨询锁上、`/readyz` 503）被刷屏**完全淹没**，现场看不到。
+    日志应该是“状态变化”而不是“次数累加”：所以失败降频并带计数，恢复时补一条 INFO。
+
+    语义边界：只负责日志，**不影响控制流**（失败该怎么退避/继续由调用方决定）。
+    """
+
+    def __init__(self, window_s: float = 60.0) -> None:
+        self._window = float(window_s)
+        self._state: dict[str, tuple[float, int]] = {}
+
+    def fail(self, key: str, msg: str, **extra: Any) -> None:
+        now = time.monotonic()
+        last, count = self._state.get(key, (0.0, 0))
+        count += 1
+        self._state[key] = (last, count)
+        if last == 0.0 or now - last >= self._window:
+            self._state[key] = (now, count)
+            _log.warning("%s（每 %.0fs 最多报一次，本次累计 %d 次）",
+                         msg, self._window, count, extra=extra)
+
+    def recover(self, key: str, msg: str, **extra: Any) -> None:
+        """成功时清除计数；只在“曾失败过”时打一条 INFO。"""
+        prev = self._state.pop(key, None)
+        if prev and prev[1]:
+            _log.info("%s（此前累计失败 %d 次）", msg, prev[1], extra=extra)
+
 # 共享待办队列在 StateStore 里的 key（全局，无租户维度——worker 需跨租户取件）
 _QUEUE_KEY = "investigation:queue"
 _MAX_BATCH = 16
@@ -116,6 +148,8 @@ class JobRunner:
         self._executor: ThreadPoolExecutor | None = None
         self._stop = threading.Event()
         self._futures: list[Any] = []
+        # 失败日志限频：避免“库挂了”把日志刷成 5919 条、把真因洗掉（见 _FailureThrottle）
+        self._faillog = _FailureThrottle()
         # 每个 worker 线程用独立 worker_id，便于日志定位"谁在跑这个 job"
         self._worker_ids: dict[int, str] = {}
         self.recovered: dict[str, int] = {"requeued": 0, "abandoned": 0, "errors": 0}
@@ -182,12 +216,14 @@ class JobRunner:
 
     def _pop(self, *, batch_size: int) -> list[dict[str, Any]]:
         try:
-            return self._queue.pop_batch(min(_MAX_BATCH, max(1, batch_size)))
+            out = self._queue.pop_batch(min(_MAX_BATCH, max(1, batch_size)))
         except Exception as e:                        # noqa: BLE001
-            _log.warning("取件失败（共享队列不可用）",
-                         extra={"error": f"{type(e).__name__}: {e}"})
+            self._faillog.fail("queue_pop", "取件失败（共享队列不可用）",
+                               error=f"{type(e).__name__}: {e}")
             self._stop.wait(self._poll_s)
             return []
+        self._faillog.recover("queue_pop", "共享队列已恢复（取件正常）")
+        return out
 
     def _handle(self, entry: dict[str, Any], worker_id: str) -> None:
         from ..storage import repository as repo
@@ -317,9 +353,10 @@ class JobRunner:
             with session_scope(system=True) as s:
                 stale_pending = repo.list_stale_jobs(
                     s, status="pending", older_than_s=pend, limit=cap)
+            self._faillog.recover("recover_pending", "恢复扫描（pending）已恢复")
         except Exception as e:                        # noqa: BLE001
-            _log.warning("恢复扫描（pending）失败",
-                         extra={"error": f"{type(e).__name__}: {e}"})
+            self._faillog.fail("recover_pending", "恢复扫描（pending）失败",
+                               error=f"{type(e).__name__}: {e}")
             stats["errors"] += 1
             stale_pending = []
         for row in stale_pending:
@@ -338,9 +375,10 @@ class JobRunner:
             with session_scope(system=True) as s:
                 stale_running = repo.list_stale_jobs(
                     s, status="running", older_than_s=run, limit=cap)
+            self._faillog.recover("recover_running", "恢复扫描（running）已恢复")
         except Exception as e:                        # noqa: BLE001
-            _log.warning("恢复扫描（running）失败",
-                         extra={"error": f"{type(e).__name__}: {e}"})
+            self._faillog.fail("recover_running", "恢复扫描（running）失败",
+                               error=f"{type(e).__name__}: {e}")
             stats["errors"] += 1
             stale_running = []
         for row in stale_running:

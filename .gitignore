@@ -85,3 +85,6 @@ benchmarks/last_run.txt
 /.ledger_*.md
 artifacts/
 pip-audit.json
+
+# 本机跑测的临时输出（不是证据，证据在 artifacts/ci-evidence/）
+/pytest_run.log

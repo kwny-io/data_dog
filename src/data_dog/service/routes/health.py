@@ -27,6 +27,7 @@ from ..runtime import (
     _get_escalation,
     _get_job_runner,
     _log,
+    _migration_outcome,
     _state,
     _stream_handle,
 )
@@ -91,8 +92,15 @@ def readyz() -> JSONResponse:
 
     # 迁移版本（库 schema 是否已到 head）
     try:
-        checks["migration"] = {"ok": True,
-                               "revision": migrations.current_revision()}
+        outcome = _migration_outcome()
+        checks["migration"] = {
+            "ok": True,
+            "revision": migrations.current_revision(),
+            # **启动时迁移失败的原因**：版本号可能仍为空，光看它看不出为什么。
+            # 详见 runtime._startup_mark 的说明（日志记录可能被重配吞掉）。
+            "startup_error": redact(outcome.get("error", "")),
+            "startup_at": outcome.get("at", ""),
+        }
     except Exception as e:                        # noqa: BLE001
         # /readyz 是**公开探针**：异常消息先脱敏（可能带 DSN/口令），再回给编排层
         checks["migration"] = {"ok": False, "error": redact(f"{type(e).__name__}: {e}")}

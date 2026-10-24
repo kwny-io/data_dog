@@ -165,15 +165,44 @@ def _marker_gates() -> list[tuple[str, str]]:
     return pairs
 
 
+def _usable_bash() -> str | None:
+    """找一个**真能执行**的 bash，而不是名字叫 bash 的东西。
+
+    本机踩过的坑（2026-10-25）：`shutil.which("bash")` 会命中
+    `C:\\Windows\\System32\\bash.EXE`，那是 **WSL 的 relay**，执行时直接
+    `execvpe(/bin/bash) failed: No such file or directory` 返回 1。
+    于是这些“行为级断言”钩子的用例会报一个**假的红**（不是钩子坏，是解释器选错），
+    而这恰恰是本文件最恨的错误类型：守卫自己骗人。
+    所以候选逐个**实跑 `-c echo`** 验证，全失败就 skip（skip ≠ pass，不会被当绿）。
+    """
+    candidates = [
+        os.environ.get("DD_BASH", ""),
+        r"C:\Program Files\Git\bin\bash.exe",
+        r"C:\Program Files\Git\usr\bin\bash.exe",
+        shutil.which("bash") or "",
+    ]
+    for cand in candidates:
+        if not cand or not os.path.exists(cand):
+            continue
+        try:
+            probe = subprocess.run([cand, "-c", "echo usok"], capture_output=True,
+                                   encoding="utf-8", errors="replace", timeout=20)
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if probe.returncode == 0 and "usok" in (probe.stdout or ""):
+            return cand
+    return None
+
+
 def _skip_warning_output(**overrides: str) -> str:
     """**真的执行** pre-push 的提示出口，拿到它实际打印的文本。
 
     行为级而非文本级：断言"钩子文件里有 DD_TEST_REDIS_URL"是弱守卫——
     把分支改成 `if false` 断言照样绿（实测过）。执行出口才能证明提示可达。
     """
-    bash = shutil.which("bash")
+    bash = _usable_bash()
     if not bash:
-        pytest.skip("本机没有 bash，跳过 pre-push 行为断言")
+        pytest.skip("本机没有可用的 bash（System32 那个是 WSL relay，跑不动），跳过行为断言")
     env = {k: v for k, v in os.environ.items()
            if k not in ("DD_TEST_PG_URL", "DD_TEST_REDIS_URL")}
     env.update(overrides)

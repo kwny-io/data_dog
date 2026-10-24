@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import os
+import time
 
 import pytest
 from sqlalchemy import text
@@ -94,3 +95,111 @@ def test_try_xact_lock_returns_false_while_another_session_holds_it():
         with session_scope(url=_PG_URL, system=True) as c:
             assert pg_locks.try_xact_lock(c, key) is True, "提交后应已释放"
             c.rollback()
+
+
+# ---------------------------------------------------------------- 有界等待（离线）
+# 背景（2026-10-25 实测）：`migration_lock` 原来用阻塞式 `pg_advisory_lock`。在 compose 里
+# 起服务（旧库卷 + 残留会话持锁）时，alembic 打印完 `Running upgrade -> …` 就再无下文：
+# 无 ERROR、无超时、不退出，而 `/healthz` 仍 200 → "服务起来了但永远不 ready"，
+# 现场只看到其他告警刷屏（同时 worker 无退避地打了 5919 条 WARN，把真相淹没）。
+# 下面三条不依赖真库：用假引擎证明"锁拿不到时**会自己放弃**并说清怎么排查"。
+
+
+class _FakeResult:
+    def __init__(self, value):
+        self._value = value
+
+    def scalar(self):
+        return self._value
+
+
+class _FakeConn:
+    """记录执行过的 SQL；`grant_after` 次尝试后开始返回 True（模拟别人释放锁）。"""
+
+    def __init__(self, root):
+        self._root = root
+
+    def execute(self, stmt, params=None):        # noqa: ARG002 - 断言里看 SQL
+        sql = str(stmt)
+        self._root.sql.append(sql)
+        if "try_advisory_lock" in sql:
+            self._root.tries += 1
+            return _FakeResult(self._root.tries > self._root.grant_after)
+        return _FakeResult(None)
+
+    def commit(self):
+        self._root.commits += 1
+
+    def close(self):
+        self._root.closed = True
+
+
+class _FakeEngine:
+    def __init__(self, root):
+        self._root = root
+        self.dialect = type("D", (), {"name": "postgresql"})()
+
+    def connect(self):
+        return _FakeConn(self._root)
+
+    def dispose(self):
+        self._root.disposed = True
+
+
+def _fake_engine(monkeypatch, *, grant_after=10**9):
+    root = type("R", (), {})()
+    root.sql, root.tries, root.commits = [], 0, 0
+    root.closed = root.disposed = False
+    root.grant_after = grant_after
+    monkeypatch.setattr(pg_locks, "create_engine", lambda url: _FakeEngine(root))
+    return root
+
+
+def test_migration_lock_gives_up_after_timeout_instead_of_hanging(monkeypatch):
+    """锁一直拿不到 → 在预算内抛 `MigrationLockTimeout`，而不是无声等下去。"""
+    monkeypatch.setenv("DD_MIGRATION_LOCK_TIMEOUT", "0.05")
+    root = _fake_engine(monkeypatch)
+    start = time.monotonic()
+    with pytest.raises(pg_locks.MigrationLockTimeout) as ei:
+        with pg_locks.migration_lock("postgresql+psycopg://x/y"):
+            pytest.fail("不该进入临界区")
+    elapsed = time.monotonic() - start
+    assert elapsed < 2.0, "必须有上界（不能无限阻塞）"
+    msg = str(ei.value)
+    # 错误信息要能直接指导排查（否则等于只留一句"超时"）
+    assert "pg_locks" in msg and "pg_terminate_backend" in msg and "advisory" in msg
+    assert root.closed is True, "超时也要关掉那条连接（不能泄漏）"
+
+
+def test_migration_lock_retries_then_proceeds_and_unlocks(monkeypatch):
+    """别人短暂持锁 → 重试后拿到锁并正常进临界区，退出时解锁。"""
+    monkeypatch.setenv("DD_MIGRATION_LOCK_TIMEOUT", "5")
+    root = _fake_engine(monkeypatch, grant_after=2)
+    with pg_locks.migration_lock("postgresql+psycopg://x/y") as held:
+        assert held is True
+    assert root.tries >= 3, "应该真的重试过（而不是阻塞等）"
+    assert any("pg_advisory_unlock" in s for s in root.sql), "退出必须解锁"
+    assert root.closed is True
+
+
+def test_migration_lock_never_uses_blocking_lock(monkeypatch):
+    """**回归守卫**：不能再退回阻塞式 `pg_advisory_lock`（无 `try_` 前缀的那个）。"""
+    monkeypatch.setenv("DD_MIGRATION_LOCK_TIMEOUT", "5")
+    root = _fake_engine(monkeypatch, grant_after=0)
+    with pg_locks.migration_lock("postgresql+psycopg://x/y"):
+        pass
+    blocking = [s for s in root.sql
+                if "pg_advisory_lock" in s and "try_advisory_lock" not in s]
+    assert not blocking, f"出现阻塞式取锁：{blocking}"
+
+
+def test_lock_timeout_is_configurable(monkeypatch):
+    """超时可配（默认 60s）：`DD_MIGRATION_LOCK_TIMEOUT` 生效且不为负。"""
+    from data_dog import settings
+
+    monkeypatch.delenv("DD_MIGRATION_LOCK_TIMEOUT", raising=False)
+    assert settings.migration_lock_timeout_s() == 60.0
+    monkeypatch.setenv("DD_MIGRATION_LOCK_TIMEOUT", "12")
+    assert settings.migration_lock_timeout_s() == 12.0
+    monkeypatch.setenv("DD_MIGRATION_LOCK_TIMEOUT", "-5")
+    assert settings.migration_lock_timeout_s() == 0.0

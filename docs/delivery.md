@@ -182,6 +182,8 @@ curl "http://127.0.0.1:8000/v1/candidates?device_sn=device-go2-0001"
 | `DD_VENDOR_DOCS` | `<root>/vendor_docs` | 厂商文档目录 |
 | `DD_OPERATORS_DIR` | `<root>/operators` | 算子产物目录 |
 | `DD_DATA_DIR` | `<root>` | 本地 SQLite 等运行期数据目录 |
+| `DD_AUTO_MIGRATE` | `1` | 启动时是否 `alembic upgrade head`（多副本部署应设 `0`，由迁移 Job 统一做） |
+| `DD_MIGRATION_LOCK_TIMEOUT` | `60` | 等迁移咨询锁的上限（秒）。超时抛 `MigrationLockTimeout`，**不无限阻塞**；多副本灰度/回滚排队时适当调大 |
 | `POSTGRES_USER/PASSWORD/DB` | 见 compose | compose 里数据库账号 |
 
 > **`DD_VENDOR_DOCS` 不是可选项。** 镜像里代码被装进 `site-packages`，靠 `__file__`

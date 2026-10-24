@@ -26,6 +26,13 @@ import re
 _MASK = "***"
 
 _PATTERNS = [
+    # ⚠️ **最优先**：连接串里的口令 `scheme://user:password@host`。
+    # 为什么放最前：SQLAlchemy/psycopg 的异常消息里几乎总是带着完整 DSN
+    # （如 `could not connect ... (postgresql+psycopg://data_dog:hunter2@db:5432/data_dog)`），
+    # 而 `/readyz` 是**公开探针**（未认证可达）。下面那些 `password=` 类规则只认
+    # `key=value` 形式，认不出 URL 里的 `:password@`，于是口令会原样回给调用方。
+    # 只遮口令、保留 scheme/user/host：排查时“连哪个库”仍然看得见。
+    re.compile(r"(?i)\b([a-z][a-z0-9+.\-]*://(?:[^:/@\s]+)?):([^@/\s]+)@"),
     # ⚠️ 顺序要紧：Bearer 必须**先**跑。否则 "Authorization: Bearer <key>" 会被
     # authorization 规则先吃掉 "Bearer" 这半截，留下 "*** <key>" —— 密钥反而漏了。
     re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._\-+/=]{8,}"),

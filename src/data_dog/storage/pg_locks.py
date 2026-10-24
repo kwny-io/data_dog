@@ -31,11 +31,28 @@
 """
 from __future__ import annotations
 
+import logging
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Any
 
 from sqlalchemy import create_engine, text
+
+_log = logging.getLogger(__name__)
+
+
+class MigrationLockTimeout(RuntimeError):
+    """等迁移咨询锁超时（超时而不是无限阻塞，见 `migration_lock` 的说明）。"""
+
+
+def _migration_lock_timeout_s() -> float:
+    """从 settings 读超时；读不到也不让锁逻辑本身炸。"""
+    try:
+        from .. import settings
+        return float(settings.migration_lock_timeout_s())
+    except Exception:                                  # pragma: no cover - 防御性
+        return 60.0
 
 # 固定常量：出现在 `pg_locks` / 日志里要能一眼认出"是谁在动手"。
 MIGRATION_LOCK_KEY = 0x64646D67           # "ddmg"：alembic upgrade head
@@ -123,6 +140,17 @@ def migration_lock(url: str) -> Iterator[bool]:
     为什么是会话级：alembic 的 `upgrade` 内部有自己的事务边界，事务级锁活不过第一个
     `COMMIT`。取锁后先 `commit()`，让持有的锁不挂在一个悬空事务里。
 
+    **等待有上界**（2026-10-25 实测后改）：原来用阻塞式 `pg_advisory_lock`，一旦有别的
+    连接持有该锁就一直等。实测场景：compose 里起服务，库是旧卷、另一进程/上次残留
+    会话仍持锁 → `alembic` 打印完 `Running upgrade -> …` 就再无下文，**无 ERROR、
+    无超时、无退出**；同时 `/healthz` 照旧 200，于是服务“起来了但永远不 ready”，
+    现场只能看到别的告警刷屏，根本看不出卡在迁移锁上。
+    现在改成 `pg_try_advisory_lock` + 有限重试，超时**抛 `MigrationLockTimeout`**，
+    由启动路径记成“迁移失败”，错误信息直接说清是谁可能持锁、怎么查。
+
+    超时默认 60s（`DD_MIGRATION_LOCK_TIMEOUT`）；正常迁移是秒级到几十秒级，
+    60s 足够区分“正在跑”与“卡住了”。
+
     非 PG：no-op（`yield False`，调用方据此知道"没有互斥保护"）。
     """
     engine = create_engine(url)
@@ -133,9 +161,40 @@ def migration_lock(url: str) -> Iterator[bool]:
     conn = engine.connect()
     held = False
     try:
-        conn.execute(text("SELECT pg_advisory_lock(:k)"), {"k": MIGRATION_LOCK_KEY})
+        timeout_s = _migration_lock_timeout_s()
+        deadline = time.monotonic() + timeout_s
+        waited = False
+        while True:
+            got = bool(
+                conn.execute(
+                    text("SELECT pg_try_advisory_lock(:k)"), {"k": MIGRATION_LOCK_KEY}
+                ).scalar()
+            )
+            if got:
+                break
+            left = deadline - time.monotonic()
+            if left <= 0:
+                raise MigrationLockTimeout(
+                    f"等待迁移咨询锁超时（{timeout_s:.0f}s，key={MIGRATION_LOCK_KEY}）："
+                    "另一个副本/部署任务可能正在迁移，或某个会话异常残留了这把锁。"
+                    "排查：SELECT pid, state, query FROM pg_locks l JOIN pg_stat_activity a "
+                    "ON a.pid = l.pid WHERE l.locktype = 'advisory'；"
+                    "确认持锁进程已无用后可 SELECT pg_terminate_backend(<pid>)。"
+                    "（这把锁是会话级的：持锁连接断开即自动释放，所以要查会话数量而不是等）"
+                )
+            if not waited:
+                waited = True
+                _log.warning(
+                    "迁移锁已被占用，等待中（最多 %.0fs）", timeout_s,
+                    extra={"lock_key": MIGRATION_LOCK_KEY, "timeout_s": timeout_s},
+                )
+            time.sleep(min(0.5, max(0.0, left)))
         conn.commit()
         held = True
+        if waited:
+            _log.warning(
+                "已取得迁移锁（曾等待）", extra={"lock_key": MIGRATION_LOCK_KEY},
+            )
         yield True
     finally:
         if held:

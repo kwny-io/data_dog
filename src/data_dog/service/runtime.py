@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import threading
 import time
 import uuid
@@ -98,6 +99,46 @@ class ServiceState:
 _state = ServiceState()
 _stream_lock = threading.Lock()
 _stream: tuple[Any, Any, threading.Thread, threading.Event] | None = None
+# ---------------------------------------------------------------- 启动期诊断
+#
+# 2026-10-25 实测（compose 一键起整套）：库是个旧卷、baseline 撞已有表 → 迁移抛
+# `ProgrammingError: DuplicateTable relation "alert_feedback" already exists`。
+# 用 spy 钉实：`_log.error("迁移失败…")` **确实被调用了**，原因也齐，但记录**没有
+# 到达 `docker logs`**（lifespan 期间根 handler 的 stream 被换过，写进了没人 flush
+# 的流）。后果：现场只看到其他告警刷屏（当时 5919 条），**看不到真正的原因**。
+#
+# 结论：启动失败的“为什么”不能只依赖日志配置。故：
+#   1) `_startup_mark()` 直写 stderr 并 flush（任何日志重配都影响不到）；
+#   2) 同时把结果存进内存，由 `/readyz` 报出来（机器可读、可告警）。
+_migration_outcome_lock = threading.Lock()
+_migration_outcome_state: dict[str, str] = {"error": "", "revision": "", "at": ""}
+
+
+def _startup_mark(msg: str) -> None:
+    """启动期关键诊断：**绕过 logging** 直写 stderr 并 flush。
+
+    只在“服务能不能用”这种一次性事件上用（迁移结果、启动失败），不要当事常规日志。
+    """
+    try:
+        sys.stderr.write(msg.rstrip() + "\n")
+        sys.stderr.flush()
+    except Exception:                              # pragma: no cover - 永不因诊断搞挂启动
+        pass
+
+
+def _set_migration_outcome(*, error: str = "", revision: str = "") -> None:
+    """记录迁移结果（供 `/readyz` 展示；不参与就绪判定的硬/软分层保持原样）。"""
+    with _migration_outcome_lock:
+        _migration_outcome_state["error"] = error
+        _migration_outcome_state["revision"] = revision
+        _migration_outcome_state["at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _migration_outcome() -> dict[str, str]:
+    with _migration_outcome_lock:
+        return dict(_migration_outcome_state)
+
+
 def _set_stream(runner, source, thread, stop) -> None:
     global _stream
     with _stream_lock:

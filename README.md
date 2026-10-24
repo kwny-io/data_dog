@@ -13,7 +13,7 @@
 | | 亮点 | 证据 |
 |---|---|---|
 | 🔗 | **全链闭环，一条命令跑通** | 厂商文档 →[P1]→ 算子 →[P2]→ 候选 →[Agent]→ 报告 →[P3]→ 策略门 → SaaS 反馈，`python -m data_dog.e2e.replay_demo` |
-| 🧪 | **全量测试，全离线确定性** | `pytest -q` → 本机全绿（119 个测试文件，1500+ 项，fake provider，无需 API Key、不联网；跳过项**全部是按环境条件跳过**：未设 `DD_TEST_PG_URL` 的真 PostgreSQL 用例、未设 `DD_TEST_REDIS_URL` 的真 Redis 契约用例，以及"本机已装可选依赖/平台相关"的分支——两类集成用例由 CI 的 `postgres` / `redis` 腿实测；Redis 后端的行为测试另由 `.[dev]` 里的 `fakeredis` 离线跑。**具体条数不写死**：写死的 passed/skipped 数字脚本守不住、注定漂（已漂过一次），以命令输出为准；能被脚本守住的是文件数与行数，见下方“规模”） |
+| 🧪 | **全量测试，全离线确定性** | `pytest -q` → 本机全绿（121 个测试文件，1500+ 项，fake provider，无需 API Key、不联网；跳过项**全部是按环境条件跳过**：未设 `DD_TEST_PG_URL` 的真 PostgreSQL 用例、未设 `DD_TEST_REDIS_URL` 的真 Redis 契约用例，以及"本机已装可选依赖/平台相关"的分支——两类集成用例由 CI 的 `postgres` / `redis` 腿实测；Redis 后端的行为测试另由 `.[dev]` 里的 `fakeredis` 离线跑。**具体条数不写死**：写死的 passed/skipped 数字脚本守不住、注定漂（已漂过一次），以命令输出为准；能被脚本守住的是文件数与行数，见下方“规模”） |
 | 🔒 | **热路径确定性：上报不交给模型判断** | 上不上报由**确定性策略门**（四条件决策表 + 冲突消解）决定，同输入永远同结论；模型只出现在"调查报告"那一步 |
 | 🧱 | **不拿 `eval` 执行厂商字符串** | 自建**受限 DSL**：词法 → AST 解释器，无动态执行原语、函数闭集白名单、编译期类型检查 |
 | 🔍 | **诚实抽取，区分"能证实 / 待确认"** | 官方 SDK 头文件明写电机 **90°C 触发保护** → `verified`；无出处的 75°C → `unconfirmed`，**不冒充厂商事实** |
@@ -23,7 +23,7 @@
 | 📊 | **带 ground truth 的规模化评估（双栏）** | **忠实 MuJoCo 数据集 10 万条**，分层抽跑真实 Agent：**确定性 provider** n=2000 → **准确率 0.818**（Wilson 95% CI 0.801–0.834）、normal 误报率 **0.064**；**真 LLM** n=500 → **0.708**（0.667–0.746）、normal 误报率 **0.72**（故障召回反而更高）。逐类召回一并如实报（**F4 偏置 0.43 为当前最低**）；误报根因（裁决口径把"证据不足"与"证据充分但正常"混为一谈）**已定位并改口径，效果标注为未实测**（本机 key 余额为零）；另有 7 个评估 case（含 2 个对抗性：提示注入 / 身份伪装） |
 | 🚚 | **能交付：服务 + 容器 + HTTPS** | FastAPI（liveness / readiness 分离）+ Dockerfile + compose（含 Caddy 自动申请 HTTPS）+ Makefile |
 
-**规模**：源码 158 个 Python 文件 / 30765 行，测试 119 个文件 / 28137 行；前端 `web/` 为 Next.js 15 控制台（70 个 TS/TSX 文件）；5 份正式事件 JSON Schema；39 个 `make` 命令（另有 `help`）。
+**规模**：源码 158 个 Python 文件 / 30948 行，测试 121 个文件 / 28574 行；前端 `web/` 为 Next.js 15 控制台（70 个 TS/TSX 文件）；5 份正式事件 JSON Schema；39 个 `make` 命令（另有 `help`）。
 
 ---
 
@@ -345,8 +345,9 @@ evals/          Agent 评估框架（7 case，含对抗性）
 scripts/        数据清洗 / 算子生成 / RAG 落地 / 分区维护 / 覆盖率门禁 / git-hooks
 schemas/        标准事件正式 Schema（JSON Schema，5 份）+ 版本演进策略 + 校验工具
 docs/           设计文档（架构总览、落地交付、各子系统、SLO、受限 DSL 规范）+ docs/p4/ 十篇
-tests/          pytest（112 个 test_*.py）
-alembic/        数据库迁移（启动时按 DD_AUTO_MIGRATE 自动 upgrade head）
+tests/          pytest（`tests/test_*.py`，数量见上方“项目规模”）
+alembic/        数据库迁移（启动时按 DD_AUTO_MIGRATE 自动 upgrade head；
+                并发迁移由咨询锁互斥，等待上限 DD_MIGRATION_LOCK_TIMEOUT 默认 60s）
 helm/           K8s 部署 chart（含 PrometheusRule 告警规则）
 deploy/         容器与生产 compose（Caddy 自动 HTTPS；deploy/replication 多活）
 mcp_servers/    本地 MCP server（上下文注入）
@@ -483,6 +484,14 @@ python -m data_dog.service                 # 起在 0.0.0.0:8000
 docker compose up -d --build
 docker compose ps
 ```
+
+> **复用旧数据卷时注意**：如果 `pgdata` 是“迁移体系之前”留下的库（有表、但没有
+> `alembic_version`），`upgrade_head()` 会撞 `DuplicateTable`。此时服务**会照常启动但
+> 一直未就绪**（`/readyz` 503）。原因写在两处：容器日志里的
+> `[data-dog] 启动：数据库迁移失败…` 一行（直写 stderr，不受日志配置影响），以及
+> `/readyz` 的 `checks.migration.startup_error`。处理：可丢数据的库直接
+> `docker compose down -v && docker compose up -d`；要保留数据就先 `alembic stamp <revision>`
+> 再 `alembic upgrade head`。
 
 端点：
 
