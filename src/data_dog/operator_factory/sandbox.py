@@ -83,9 +83,15 @@ class SubprocessExecutor:
     为何常驻而非每算子 fork：fork 开销（尤其 Windows spawn 要重新导入整套包）远大于
     单次求值本身，逐算子 fork 会拖垮吞吐。常驻 worker 起一次、循环收活。
 
-    超时处理：父进程 `join(wall_s)` 超时 → `terminate()` 杀 worker → 抛
-    `SandboxViolation`。worker 被杀后**不可复用**（进程已死），故 `_ensure()` 会
-    重启一个——失败关闭：宁可多起一个进程，也不留下状态可疑的 worker。
+    超时处理：父进程 `get(wall_s+0.5)` 超时 → `_kill()` 杀 worker → 抛 `SandboxViolation`。
+    `_kill()` 是**两级**的：先 `terminate()`（SIGTERM，允许 worker 自清理），
+    1 秒内不退就升级到 `kill()`（POSIX=SIGKILL / Windows=TerminateProcess）。
+    只发 SIGTERM 不够：worker 若卡在 C 层长循环里、信号被屏蔽或处理里又抛异常，
+    它就成了**孤儿**——而句柄已于 `_proc = None` 丢弃，`_ensure()` 会再起一个新 worker，
+    反复超时就是无界进程/CPU 泄漏（这正是 rlimit 之外必须自己兜住的失败模式）。
+    真连 SIGKILL 都无效时（不可 kill 状态）记入 `leaked`，不静默吞掉。
+    worker 被杀后**不可复用**（进程已死），故 `_ensure()` 会重启一个——失败关闭：
+    宁可多起一个进程，也不留下状态可疑的 worker。
     """
 
     isolation = "subprocess"
@@ -98,6 +104,7 @@ class SubprocessExecutor:
         self._res_q: Any = None
         self._proc: Any = None
         self._level = "unknown"   # 子进程回报的实际隔离档位（rlimit/seccomp 组合）
+        self._leaked: list[Any] = []   # SIGKILL 都没能终结的 worker（理应永远为空）
         self._start()
 
     def _start(self) -> None:
@@ -157,13 +164,27 @@ class SubprocessExecutor:
         raise SandboxViolation(f"子进程求值异常: {payload}")
 
     def _kill(self) -> None:
-        if self._proc is not None:
-            try:
-                self._proc.terminate()
-                self._proc.join(timeout=2.0)
-            except Exception:  # noqa: BLE001
-                pass
-            self._proc = None
+        proc = self._proc
+        if proc is None:
+            return
+        try:
+            proc.terminate()          # SIGTERM：给 worker 自清理的机会
+            proc.join(timeout=1.0)
+            if proc.is_alive():
+                # 升级到 SIGKILL。不做这一步，worker 会变成孤儿：句柄已被丢弃、
+                # 执行器下次 `_ensure()` 又起一个，反复超时 = 无界进程/CPU 泄漏。
+                proc.kill()
+                proc.join(timeout=1.0)
+        except Exception:  # noqa: BLE001 — 杀进程本身失败不应把调用方拖进异常路径
+            pass
+        if proc.is_alive():           # 极端情况：连 SIGKILL 都无效（如不可 kill 状态）
+            self._leaked.append(proc)
+        self._proc = None
+
+    @property
+    def leaked(self) -> int:
+        """未能终结的 worker 数（正常恒为 0；非 0 意味着宿主上残留了 worker）。"""
+        return len(self._leaked)
 
     def close(self) -> None:
         if self._proc is not None and self._proc.is_alive():

@@ -338,7 +338,14 @@ def test_no_private_paths_are_tracked():
     banned_keywords = ("笔记", "备忘", "私人", "个人", "草稿", "personal", "private",
                        "diary", "journal", "scratch")
     # 允许的例外（示例文件本身就是给公众看的）
-    allowed = {".env.example"}
+    # `.bat` 默认被禁（Windows 本地临时脚本的典型形态）；这里的例外是**故意提交的产品入口**：
+    # `make ci-offline` 在 Windows 上会把 `bash` 解析成 WSL 的 bash，而 WSL 看不到 `D:\`，
+    # 于是验证台“没跑”却看起来像跑了。这个 .bat 只是用 Git 自带的 bash 转发给 .sh，
+    # 是可复现性的一部分，不是个人草稿。
+    allowed = {
+        ".env.example",
+        "scripts/verify_ci_offline.bat",
+    }
 
     bad: list[str] = []
     for path in tracked:

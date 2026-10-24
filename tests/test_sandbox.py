@@ -159,6 +159,67 @@ def test_subprocess_crash_does_not_kill_host():
         pool.close()
 
 
+class _StubbornProc:
+    """模拟“忽略 SIGTERM 的 worker”：terminate 后仍存活，只有 kill 才死。
+
+    这不是假想：worker 卡在 C 层长循环里、或信号处理里又抛异常时，
+    SIGTERM 可能迟迟不生效；父进程若不升级到 SIGKILL，就成了孤儿进程泄漏。
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+        self.killed = False
+
+    def terminate(self) -> None:
+        self.calls.append("terminate")   # SIGTERM 被忽略
+
+    def kill(self) -> None:
+        self.calls.append("kill")
+        self.killed = True
+
+    def join(self, timeout: float | None = None) -> None:  # noqa: ARG002
+        return None
+
+    def is_alive(self) -> bool:
+        return not self.killed
+
+    def exitcode(self) -> None:
+        return None
+
+
+def test_kill_escalates_to_sigkill_when_sigterm_ignored():
+    """`_kill()` 必须在 SIGTERM 无效时升级到 SIGKILL，否则 worker 变孤儿。"""
+    policy = SandboxPolicy(kind="subprocess")
+    pool = SubprocessExecutor(policy)
+    try:
+        fake = _StubbornProc()
+        pool._proc = fake          # 顶掉真 worker，只测升级逻辑
+        pool._kill()
+        assert fake.calls == ["terminate", "kill"], "缺少 SIGKILL 升级 → 孤儿进程泄漏"
+        assert fake.killed is True
+        assert pool._proc is None
+        assert pool.leaked == 0
+    finally:
+        pool.close()
+
+
+def test_kill_records_leak_when_even_sigkill_fails():
+    """连 SIGKILL 都无效时要**记下来**，不能静默当成已清理。"""
+    policy = SandboxPolicy(kind="subprocess")
+    pool = SubprocessExecutor(policy)
+    try:
+        class _Unkillable(_StubbornProc):
+            def kill(self) -> None:      # noqa: D401 — SIGKILL 也失败
+                self.calls.append("kill")
+
+        fake = _Unkillable()
+        pool._proc = fake
+        pool._kill()
+        assert pool.leaked == 1, "未终结的 worker 必须计入 leaked，供上层观测"
+    finally:
+        pool.close()
+
+
 def test_run_isolated_helper():
     op = _op_with_dsl("R", "x > 0", ["x"])
     assert run_isolated(op, {"x": 1}, kind="subprocess") == ["R"]
