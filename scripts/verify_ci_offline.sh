@@ -457,6 +457,18 @@ done
   echo "# CI 离线复现结论（$(date -Is)）"
   echo
   echo "commit \`$(cd "$REPO" && git rev-parse --short HEAD)\`（$(cd "$REPO" && git rev-parse --abbrev-ref HEAD)）"
+  # 证据完整性：腿是从挂载的工作区取源的，不是从 commit。
+  # 工作区脏时必须**明写**，否则这份报告会被当成“某个 commit 的体检结果”去引用。
+  dirty=$(cd "$REPO" && git status --porcelain | wc -l | tr -d ' ')
+  if [ "$dirty" = "0" ]; then
+    echo
+    echo "工作区：**clean**（结果对应上面的 commit）"
+  else
+    echo
+    echo "> ⚠️ **工作区 DIRTY：$dirty 个未提交改动**。腿从挂载目录取源，"
+    echo "> 所以本结果**不对应任何 commit**，不能当作提交/发布的体检证据。"
+    echo "> 提交后重跑：\`git stash && bash scripts/verify_ci_offline.sh all\`。"
+  fi
   echo
   echo "| 腿 | 退出码 | 耗时 | 结论 |"
   echo "|---|---|---|---|"

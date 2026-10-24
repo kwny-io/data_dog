@@ -115,6 +115,22 @@ def _images_from_run_manifest(run: Path) -> list[str]:
     return names
 
 
+def _verdict(worst: int, missing: list[str], dirty: str) -> str:
+    """结论判定（纯函数，便于直接测）。
+
+    优先级：红腿 > 缺腿 > 脏工作区 > PASS。
+    脏工作区不给 PASS：腿从挂载目录取源，“全绿”只能证明工作区那一刻的状态，
+    不能证明某个提交——而证据包就是用来证明某个提交的。
+    """
+    if worst != 0:
+        return "FAIL"
+    if missing:
+        return "PARTIAL"
+    if dirty.strip():
+        return "DIRTY"
+    return "PASS"
+
+
 def build_manifest(
     run: Path,
     rows: list[tuple[str, int, str]],
@@ -127,7 +143,7 @@ def build_manifest(
     dirty = _run(["git", "status", "--porcelain"])
     image_ids = [f"- `{img}` → {_run(['docker', 'image', 'inspect', '--format', '{{.Id}}', img])}" for img in images]
     worst = max(rc for _, rc, _ in rows)
-    verdict = "PASS" if worst == 0 and not missing else ("PARTIAL" if worst == 0 else "FAIL")
+    verdict = _verdict(worst, missing, dirty)
 
     lines = [
         f"# 离线 CI 证据 · {run.name}",

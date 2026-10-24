@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import os
 import re
 import shutil
@@ -415,3 +416,23 @@ def test_shell_entry_points_are_lf_and_parse():
         "以下 shell 入口有问题（修法：用 LF 重写该文件并 `git add`，"
         "别只依赖 .gitattributes——它对已存在文件无效）：\n  " + "\n  ".join(problems)
     )
+
+
+def test_verdict_never_says_pass_for_a_dirty_worktree():
+    """脏工作区不得判 PASS（2026-10-25 实机教训）。
+
+    起因：我在腿跑动期间改了 `src/data_dog/cli.py`，腿从挂载目录取源，于是
+    lint/test 撞上半改状态变红；而 SUMMARY 头照样写着 "commit 511b962"——
+    报告看起来像"某个提交的体检结果"，其实测的是脏树。证据包是拿去证明提交的，
+    所以脏树只能是 DIRTY，不能是 PASS。
+    """
+    spec = importlib.util.spec_from_file_location(
+        "pack_ci_evidence", REPO / "scripts" / "pack_ci_evidence.py")
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    assert mod._verdict(0, [], "") == "PASS"
+    assert mod._verdict(0, [], " M src/data_dog/cli.py") == "DIRTY"
+    # 优先级：红腿 > 缺腿 > DIRTY
+    assert mod._verdict(1, [], " M x.py") == "FAIL"
+    assert mod._verdict(0, ["helm"], " M x.py") == "PARTIAL"
