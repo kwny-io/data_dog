@@ -277,35 +277,57 @@ def test_each_gate_is_controlled_only_by_its_own_variable():
     assert "未设 " not in out, f"两个门都设了却仍提示未设：{out}"
 
 
-def test_git_hooks_have_no_crlf_and_parse_under_posix_sh():
-    """hook 的坏法只在 Linux 上现形，所以必须由断言钉住（2026-10-25 真缺陷）。
+def _shell_entry_points() -> list[Path]:
+    """所有会被"在 Linux 上直接跑"的 shell 入口：`*.sh` + git hooks。
 
-    两个 hook 都以 `#!/bin/sh` 开头。磁盘上若是 CRLF：
-      1. 首行变成 `#!/bin/sh\r` → Linux 上 `Exec format error` / `bad interpreter`；
-      2. 中间每行的 `then\r`、`do\r` 会让 dash 报
-         `17: Syntax error: "elif" unexpected (expecting "then")`。
-    Windows 的 git-bash 对 CRLF 宽容，所以本机全绿——这正是一次"甲平台绿、乙平台红"
-    被容器腿抓出来的案例（CI 的 python job 里 3 个 case 红，本地 0 红）。
-
-    `.gitattributes` 里虽然有 `scripts/git-hooks/* text eol=lf`，但属性只在
-    **重新 checkout** 时生效，已存在的 CRLF 文件不会被自动改写——所以属性挡不住，
-    还是要断言。顺带跑一次 `sh -n` 兜住"POSIX sh 语法"这一类问题。
+    用 rglob 而不是 `git ls-files`：本用例也要在**容器拷贝模式**下跑（那里没有 .git），
+    守卫不能因为缺 .git 而静默跳过。
     """
-    hooks = sorted(p for p in (REPO / "scripts" / "git-hooks").glob("*") if p.is_file())
-    assert hooks, "scripts/git-hooks/ 下没有 hook 文件，找错目录了？"
-
-    for hook in hooks:
-        raw = hook.read_bytes()
-        assert b"\r" not in raw, (
-            f"{hook.name} 含 CR 字节（CRLF 换行）：Linux/macOS 上这个 hook 会直接坏掉。"
-            f"修法：用 LF 重写该文件并 `git add`，别只依赖 .gitattributes。"
-        )
-        sh = shutil.which("sh")
-        if sh is None:  # pragma: no cover - 极简环境
+    skip = {".git", ".venv", "node_modules", ".next", "artifacts", "__pycache__"}
+    found: list[Path] = []
+    for path in REPO.rglob("*.sh"):
+        if skip & set(path.relative_to(REPO).parts):
             continue
-        proc = subprocess.run(
-            [sh, "-n", str(hook)], capture_output=True, text=True, timeout=30
-        )
-        assert proc.returncode == 0, (
-            f"{hook.name} 在 POSIX sh（{sh}）下语法不通过：{proc.stderr.strip()}"
-        )
+        found.append(path)
+    found.extend(sorted(p for p in (REPO / "scripts" / "git-hooks").glob("*") if p.is_file()))
+    return found
+
+
+def test_shell_entry_points_are_lf_and_parse():
+    """shell 入口必须是 LF 且能被**自己声明的解释器**解析（2026-10-25 真缺陷两连）。
+
+    根因是同一个：本仓库 `core.autocrlf=true`，任何没有显式 `.gitattributes` 规则的文件
+    在 checkout 时都会变 CRLF；而 `.gitattributes` 后加的规则**不会改写已存在的文件**。
+
+    真实后果（都在容器里复现过）：
+      1. `scripts/git-hooks/pre-push` 76 行 CRLF → Linux/macOS 上 `git push` 撞
+         `line 10: set: -` / `17: Syntax error: "elif" unexpected`；
+      2. `tools/bench.sh` 73 个 CR → `bash -n` 直接
+         `line 39: syntax error near unexpected token `$'do\\r'``，
+         而 README 恰恰让人跑 `bash tools/bench.sh`（Windows 的 git-bash 宽容，本地全绿）。
+
+    所以这不是"格式洁癖"：CRLF 让**跨平台可执行的脚本在 Linux 上是语法错**。
+    """
+    points = _shell_entry_points()
+    assert points, "没找到任何 shell 入口，路径解析写错了？"
+
+    problems: list[str] = []
+    for path in points:
+        rel = path.relative_to(REPO).as_posix()
+        raw = path.read_bytes()
+        if b"\r" in raw:
+            problems.append(f"{rel}: 含 CR 字节（CRLF 换行）")
+            continue
+        first = raw.split(b"\n", 1)[0].decode("utf-8", "replace")
+        interp = "sh" if first.startswith("#!/bin/sh") else "bash"
+        exe = shutil.which(interp)
+        if exe is None:  # pragma: no cover - 极简环境
+            continue
+        proc = subprocess.run([exe, "-n", str(path)], capture_output=True, text=True, timeout=60)
+        if proc.returncode != 0:
+            problems.append(f"{rel}: {interp} -n 失败: {proc.stderr.strip()}")
+
+    assert not problems, (
+        "以下 shell 入口有问题（修法：用 LF 重写该文件并 `git add`，"
+        "别只依赖 .gitattributes——它对已存在文件无效）：\n  " + "\n  ".join(problems)
+    )
