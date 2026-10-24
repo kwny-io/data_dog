@@ -115,6 +115,19 @@ investigation_queue_depth = Gauge(
     registry=registry,
 )
 
+# `/metrics` 自身采集失败的次数（按段落）。
+# 为什么必须有：2026-10-25 实测，库缺表时 `/metrics` 直接 **500** ——
+# 监控恰好在最需要它的时候全黑，而调用方只会看到“抓取失败”，不知道是库坏了还是
+# 端点坏了。现在每个段落独立降级，并用这个计数器把“本次抓取是残的”**大声说出来**：
+# `sum(rate(data_dog_metrics_collect_failures_total[5m])) > 0` 就是告警项。
+# section ∈ {partition_lease, partition_ddl, stream, job_queue, db_counts}
+metrics_collect_failures_total = Counter(
+    "data_dog_metrics_collect_failures_total",
+    "/metrics 采集失败次数（按段落；非零 = 指标是残缺的）",
+    labelnames=("section",),
+    registry=registry,
+)
+
 # 分区有效期（A9）：**上报时间戳而不是"还剩几天"**。
 # Gauge 会陈旧——进程启动时算成"还有 60 天"，过一个月它仍写着 60，告警就永久失灵。
 # 上报"最新分区上界的 epoch 秒"后，由 Prometheus 用 `- time()` 做减法：**时钟自己走**，

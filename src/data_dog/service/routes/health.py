@@ -164,32 +164,63 @@ def readyz() -> JSONResponse:
 
     body = {"status": "ready" if ready else "not_ready", "checks": checks}
     return JSONResponse(status_code=200 if ready else 503, content=body)
+# 每个采集段落的“上一次是否成功”。用于把重复失败压成一条 WARN（刷屏会掩埋真因，
+# 见 investigation_jobs._FailureThrottle 的同一条教训）。
+_SECTION_OK: dict[str, bool] = {}
+
+
+def _safe_collect(section: str, fn: Any) -> bool:
+    """跑一个采集段落；失败**只降级不抛**，并把“指标已残缺”计进计数器。
+
+    为什么每段单独降级：库坏的时候恰恰是最需要指标的时候。原实现把库内计数包在 try 里，
+    但把 `queue_depth()` / 分区租约 / DDL 结果这些“号称不依赖 DB”的调用放在外面——
+    而共享状态 store 在 PG 模式下**就是 DB**，于是缺表时 `/metrics` 整体 500。
+    文档写着“采集失败不让端点 500”，代码却没做到——这类不一致比 bug 更危险。
+    """
+    try:
+        fn()
+    except Exception as e:                        # noqa: BLE001
+        metrics.metrics_collect_failures_total.labels(section=section).inc()
+        if _SECTION_OK.get(section) is not False:      # 首次失败（或刚从恢复态再失败）才打
+            _log.warning("指标采集失败（该段已降级，其余指标照常输出）",
+                         extra={"section": section,
+                                "error": f"{type(e).__name__}: {e}"})
+        _SECTION_OK[section] = False
+        return False
+    if _SECTION_OK.get(section) is False:
+        _log.info("指标采集已恢复", extra={"section": section})
+    _SECTION_OK[section] = True
+    return True
+
+
 @router.get("/metrics", tags=["probe"])
 def metrics_endpoint() -> Response:
     """Prometheus 文本格式指标（可被 Prometheus 直接抓取）。
 
-    库内行数用 `COUNT(*)` 聚合实时采集（不做全表加载）；采集失败只记
-    日志，不让指标端点整体 500。
+    **任何一段采集失败都不会让端点报错**：失败段静默降级，其余指标照常输出，
+    同时 `data_dog_metrics_collect_failures_total{section}` 递增——让“指标是残的”
+    本身变成可告警信号，而不是变成一个 500 或一个看起来正常的 200。
+    库内行数用 `COUNT(*)` 聚合实时采集（不做全表加载）。
     """
-    # 进程信息（每次抓取时刷新）
-    metrics.info.labels(version=_VERSION).set(1)
-    metrics.auth_enabled.set(1 if settings.api_key() else 0)
-    metrics.resolver_ready.set(1 if _state.resolver is not None else 0)
-    metrics.uptime_seconds.set(round(time.time() - _STARTED_AT, 1))
-    # 分区 DDL 租约状态：共享状态读取，**不依赖 DB**，所以放在库内计数那个 try 之外。
-    _report_partition_lease()
-    # 分区 DDL 的**结果**（CronJob / 启动钩子写进共享 state，这里转发成指标）：同样不依赖 DB。
-    # 这是"迁移失败"唯一的信号出口——Job 日志不会进 Prometheus。
-    _report_partition_ddl_results()
-    _runner, _src, _thr, _stop = _stream_handle()
-    metrics.stream_up.set(1 if (_thr is not None and _thr.is_alive()) else 0)
-    # 异步调查：队列深度（共享队列里的待办数）+ 各状态 job 数
-    jr = _get_job_runner()
-    if jr is not None:
+    def _process_level() -> None:
+        metrics.info.labels(version=_VERSION).set(1)
+        metrics.auth_enabled.set(1 if settings.api_key() else 0)
+        metrics.resolver_ready.set(1 if _state.resolver is not None else 0)
+        metrics.uptime_seconds.set(round(time.time() - _STARTED_AT, 1))
+
+    def _stream() -> None:
+        _runner, _src, _thr, _stop = _stream_handle()
+        metrics.stream_up.set(1 if (_thr is not None and _thr.is_alive()) else 0)
+
+    def _queue_depth() -> None:
+        jr = _get_job_runner()
+        if jr is None:
+            return
         depth = jr.queue_depth()
         if depth >= 0:
             metrics.investigation_queue_depth.set(depth)
-    try:
+
+    def _db_counts() -> None:
         # `system=True`：这些是**跨租户**的库内计数（运维口径），没有租户上下文；
         # 不给系统扫描通道的话，PostgreSQL 的 RLS 会让它们**恒为 0**——指标看着"正常"
         # 却永远不动，是最难发现的一类观测失效（见 docs/storage.md 的系统扫描小节）。
@@ -209,8 +240,14 @@ def metrics_endpoint() -> Response:
             # A9：分区覆盖到什么时候。**每次抓取都重算**——Gauge 会陈旧，而"还有多久到期"
             # 这件事必须随真实时间走（Prometheus 侧用 - time()，见 metrics.py）。
             _report_partition_horizon(s)
-    except Exception as e:                        # noqa: BLE001
-        _log.warning("采集库内行数失败", extra={
-            "error": f"{type(e).__name__}: {e}"})
+
+    # 进程级指标不依赖任何外部资源：它失败就是代码 bug，不该被静默
+    _process_level()
+    # 以下各段都可能间接碰库（共享状态 store 在 PG 模式下就是 DB）——逐段独立降级
+    _safe_collect("partition_lease", _report_partition_lease)
+    _safe_collect("partition_ddl", _report_partition_ddl_results)
+    _safe_collect("stream", _stream)
+    _safe_collect("job_queue", _queue_depth)
+    _safe_collect("db_counts", _db_counts)
     return Response(content=metrics.render(),
                     media_type="text/plain; version=0.0.4; charset=utf-8")
