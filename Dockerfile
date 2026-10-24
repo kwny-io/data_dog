@@ -16,14 +16,22 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# 先只拷贝依赖清单 → 依赖层可被 Docker 缓存（改代码不必重装依赖）
+# ---- 依赖层（可被 Docker 缓存）------------------------------------------------
+# **只拷清单，不拷源码**。之前这里写了“先只拷依赖清单 → 改代码不必重装依赖”，
+# 但紧跟着就把 `src` 拷了进来，于是 `pip install .` 那一层**每次改代码都会失效**，
+# 重装全部依赖（实测一次 >15 分钟，`docker compose up -d --build` 直接超时）。
+# 注释承诺了而代码没做的事，比没写注释更坑。现在真的拆开了：
+#   1) 先按清单装**第三方依赖**（只有清单变了这层才失效）；
+#   2) 再拷源码，用 `--no-deps` 做可编辑安装（秒级，不碰网络）。
+COPY requirements.txt ./
+RUN pip install --upgrade pip && \
+    pip install -r requirements.txt "psycopg[binary]>=3.1"
+
+# ---- 代码层（每次改代码只重跑这几层，秒级）--------------------------------
 COPY pyproject.toml README.md ./
 COPY src ./src
-COPY requirements.txt ./
-
-# 以可编辑方式安装（含 PostgreSQL 驱动），镜像自包含全部运行依赖
-RUN pip install --upgrade pip && \
-    pip install ".[postgres]"
+# `--no-deps`：依赖已在上一层装齐。加 extras 名只为让元数据（版本号/入口点）正确生成。
+RUN pip install --no-deps -e ".[postgres]"
 
 # 运行期资源：厂商文档 + 算子产物 + Schema（服务启动时要读）
 COPY vendor_docs ./vendor_docs
