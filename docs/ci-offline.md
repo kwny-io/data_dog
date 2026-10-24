@@ -128,9 +128,13 @@ git-bash（MSYS2）会把传给 native 程序的 `/xxx` 参数改写成 `C:/Prog
 - 新增 job 时，`ALL_LEGS` 里也要加，否则 SUMMARY 会缺一条腿（少一条腿比红一条腿更危险）。
 - `DEFAULT_LEGS`（默认 4 条）与 `ALL_LEGS`（全部 9 条）是**两个不同的东西**：前者是日常回归路径（覆盖
   已经被证伪过的失败模式），后者是“证据包”承诺的全集。改前者时必须在注释里写清“为什么这 4 条够了”。
-- **覆盖率门禁分两条腿判**：通用模块由 `test` 腿的 `cov_gate.py --min 70` 把关；PG-only 主体
-  （`storage/partitioning.py`、`storage/pg_locks.py`、`state/pg.py`）在 SQLite 口径下执行不到，
-  由 `postgres` 腿 `--only … --no-allow --min 80` 单独把关（两边都不豁免）。
+- **覆盖率门禁分两条腿判，且两侧阈值必须逐字相同**：通用模块由 `test` 腿的 `cov_gate.py --min 70` 把关；
+  PG-only 文件在 `postgres` 腿里单独卡：`storage/partitioning.py --min 75`、`state/pg.py --min 80`。
+  `storage/pg_locks.py` **不卡棘轮**（实测 67.4%，缺的 28 行主要是非 PG 分支与 `wait=False` 快路径，
+  属该腿口径的结构性天花板）。2026-10-25 的教训：验证台曾自己多写一道 `--only …pg_locks.py --min 68`，
+  ci.yml 却从不卡——于是出现“离线红 / 同一 commit 的真 CI 绿”的**假红**。假红比假绿更贵：
+  它会让人不再信验证台，然后绕开它。现在由 `tests/test_ci_optimize_tooling.py::
+  test_coverage_gates_are_not_stricter_than_ci` 机械比对两份文件的 `--only/--min`，两侧不一致就红。
   `cov_gate.py` 里 `ALLOW` 写的实测值**必须来自最近一次真跑的日志**，不许照抄旧数字——
   `scripts/cov_gate.py` 的 ALLOW 里曾写“实测 PG 腿 86.7%”，本轮真跑是 75.1%——过时数字等于假话。
 

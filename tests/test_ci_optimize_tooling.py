@@ -49,6 +49,90 @@ def test_offline_legs_match_ci_jobs():
     )
 
 
+def _cov_gate_thresholds(text: str) -> dict[str, int]:
+    """从一段脚本/工作流里抽出 cov_gate 的 `--only <文件…> --min <N>` 对。
+
+    只认单行，续行（`\\` 结尾）先拼回一行；`--min` 缺失时记 -1（等于不卡）。
+    多个 --only 写在同一行时，展开为每个文件一条。
+    """
+    joined = re.sub(r"\\\s*\n\s*", " ", text)
+    out: dict[str, int] = {}
+    for line in joined.splitlines():
+        if "cov_gate.py" not in line:
+            continue
+        only = re.search(r"--only\s+([^\s\\]+)", line)
+        if not only:
+            continue
+        low = re.search(r"--min\s+([0-9.]+)", line)
+        minimum = int(float(low.group(1))) if low else -1
+        for f in only.group(1).split(","):
+            out[f.strip()] = minimum
+    return out
+
+
+def test_coverage_gates_are_not_stricter_than_ci():
+    """离线腿的单模块覆盖门禁必须与 ci.yml **逐个文件相同**。
+
+    2026-10-25 真事：验证台多写了一道 `--only …pg_locks.py --min 68`，而 ci.yml 从不卡
+    这个文件；当天实测 67.4% → 离线红、同一 commit 的真 CI 绿。这种“本机红/CI 绿”比
+    假绿更贵：它让人开始不信验证台，然后绕过它。
+    允许离线**更宽松**吗？不允许——那会让证据撒谎。两侧必须一致：一个口径。
+    """
+    offline = _cov_gate_thresholds(SCRIPT.read_text(encoding="utf-8"))
+    ci = _cov_gate_thresholds(WORKFLOW.read_text(encoding="utf-8"))
+    assert offline, "解析不到离线脚本里的 cov_gate --only/--min，本测试需要更新"
+    assert ci, "解析不到 ci.yml 里的 cov_gate --only/--min，本测试需要更新"
+    assert offline == ci, (
+        "覆盖门禁两侧不一致（离线 vs CI）：\n"
+        f"  只在离线：{ {k: v for k, v in offline.items() if ci.get(k) != v} }\n"
+        f"  只在 CI：{ {k: v for k, v in ci.items() if offline.get(k) != v} }\n"
+        "阈值必须实测可达且两侧相同，否则验证台会报“假红”。"
+    )
+
+
+def _leg_body_lines(text: str) -> list[tuple[int, str]]:
+    """取每条腿体的内行（腿体 = `run_docker … "` 开、独立 `"` 行闭的双引号字符串）。"""
+    out: list[tuple[int, str]] = []
+    inside = False
+    for lineno, line in enumerate(text.splitlines(), 1):
+        if "run_docker " in line and line.rstrip().endswith('"'):
+            inside = True
+            continue
+        if inside and line.strip().startswith('"'):
+            inside = False
+            continue
+        if inside:
+            out.append((lineno, line))
+    return out
+
+
+def test_leg_bodies_have_no_shell_metacharacters():
+    """腿体是双引号字符串：未转义的 `"` 会提前闭合，反引号与 `$(` 会真的被执行。
+
+    2026-10-25 两次真事故（都是自己写注释踩的）：
+      1. 注释里写了「本机红 / CI 绿」的**双引号版本** → 腿体提前闭合，docker 收到垃圾参数，
+         `rc=125`、1 秒红，报错信息完全指不到真因；
+      2. 注释里把一条命令用反引号引起来 → 容器里真的去执行那段文字。
+    `bash -n` 对两者**都不报**（引号成对、反引号在双引号内合法），所以只能靠这条断言狙击。
+    """
+    bad: list[tuple[int, str, str]] = []
+    for lineno, line in _leg_body_lines(SCRIPT.read_text(encoding="utf-8")):
+        brief = line.strip()[:70]
+        if "`" in line:
+            bad.append((lineno, "反引号", brief))
+        if "$(" in line:
+            bad.append((lineno, "$( 命令替换", brief))
+        for m in re.finditer('"', line):
+            if m.start() == 0 or line[m.start() - 1] != "\\":
+                bad.append((lineno, "未转义双引号", brief))
+                break
+    assert not bad, (
+        "腿体里出现了会被 shell 当真值的字符（会把腿的输入搞坏，且错误信息不可读）：\n"
+        + "\n".join(f"  L{n}: {what} → {txt}" for n, what, txt in bad)
+        + "\n改法：注释里避开这些字符，或写成转义形式。"
+    )
+
+
 def test_pack_reads_image_ids_from_run_manifest(tmp_path):
     """打包器要能自己从 manifest.txt 回收镜像名，不能等使用者记得传 --image。
 

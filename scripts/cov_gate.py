@@ -39,7 +39,14 @@ ALLOW: dict[str, str] = {
                               "其纯逻辑（_pd_target/_get_model/参数校验）已单测",
     "ui/": "Streamlit 交互层",
     "storage/partitioning.py": "主体是 PG-only（分区 DDL / 存量转换 / RLS 复制 / 索引改名）：默认腿跑在 SQLite 上、这些分支执行不到——口径不适用，不是没测。实测 PG 腿 75.1%（2026-10-23 真跑；此前写的 86.7% 是过时值），由 postgres 腿的 --only --no-allow 棘轮门禁把关（**当前 75**，2026-10-24 实测 75.1%；目标 80，只许升不许降；134 行未覆盖已记入台账作补测项）。⚠️ ci.yml 曾误传 --min 80，使这条腿自 2026-10-02 起长期红——阈值必须实测可达，否则门禁等于关掉",
-    "storage/pg_locks.py": "PG advisory lock（迁移锁 / 分区切换锁）：默认腿是 SQLite，根本不存在这类锁路径，口径不适用。实测 PG 腿 68.3%，同样由 postgres 腿 --no-allow 棘轮门禁把关",
+    "storage/pg_locks.py": (
+        "PG advisory lock（迁移锁 / 分区切换锁）：默认腿是 SQLite，根本不存在这类锁路径，口径不适用。"
+        "实测 PG 腿 67.4%（2026-10-25 真跑，86 语句缺 28 行）——缺的主要是 "
+        "`if not is_postgres(session): return True` 这类非 PG 分支（PG 腿里永远跑不到，是本腿口径的"
+        "结构性天花板）与 `wait=False` 快路径。**不做棘轮**：验证台曾单独卡它 `--min 68`，"
+        "而 ci.yml 从不卡，2026-10-25 因此出现“离线红 / 同 commit 的真 CI 绿”的假红。"
+        "阈值两侧必须一致，由 tests/test_ci_optimize_tooling.py::test_coverage_gates_are_not_stricter_than_ci 守"
+    ),
     "state/pg.py": "PostgreSQL StateStore（WATCH/MULTI/EXEC 与租约路径）：默认腿是 fakeredis/SQLite，PG 分支执行不到。实测 PG 腿 99.0%（2026-10-23 真跑），同样由 postgres 腿门禁覆盖",
     "mcp_servers/": "MCP 常驻进程适配层（协议握手由 tests/test_mcp_context.py 的桩覆盖）",
 }

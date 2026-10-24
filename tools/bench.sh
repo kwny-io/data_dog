@@ -41,6 +41,18 @@ for _ in $(seq 1 40); do
   sleep 0.5
 done
 if [ "$ready" != "1" ]; then
+  # 先分清两种完全不同的失败：① 端口被别人的服务占着（本机 8000 就常被占）
+  # ② 我们自己的服务起不来。两者都表现为"未就绪"，但处置方向相反。
+  # 只取 info.title。JSON 是压缩的，直接抽 info 对象再抽其中的 title；
+  # 不要用 sed 贪婪匹配整行——那会拿到 schema 里的最后一个 "title"（实测拿到 ValidationError）。
+  other_title="$(curl -sf --max-time 3 "$URL/openapi.json" 2>/dev/null \
+    | tr -d '\n' | grep -o '"info":{[^}]*}' | head -1 \
+    | grep -o '"title":"[^"]*"' | head -1 | sed 's/.*:"//; s/"$//')"
+  if [ -n "$other_title" ] && ! printf '%s' "$other_title" | grep -qi 'data_dog'; then
+    echo "✗ 端口 $PORT 已被另一个服务占用（它自报 title=「$other_title」，不是 data_dog）。"
+    echo "  这不是本项目启动失败。换一个端口重跑：PORT=8011 bash tools/bench.sh"
+    exit 2
+  fi
   echo "✗ 服务未在 20s 内就绪，日志尾部："; tail -30 "$LOG"; exit 1
 fi
 echo "✓ 服务就绪（pid=$SRV_PID）"
