@@ -104,7 +104,34 @@ data-dog test
 
 ### 还想看 Web 界面（可选）
 
-**这两页是演示台**（A10 收敛决定：产品控制台 = `web/`，Streamlit 只作演示/离线对比，不再往它加产品功能）：
+**产品控制台是 `web/`**（Next.js 15，5 个页面：告警 / 评测 / 调查 / 运维 / 首页）。
+`ui/` 下的 Streamlit 页面只作演示/离线对比（A10 收敛决定：不再往它加产品功能）。
+
+起控制台（Node 20+；实测 Node 24 可用，启动约 17s）：
+
+```bash
+cd web
+npm ci                       # 首次
+DD_WEB_API_BASE_URL=http://127.0.0.1:8000 \
+  DD_WEB_ALLOW_ANONYMOUS=1 \
+  npm run dev                # → http://localhost:3000
+```
+
+- `DD_WEB_API_BASE_URL`：**服务端代理**指向的后端地址（默认 `http://127.0.0.1:8000`）。
+  后端用了 `APP_PORT`（比如端口 8000 被其他服务占用）时，这里要改成同一个端口，
+  否则页面能打开但数据全空——典型现象是 `/api/dd/readyz` 返回连接错误。
+- `DD_WEB_ALLOW_ANONYMOUS=1` 仅用于**本地演示**：跳过控制台的鉴权门。生产部署请用
+  反代身份（`DD_WEB_TRUST_PROXY_AUTH=1`，需同时给 `DD_WEB_BASIC_AUTH` 或显式
+  `DD_WEB_TRUST_PROXY_ACK=1`，否则**启动期直接拒起**——这是刻意的失败关闭）或
+  `DD_WEB_BASIC_AUTH`。
+- 密钥不进浏览器：浏览器只访问 `/api/dd/*`，由服务端代理注入凭据。
+
+自检（两行就能确认“界面确实在跟真后端说话”）：
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' http://localhost:3000/alerts        # 200
+curl -s http://localhost:3000/api/dd/readyz | head -c 120                     # {"status":"ready"...
+```
 
 ```bash
 pip install -e ".[ui]"          # 装上 streamlit
