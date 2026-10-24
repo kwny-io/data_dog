@@ -74,25 +74,40 @@ def _seed_candidate(c, event_id="e1"):
 # ---------------------------------------------------------------- 同步：成功
 
 def test_sync_investigation_writes_readable_run_log(client):
-    """同步调查：响应带 run_id=报告 id，且能直接按它调出**带步骤**的运行日志。"""
+    """同步调查：响应带 run_id=报告 id，且能直接按它调出**带步骤**的运行日志。
+
+    **2026-10-24：本案曾间歇红过（全量 4 次里 2 次，隔离跑 12/12 绿；之后连续 4 轮
+    全量又全绿）。没有抓到 traceback，所以**不能宣布已修**。应对方式是把证据拷进断言：
+    每条断言带上当时的响应体/运行日志全文，下次再红时 pytest 直接打印根因，不用重现。
+    """
     cid = _seed_candidate(client)
     r = client.post("/v1/investigations", headers=_Q, json={"candidate_id": cid})
-    assert r.status_code == 200, r.text
+    assert r.status_code == 200, f"POST 非 200（候选 {cid}）：{r.status_code} {r.text[:600]}"
     body = r.json()
     iid = body["investigation_id"]
-    assert body["run_id"] == iid, "同步路径的 run_id 必须就是 investigation_id（技术员手上是它）"
+    assert body["run_id"] == iid, (
+        f"同步路径的 run_id 必须就是 investigation_id（技术员手上是它），"
+        f"实际 run_id={body.get('run_id')!r} iid={iid!r}，resp={body}"
+    )
 
     log_r = client.get(f"/v1/investigations/{iid}/log", headers=_Q)
-    assert log_r.status_code == 200, log_r.text
+    assert log_r.status_code == 200, (
+        f"按 run_id={iid} 取不到运行日志：{log_r.status_code} {log_r.text[:600]}"
+    )
     log = log_r.json()["log"]
-    assert log["status"] == "succeeded"
-    assert log["candidate_id"] == cid
-    assert log["step_count"] >= 1 and log["steps"], "轨迹不能是空的——那正是要调出来看的东西"
+    assert log["status"] == "succeeded", f"期望 succeeded，实际 log={log}"
+    assert log["candidate_id"] == cid, f"log.candidate_id={log.get('candidate_id')!r} ≠ {cid!r}"
+    assert log["step_count"] >= 1 and log["steps"], (
+        f"轨迹不能是空的——那正是要调出来看的东西：step_count={log.get('step_count')} "
+        f"steps={log.get('steps')!r} log={log}"
+    )
     names = [s.get("name") for s in log["steps"]]
-    assert "query_candidate_evidence" in names, names
-    assert log["usage"], "用量/耗时也要留（排查'慢在哪'）"
+    assert "query_candidate_evidence" in names, f"steps={names!r} log={log}"
+    assert log["usage"], f"用量/耗时也要留（排查'慢在哪'）：usage={log.get('usage')!r} log={log}"
     assert isinstance(log["model"], str), log  # 离线档没有真模型 → 允许空串，但字段必须在
-    assert log["duration_ms"] > 0, "耗时是排查'慢在哪'的第一手数字"
+    assert log["duration_ms"] > 0, (
+        f"耗时是排查'慢在哪'的第一手数字：duration_ms={log.get('duration_ms')!r} log={log}"
+    )
 
 
 # ---------------------------------------------------------------- 同步：失败也留痕
