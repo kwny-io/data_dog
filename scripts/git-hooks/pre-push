@@ -37,7 +37,10 @@ if [ -z "${DD_TEST_PG_URL:-}" ]; then
     echo "           本机想验：先放开 compose.yaml 里 db 的 ports（默认注释），然后"
     echo "             docker compose up -d db"
     echo "             export DD_TEST_PG_URL=postgresql+psycopg://data_dog:data_dog_dev_pw@127.0.0.1:5432/data_dog"
-    echo "             make pg-test"
+    echo "             \"$PY\" -m pytest -q -rs -m postgres"
+    echo "           有 make 的可走捷径：make pg-test（它就是上面那条 pytest）。"
+    echo "           ⚠ Windows 上常常根本没装 make：那就直接跑上面的 pytest 命令，别因"
+    echo "             'make: command not found' 以为跑不了库测试（实测这条 pytest 路径可用）。"
 fi
 
 echo "[pre-push] 全部通过（覆盖率与单模块下限由 CI 的 test 腿把关；PG/redis 腿见上）"

@@ -163,6 +163,19 @@ pip install -e ".[dev]"
 pytest tests/ -q
 ```
 
+想连真库跑 PG / redis 腿（默认被 skip，**没跑 ≠ 通过**）：
+
+```bash
+docker run -d --name dd-pg -p 5432:5432 \
+  -e POSTGRES_USER=data_dog -e POSTGRES_PASSWORD=data_dog_dev_pw -e POSTGRES_DB=data_dog postgres:16
+export DD_TEST_PG_URL=postgresql+psycopg://data_dog:data_dog_dev_pw@127.0.0.1:5432/data_dog
+pytest -q -rs -m postgres     # 等价于 make pg-test
+```
+
+> Windows 上很多机器**没装 make**（`make: command not found`），直接跑上面的 `pytest`
+> 命令即可，别因没 make 以为库测试跑不了；另：Windows 的 `make` 调到的 `bash` 可能是 WSL，
+> 看不到 `D:\`，所以本仓库的 Windows 验证入口是 `.bat`/`.sh` 而不是 `make`。
+
 ---
 
 ## 三个命令
