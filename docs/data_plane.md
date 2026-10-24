@@ -92,7 +92,13 @@ landed = body["persisted"]["telemetry"]      # write-behind 模式下看 queued�
 > 历史：`partial` 字段与本小节是缺陷 #102 的修复产物。在此之前 `rejected_by_reason` 在 README 与
 > `docs/` 里零提及，而限流本身是设计上要丢数据的路径。
 
-#### 3.5.1 `rejected_by_reason` 全表：**谁的错**，以及能不能自动重试
+### 3.6 `rejected_by_reason` 全表：**谁的错**，以及能不能自动重试
+
+> 单独成节的原因：§3.5 讲的是**响应的顶层字段**（`ok`/`partial`/`stats`/`persisted`），
+> 由 `tests/test_web_api_contract.py` 强制与 TS 契约同源；reason 是 `stats.rejected_by_reason`
+> 内部的键，不在顶层契约里。把两类东西放在同一节会让那个守卫把 reason 当成顶层字段
+> （2026-10-24 真发生了：文档一改就报 `not_a_dict/payload_malformed/... 不在 IngestResult`）。
+> 本节与代码的同源由另一个守卫把守：`test_every_emitted_reject_reason_is_documented`。
 
 下表由代码枚举得出（`gateway.py` 的 `_reject(...)` 与 `pipeline.py` 的 `reason=`），
 **不是设计意图清单**——它回答两个接入方真正关心的问题：这条该不该重试、该找谁。
@@ -106,13 +112,20 @@ landed = body["persisted"]["telemetry"]      # write-behind 模式下看 queued�
 | `payload_not_object` | 是合法 JSON、但不是**对象**（如 `42`、`[1,2]`） | 否 | 接入方 |
 | `bad_encoding` | 编码不在白名单 | 否 | 接入方 |
 | `too_large` | 单条载荷超上限 | 否 | 接入方（改分批/截断） |
-| `auth` / `unauthorized` | 认证失败或缺可信身份 | 否 | 接入方或凭据过期 |
+| `auth` | 认证失败或缺可信身份（`401`，但计入 `rejected_by_reason` 为 `auth`） | 否 | 接入方或凭据过期 |
+| `device_signature_invalid` | 设备签名格式不对或校验不过 | 否 | 接入方（签错/重放） |
+| `device_signature_missing` | 强制验签档却没带 `X-Device-Signature` | 否 | 接入方 |
+| `device_signature_unknown` | 设备未配置签名密钥 | 否 | 平台方（漏配密钥） |
 | `device_signing_misconfigured` | 验签配置写坏（**失败关闭**） | 否 | 平台方 |
-| `tenant_keys_misconfigured` | 租户密钥配置写坏 | 否 | 平台方 |
 | `payload_ref_denied` | 外置引用被 SSRF 策略拒 | 否 | 接入方（或平台策略过紧） |
 | `rate_limited` | 设备配额耗尽 | **是（退避）** | 正常业务路径 |
-| `no_parser` / `resolve` | 找不到解析器/绑定 | 否 | 平台方（缺绑定） |
-| `change_source_unavailable` | 上游数据源不可用 | **是** | 平台方 |
+| `resolve` | 兼容绑定解析失败（vendor/model/firmware/protocol 组合无绑定） | 否 | 平台方（缺绑定） |
+| `no_parser` | 绑定存在但未挂 parser（`contract_mismatch`） | 否 | 平台方（配置缺一块） |
+
+> 上表只覆盖 `POST /v1/telemetry` 的 `rejected_by_reason`（数据面拒绝）。
+> 其它接口的 `reason` 是**另一套分类**，不要混用：`unauthorized`（无/错 `X-API-Key`，
+> HTTP 401）、`tenant_keys_misconfigured`（租户密钥配置坏，HTTP 500）、
+> `change_source_unavailable`（证据数据源不可用，证据解释接口）。
 
 **两个实现教训写在这里，防止再犯**（均于 2026-10-24 由敌意输入测试
 `tests/test_telemetry_hostile_input.py` 抓出，提交 `9495320`）：

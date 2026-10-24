@@ -612,14 +612,21 @@ def _run_log_payload(*, run_id: str, candidate_id: str, kind: str, status: str,
 
 
 def _persist_run_log(tenant: str, log: dict[str, Any]) -> None:
-    """同步路径自己落库：**失败只告警不抛出**——日志写不进去不该毁掉调查结果。"""
+    """同步路径自己落库：**失败只告警不抛出**——日志写不进去不该毁掉调查结果。
+
+    但“不抛”不等于“不报”：落库结果计入 `data_dog_run_log_persist_total{result=...}`，
+    否则 `/log` 的 404 在运维眼里与“从未写过”无法区分（见 metrics.py 里的说明）。
+    """
     try:
         with session_scope(tenant_id=tenant) as s:
             repo.save_run_log(s, log, tenant_id=tenant)
     except Exception as e:                            # noqa: BLE001
+        metrics.run_log_persist_total.labels(result="failed").inc()
         _log.warning("运行日志落库失败",
                      extra={"run_id": log.get("run_id"),
                             "error": redact(f"{type(e).__name__}: {e}")})
+    else:
+        metrics.run_log_persist_total.labels(result="ok").inc()
 
 
 def _make_run_id(candidate_id: str) -> str:

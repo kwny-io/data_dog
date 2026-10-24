@@ -137,6 +137,18 @@ partition_end_timestamp_seconds = Gauge(
     registry=registry,
 )
 
+# 运行日志落库结果（写入存储的那一步）。
+# 为什么要看：`GET /v1/investigations/{id}/log` 返回 404 时，运维分不清
+# “从来没写过”（代码路径问题）与“写了但存储失败”（落库异常被安静吞掉）——
+# 两者的处理方式完全不同（前者改代码，后者查库/磁盘/锁），而此前只能靠日志里一行
+# warning 去捞。异步路径的轨迹**只有这一份**，丢了就补不回来，因此这必须可计数。
+run_log_persist_total = Counter(
+    "data_dog_run_log_persist_total",
+    "运行日志落库次数（result ∈ {ok, failed}）",
+    labelnames=("result",),
+    registry=registry,
+)
+
 # 分区**结构变更（DDL）**互斥的可见性（A9）：租约/咨询锁让"谁在动结构"可查，但它们此前
 # 在 Prometheus 里**完全不存在**——"今天补分区被跳过"只能翻日志，"租约被一个死进程占了"
 # 更是看不见。这两条把静默失败补上信号（本仓纪律：每条静默失败都要有信号 + 告警）。

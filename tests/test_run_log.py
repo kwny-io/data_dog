@@ -286,3 +286,50 @@ def test_api_marks_truncated_steps(client, monkeypatch):
     item = client.get("/v1/investigations/runs", headers=_Q).json()["items"][0]
     assert item["steps_truncated"] is True
     print("PASS test_api_marks_truncated_steps")
+
+
+# ---------------------------------------------------------------- 落库失败要可见
+
+def _persist_count(result: str) -> float:
+    from data_dog.core import metrics
+
+    prefix = f'data_dog_run_log_persist_total{{result="{result}"}}'
+    for line in metrics.render().decode().splitlines():
+        if line.startswith(prefix):
+            return float(line.rsplit(" ", 1)[-1])
+    return 0.0
+
+
+def test_run_log_persist_failure_is_counted_and_survives(client, monkeypatch):
+    """落库失败：调查结果**照常返回**，但必须留下可计数的信号。
+
+    为什么这条不能省：`GET /v1/investigations/{id}/log` 的 404 有两种成因——
+    "从来没写过"（代码路径问题）和"写了但存储失败"（异常被安静吞掉）。此前只有一行
+    warning，运维在 /metrics 上看不到任何东西。异步路径的轨迹只有这一份，丢了补不回来。
+    """
+    from data_dog.service import runtime as rt
+
+    def boom(*_a, **_k):
+        raise RuntimeError("storage down")
+
+    monkeypatch.setattr(rt.repo, "save_run_log", boom)
+    before = _persist_count("failed")
+
+    cid = _seed_candidate(client)
+    r = client.post("/v1/investigations", headers=_Q, json={"candidate_id": cid})
+
+    # 1) 日志写不进去不该毁掉调查：结果照常 200
+    assert r.status_code == 200, r.text
+    # 2) 但信号必须涨
+    assert _persist_count("failed") == before + 1
+    # 3) 查不到日志是**如实**的 404（不是 500，也不是假装有）
+    iid = r.json()["investigation_id"]
+    assert client.get(f"/v1/investigations/{iid}/log", headers=_Q).status_code == 404
+
+
+def test_run_log_persist_success_is_counted(client):
+    """正对照：正常路径也必须计数——否则 `failed` 的涨就没有基线可比。"""
+    before = _persist_count("ok")
+    cid = _seed_candidate(client)
+    client.post("/v1/investigations", headers=_Q, json={"candidate_id": cid})
+    assert _persist_count("ok") >= before + 1

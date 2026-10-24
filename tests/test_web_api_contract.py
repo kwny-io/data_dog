@@ -88,3 +88,80 @@ def test_ingest_contract_carries_partial_flag():
 
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(pytest.main([__file__, "-q"]))
+
+
+# ------------------------------------------------ 被拒原因：代码 ↔ 文档 同源
+#
+# 为什么需要这条：`rejected_by_reason` 的键是**接入方唯一能拿到的诊断信息**。
+# 代码里新增一个 reason 而文档没写，等于给了一个没人认识的错误码（值班人无法判断
+# "该重试还是该找人"）。2026-10-24 修 payload 两个 500 时就新增了
+# `payload_inline_not_string` / `payload_not_object`——必须有东西强迫它们进文档。
+
+GATEWAY = REPO / "src" / "data_dog" / "data_plane" / "gateway.py"
+PIPELINE = REPO / "src" / "data_dog" / "data_plane" / "pipeline.py"
+SIGNATURE = REPO / "src" / "data_dog" / "data_plane" / "device_signature.py"
+
+
+def _emitted_reject_reasons(*, gateway_text: str | None = None,
+                           pipeline_text: str | None = None,
+                           signature_text: str | None = None) -> set[str]:
+    """从代码里枚举真正会被写进 `rejected_by_reason` 的键。
+
+    四个来源缺一不可：
+    - `gateway._reject("...")`：网关自身的拒绝；
+    - `pipeline` 的 `reason="..."`（载荷错误）与 `stats.bump("...")`（绑定/解析器错误）；
+    - 验签的**动态**原因：`gateway` 把 `check_device_signature()` 返回的第一项直接当
+      reason 用，所以那三个字符串也得算在内——只看字面 `_reject("...")` 会漏掉它们。
+
+    文本可注入（默认读真文件）：牙口自检靠传假文本，**绝不改写仓库里的源码**——
+    一个会改源文件的测试在 CI 里被中断就是源码损坏。
+    """
+    gw = gateway_text if gateway_text is not None else GATEWAY.read_text(encoding="utf-8")
+    pipe = pipeline_text if pipeline_text is not None else PIPELINE.read_text(encoding="utf-8")
+    sig = signature_text if signature_text is not None else SIGNATURE.read_text(encoding="utf-8")
+    reasons: set[str] = set()
+    reasons |= set(re.findall(r'_reject\(\s*"([a-z_]+)"', gw))
+    reasons |= set(re.findall(r'reason="([a-z_]+)"', pipe))
+    reasons |= set(re.findall(r'stats\.bump\(\s*"([a-z_]+)"', pipe))
+    reasons |= set(re.findall(r'return False,\s*"([a-z_]+)"', sig))
+    return reasons
+
+
+def _documented_reject_reasons() -> set[str]:
+    """从 §3.6 的表格首列取 reason 名。"""
+    text = DOC.read_text(encoding="utf-8")
+    parts = text.split("### 3.6", 1)
+    assert len(parts) == 2, "docs/data_plane.md 里找不到 §3.6（被拒原因全表）"
+    body = parts[1].split("\n### ", 1)[0]
+    return {m.group(1).strip() for line in body.splitlines()
+            if (m := re.match(r"^\|\s*`([^`]+)`", line.strip()))}
+
+
+def test_every_emitted_reject_reason_is_documented():
+    emitted = _emitted_reject_reasons()
+    documented = _documented_reject_reasons()
+    assert emitted, "从代码里一个 reason 都没取到，正则失效了（不是代码没 reason）"
+    missing = sorted(emitted - documented)
+    assert not missing, (
+        f"代码会发出这些 reason，但 docs/data_plane.md §3.6 没写：{missing}"
+    )
+    stale = sorted(documented - emitted)
+    assert not stale, (
+        f"§3.6 写了这些 reason，但代码里已经没有任何地方发出：{stale}（文档在骗人）"
+    )
+
+
+def test_reject_reason_doc_guard_has_teeth():
+    """守卫自检：代码里加一个文档没写的 reason → 必须红。
+
+    传假文本而不是改真文件：会改源文件的测试一旦被 Ctrl-C / CI kill，
+    留下的就是损坏的仓库。
+    """
+    bogus = "not_a_real_reason_xyz"
+    gw = GATEWAY.read_text(encoding="utf-8")
+    mutated = gw.replace('_reject("auth"', f'_reject("{bogus}"', 1)
+    assert mutated != gw, "无法在 gateway.py 里定位 _reject(\"auth\"，自检失效"
+
+    emitted = _emitted_reject_reasons(gateway_text=mutated)
+    assert bogus in emitted
+    assert sorted(emitted - _documented_reject_reasons()) == [bogus]
