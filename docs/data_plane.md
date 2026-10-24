@@ -92,6 +92,36 @@ landed = body["persisted"]["telemetry"]      # write-behind 模式下看 queued�
 > 历史：`partial` 字段与本小节是缺陷 #102 的修复产物。在此之前 `rejected_by_reason` 在 README 与
 > `docs/` 里零提及，而限流本身是设计上要丢数据的路径。
 
+#### 3.5.1 `rejected_by_reason` 全表：**谁的错**，以及能不能自动重试
+
+下表由代码枚举得出（`gateway.py` 的 `_reject(...)` 与 `pipeline.py` 的 `reason=`），
+**不是设计意图清单**——它回答两个接入方真正关心的问题：这条该不该重试、该找谁。
+
+| reason | 含义 | 该重试吗 | 谁的错 |
+|---|---|---|---|
+| `missing_fields` | 缺必需字段 | 否 | 接入方（报文缺字段） |
+| `not_a_dict` | 单条事件不是对象 | 否 | 接入方 |
+| `payload_inline_not_string` | `payload_inline` 传了数字/对象/数组（它必须是**字符串**） | 否 | 接入方 |
+| `payload_malformed` | `payload_inline` 不是合法 JSON | 否 | 接入方 |
+| `payload_not_object` | 是合法 JSON、但不是**对象**（如 `42`、`[1,2]`） | 否 | 接入方 |
+| `bad_encoding` | 编码不在白名单 | 否 | 接入方 |
+| `too_large` | 单条载荷超上限 | 否 | 接入方（改分批/截断） |
+| `auth` / `unauthorized` | 认证失败或缺可信身份 | 否 | 接入方或凭据过期 |
+| `device_signing_misconfigured` | 验签配置写坏（**失败关闭**） | 否 | 平台方 |
+| `tenant_keys_misconfigured` | 租户密钥配置写坏 | 否 | 平台方 |
+| `payload_ref_denied` | 外置引用被 SSRF 策略拒 | 否 | 接入方（或平台策略过紧） |
+| `rate_limited` | 设备配额耗尽 | **是（退避）** | 正常业务路径 |
+| `no_parser` / `resolve` | 找不到解析器/绑定 | 否 | 平台方（缺绑定） |
+| `change_source_unavailable` | 上游数据源不可用 | **是** | 平台方 |
+
+**两个实现教训写在这里，防止再犯**（均于 2026-10-24 由敌意输入测试
+`tests/test_telemetry_hostile_input.py` 抓出，提交 `9495320`）：
+
+- 合法 JSON **不等于**合法载荷：`42` / `[1,2]` / `"x"` / `true` 都能通过
+  `json.loads`，但下文全部按 mapping 用。放过它们等于让一条坏事件把**整批**打成 500。
+- “不会是这个类型”是假设，不是事实：`payload_inline` 被当文本用（`.encode()`、
+  `json.loads`），就必须先卡它是 `str`——否则 `AttributeError` 直接变 500。
+
 ---
 
 ## 4. 三个关键设计（面试能讲）
