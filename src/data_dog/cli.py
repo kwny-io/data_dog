@@ -148,6 +148,9 @@ def test(
     vendor: str | None = typer.Option(None, help="指定供应商，覆盖配置"),
     model: str | None = typer.Option(None, help="指定模型，覆盖配置"),
     offline: bool = typer.Option(False, help="离线演示（用 fake provider，无需 key）"),
+    run_all: bool = typer.Option(
+        False, "--all", help="非交互：依次调查全部候选后汇总（CI / 管道 / 演示脚本用）"
+    ),
 ):
     """交互窗：从候选清单挑一个调查，也可导入自定义 JSON；一轮可对比多个结论。"""
     from rich.console import Console
@@ -187,6 +190,19 @@ def test(
 
     added = 0
     history = []
+
+    # 非交互入口：显式开关，不依赖 isatty——
+    # Windows 上 `</dev/null` 重定向后 `sys.stdin.isatty()` 仍报 True（实测），
+    # 靠它判断会把管道/CI 误判成交互终端。
+    if run_all:
+        console.print("[dim]--all：依次调查全部候选（无需输入）[/]")
+        for case in TEST_CASES:
+            _run_and_render(case.label, "候选清单", _make_candidate(case))
+            history.append(case.label)
+            added += 1
+        console.rule("[bold]本轮对比汇总[/]")
+        _ui_module("rich_run").render_compare(results)
+        return
     while True:
         choice = typer.prompt(
             f"\n挑选一个编号调查 [1-{len(TEST_CASES)}]，"

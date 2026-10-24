@@ -372,3 +372,21 @@ def test_module_is_runnable_as_script(monkeypatch):
         runpy.run_module("data_dog.cli", run_name="__main__")
     assert exit_info.value.code == 0          # --help 正常退出
     print("PASS test_module_is_runnable_as_script")
+
+
+def test_test_command_all_runs_every_candidate_without_input():
+    """`test --all` 必须能在**无交互**环境下跑完（CI / 管道 / 演示脚本）。
+
+    背景（2026-10-25 实机踩到）：README 第一条命令是 `data-dog test --offline`，
+    而它是交互窗——非 TTY 下 `typer.prompt` 直接 Abort，输出"Aborted."、退出码 1。
+    评委/自动化第一次跑就以为项目坏了。
+    顺带记录一个 Windows 事实：`</dev/null` 重定向后 `sys.stdin.isatty()` 仍返回 True，
+    所以**不能**用 isatty 判断"是不是交互"，只能给显式开关。
+    """
+    res = _runner.invoke(app, ["test", "--offline", "--all"])
+    assert res.exit_code == 0, res.stdout + res.stderr
+    out = res.stdout
+    assert "本轮对比汇总" in out          # 真跑了并汇总，不是空转
+    assert "Aborted" not in out           # 没有落回交互提示
+    assert "右髋电机" in out and "电池" in out   # 三条候选都进过场
+    print("PASS test_test_command_all_runs_every_candidate_without_input")
