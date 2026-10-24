@@ -263,3 +263,101 @@ def test_composite_indexes_declared_in_models_and_migration():
     assert listed <= have, f"这些复合索引只在迁移里、没在模型里：{sorted(listed - have)}"
     assert len(listed) >= 4, "租户复合索引少得可疑（至少要覆盖日志/候选/报告/告警）"
     print("PASS test_composite_indexes_declared_in_models_and_migration")
+
+
+def test_sandbox_never_sets_rlimit_nproc():
+    """沙箱 worker 不得用 `RLIMIT_NPROC` 限制线程数。
+
+    为什么：Linux 的 NPROC 配额统计同一 real UID 下的**全部 task，含线程**。
+    `worker_main` 设完 limit 紧接着就 `res_q.put(("ready", ...))`，而 `mp.Queue`
+    首次 put 会 lazy 建 feeder 线程 → `RuntimeError: can't start new thread`。
+    root 带 `CAP_SYS_RESOURCE` 会绕过该检查，于是本地（root 容器）全绿、
+    GitHub runner（普通用户 `runner`）必红——2026-10-23 实测同镜像同代码仅换用户：
+    `docker run --rm --user 65534 … pytest tests/test_sandbox.py` → 6 failed, 10 passed。
+
+    禁 fork 请用 `_apply_seccomp()`（已 deny fork/vfork/clone/clone3），
+    NPROC 做不到「只禁进程、放行线程」。
+    """
+    src = (ROOT / "src" / "data_dog" / "operator_factory" / "sandbox_exec.py").read_text(
+        encoding="utf-8"
+    )
+    offenders = [
+        f"{i}: {line.strip()}"
+        for i, line in enumerate(src.splitlines(), 1)
+        if "RLIMIT_NPROC" in line and not line.lstrip().startswith("#")
+    ]
+    assert not offenders, (
+        "sandbox_exec.py 用 RLIMIT_NPROC 限线程：Linux 上 NPROC 也统计线程，"
+        "NPROC=0 会让 mp.Queue 的 feeder 线程起不来（root 绕过检查、CI 普通用户必红）。"
+        "违规点： " + " | ".join(offenders)
+    )
+
+
+def _git_tracked_files() -> list[str]:
+    """返回被跟踪的文件路径（UTF-8，不转义）。
+
+    为何不用 `git ls-files` 的默认输出：Windows 上 `core.quotepath=true` 会把非 ASCII
+    文件名转成 C 风格转义（`"\\347\\247\\201\\347..."`），于是 `私人笔记.md` 变成一串
+    数字——关键词匹配全部落空。2026-10-23 变异测试实测：中文名私人文件被踩进暂存区，
+    守卫仍 PASS（假守卫）。这里用 `-c core.quotepath=false -z` + 显式 UTF-8 解码，
+    并在此处一次性把坑堵住，避免每个调用点重复踩。
+    """
+    import subprocess
+
+    raw = subprocess.run(
+        ["git", "-c", "core.quotepath=false", "ls-files", "-z"],
+        cwd=ROOT, capture_output=True, check=True,
+    ).stdout
+    return [p for p in raw.decode("utf-8", "surrogateescape").split("\0") if p]
+
+
+def test_no_private_paths_are_tracked():
+    """仓库是 public 的：私人/临时文件一旦 `git add -A` 就会被全世界看见。
+
+    2026-10-23 用户明确要求（原话）：“你公开我的仓库的时候 私人文档不要上传”。
+    这条守卫把该要求变成断言，而不是靠记性：
+    任何命中私人路径模式的**被跟踪**文件，都让测试红。
+
+    拦截时机在 `git add` 之后、`git commit` 之前（本机跑全量门禁时），
+    以及 pre-push 钩子里。容器拷贝模式下没有 `.git`，此时跳过（容器里也提交不了）。
+    """
+    if not (ROOT / ".git").exists():
+        print("SKIP test_no_private_paths_are_tracked（无 .git：容器拷贝模式）")
+        return
+
+    tracked = _git_tracked_files()
+
+    # 目录前缀：会话/任务日志、构建产物、诊断草稿、本机草稿、依赖目录
+    banned_prefixes = (
+        ".pi/", "artifacts/", "diag/", "data/", ".venv/", "node_modules/",
+        ".claude/", ".cursor/", "tmp/",
+    )
+    # 后缀：Windows 包装脚本、日志、会话导出、密钥材料
+    banned_suffixes = (".bat", ".log", ".jsonl", ".pem", ".key", ".p12", ".kdbx")
+    # 文件名关键词：私人笔记（中英）
+    banned_keywords = ("笔记", "备忘", "私人", "个人", "草稿", "personal", "private",
+                       "diary", "journal", "scratch")
+    # 允许的例外（示例文件本身就是给公众看的）
+    allowed = {".env.example"}
+
+    bad: list[str] = []
+    for path in tracked:
+        low = path.lower()
+        name = low.rsplit("/", 1)[-1]
+        if path in allowed:
+            continue
+        if any(low.startswith(p) for p in banned_prefixes):
+            bad.append(f"{path}（禁止的目录前缀）")
+        elif low.endswith(banned_suffixes):
+            bad.append(f"{path}（禁止的文件后缀）")
+        elif name.startswith(".env") and name != ".env.example":
+            bad.append(f"{path}（真实环境变量文件）")
+        elif any(k in low for k in banned_keywords):
+            bad.append(f"{path}（私人/草稿关键词）")
+
+    assert not bad, (
+        "仓库已公开，这些私人或临时文件不该被跟踪：\n  "
+        + "\n  ".join(bad)
+        + "\n修法：git rm --cached <文件>，并把它加进 .gitignore"
+    )
+    print("PASS test_no_private_paths_are_tracked")

@@ -69,7 +69,16 @@ class SandboxViolation(RuntimeError):
 
 - 常驻 worker 进程（`multiprocessing`，Windows 用 `spawn` + 可 pickle 的入参）；
 - worker 启动时设 `resource.setrlimit`（Linux/macOS）：`RLIMIT_CPU`、`RLIMIT_AS=mem_mb`、
-  `RLIMIT_NOFILE=16`、`RLIMIT_NPROC=0`；
+  `RLIMIT_NOFILE=16`。**不设 `RLIMIT_NPROC`**（原设计里写的是 `=0`，2026-10-23 实测推翻）：
+  Linux 的 NPROC 配额统计**同一 real UID 下的全部 task，包括线程**，而 CPython 子进程
+  一启动就要建线程，`=0` 等于让 worker 开机即死；而 root（带 `CAP_SYS_RESOURCE`）下该限制
+  被静默绕过，于是本地 root 容器全绿、GitHub runner（普通用户）全红——同一份代码两种结局。
+  进程数防线的真实位置在**外层**：容器/Pod 的 cgroup `pids.max` + wall-clock 超时，
+  而不是进程内 rlimit（NPROC 做不到“只禁进程、放行线程”）。
+  **代价（已知缺口）**：纯 fork bomb 现在只能靠 wall-clock 超时兼底，定位精度不如 cgroup `pids.max`；
+  补齐方式在部署侧：Docker `--pids-limit`，Kubernetes 则是**节点级** kubelet 参数
+  （`podPidsLimit` / `--pod-max-pids`）—— Pod spec 里没有 pids 限制字段，所以 helm chart 里写不出来，
+  这是 API 现状而不是遗漏。
 - Linux：`seccomp` 禁 `socket/connect/open/execve`（可用 `pyseccomp`，**可选依赖**）；
 - 父进程 `join(wall_s)` 超时 → `terminate()` → 记 `SandboxViolation`；
 - 越权/超时**只丢弃该算子的该次求值**（失败关闭），不中断整条流。

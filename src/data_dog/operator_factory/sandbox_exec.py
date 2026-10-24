@@ -24,6 +24,7 @@ worker 的职责
 from __future__ import annotations
 
 import os
+import time
 from typing import Any, cast
 
 
@@ -61,8 +62,17 @@ def _apply_rlimits(policy: dict[str, Any]) -> str:
     cpu = float(policy.get("cpu_s", 0.0) or 0.0)
     if cpu > 0:
         # 软/硬都设：软限到点内核发 SIGXCPU（默认终止），硬限是不可回落的上限
+        #
+        # **按「已用 + 余量」设，不是绝对值**（与下面 RLIMIT_AS 同一哲学）：
+        # spawn 子进程启动时先重建整个包的导入图（`data_dog/__init__` 拉起
+        # agent/providers/…），这段 CPU 在设限之前就已经烧掉了。若把软限写成
+        # 绝对值 `int(cpu)+1`，那么 cpu_s=0.1 时软限就是 1s，而容器/慢机上光导入
+        # 就 > 1s——内核下一个计时 tick 直接 SIGXCPU 杀掉 worker，父进程什么也收不到，
+        # 报“子进程求值超时”。实测：Windows（无 resource）全绿，Linux 容器 3 项红。
         try:
-            resource.setrlimit(resource.RLIMIT_CPU, (int(cpu) + 1, int(cpu) + 2))
+            used = time.process_time()
+            soft = int(used + cpu) + 1
+            resource.setrlimit(resource.RLIMIT_CPU, (soft, soft + 1))
         except (ValueError, OSError):
             level = "rlimit-partial"
 
@@ -76,16 +86,25 @@ def _apply_rlimits(policy: dict[str, Any]) -> str:
             except (ValueError, OSError):
                 level = "rlimit-partial"
 
+    # **禁止用 RLIMIT_NPROC 来「禁子进程」**（曾在此设 (0, 0)，已移除）：
+    # Linux 的 NPROC 配额统计的是**同一 real UID 下的全部 task，包括线程**。
+    # 而本 worker 立刻就要用 `mp.Queue`——它首次 put 时 lazy 建 feeder 线程，
+    # 于是 `worker_main` 里「先 `_apply_limits()`、后 `res_q.put(("ready", ...))`」
+    # 的顺序必然撞墙：`RuntimeError: can't start new thread`。
+    #
+    # **为什么本地一直是绿的、CI 一上就红**：root 带 `CAP_SYS_RESOURCE`，
+    # 内核对 RLIMIT_NPROC 的检查被绕过；GitHub runner 以普通用户 `runner` 跑，
+    # 限制真实生效。实测证据（同镜像同代码，仅换用户）：
+    #   `docker run --rm --user 65534 … pytest tests/test_sandbox.py`
+    #   → 6 failed, 10 passed（全部 `can't start new thread`）
+    #   `docker run --rm …`（root）→ 16 passed
+    # 即「假绿」的根子不是平台差异本身，而是**用错了手段**：
+    # 禁 fork 的正确层次是 `_apply_seccomp()`（已 deny fork/vfork/clone/clone3），
+    # 而 worker 自身不调用 fork 是代码纪律。NPROC 做不到「只禁进程、放行线程」。
     try:
         resource.setrlimit(resource.RLIMIT_NOFILE, (16, 16))
     except (ValueError, OSError):
         level = "rlimit-partial"
-
-    # 禁子进程（daemon 进程本就不能再 fork；这条是纵深防御）
-    try:
-        resource.setrlimit(resource.RLIMIT_NPROC, (0, 0))
-    except (ValueError, OSError, AttributeError):
-        pass
 
     return level
 
@@ -120,6 +139,24 @@ def _apply_seccomp(policy: dict[str, Any]) -> str:
         return "seccomp-failed"
 
 
+def _trace(msg: str) -> None:
+    """bootstrap 追踪（仅在 `DD_SANDBOX_TRACE` 设了文件路径时写）。
+
+    为什么需要：worker 起不来时父进程只能等 30s 拿到空队列，无法区分
+    “卡在 import”“卡在设 rlimit”“卡在建 Queue 线程”“已经 put 但父进程没收到”。
+    真踩过：全量套件里 6 条 spawn 用例全部 `start-failed(exit=unknown)`（进程还活着），
+    单文件跑全绿——没有分阶段痕迹就只能猜。
+    """
+    path = os.environ.get("DD_SANDBOX_TRACE")
+    if not path:
+        return
+    try:
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(f"{os.getpid()} {time.time():.3f} {msg}\n")
+    except Exception:  # noqa: BLE001 — 追踪绝不能影响沙箱本身
+        pass
+
+
 def _apply_limits(policy: dict[str, Any]) -> str:
     parts = [_apply_rlimits(policy), _apply_seccomp(policy)]
     # 去掉 no-* 噪声标记，保留真正的档位描述（便于日志一眼看出实际能力）
@@ -137,8 +174,11 @@ def worker_main(cmd_q, res_q, policy: dict[str, Any]) -> None:  # noqa: ANN001
     """
     from .dsl import SandboxViolation
 
+    _trace("worker-start")
     level = _apply_limits(policy)
+    _trace(f"limits-applied:{level}")
     res_q.put(("ready", level))
+    _trace("ready-sent")
 
     while True:
         item = cmd_q.get()

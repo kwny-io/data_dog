@@ -116,7 +116,18 @@ class SubprocessExecutor:
             if tag == "ready":
                 self._level = level
         except Exception:  # noqa: BLE001 — 起不来则标记，run() 时会再处理
-            self._level = "start-failed"
+            # 带上退出码：否则只剩“启动失败”四个字，无法区分 import 报错、
+            # 被信号杀（-9 SIGKILL / -24 SIGXCPU / -11 SIGSEGV）还是资源限。
+            # 实测过：Linux 容器里 RLIMIT_CPU 写绝对值就会被 SIGXCPU 杀掉，
+            # 而旧代码只报“求值超时”，白花几小时才定位。
+            code = None
+            try:
+                self._proc.join(timeout=2.0)
+                code = self._proc.exitcode
+            except Exception:  # noqa: BLE001
+                code = None
+            self._level = f"start-failed(exit={code})" if code is not None \
+                else "start-failed(exit=unknown)"
 
     def _ensure(self) -> None:
         if self._proc is None or not self._proc.is_alive():
@@ -125,16 +136,20 @@ class SubprocessExecutor:
     def run(self, op: Operator, event: dict[str, Any],
             window: Any = None) -> list[str]:
         self._ensure()
-        if self._level == "start-failed":
-            raise SandboxViolation("子进程沙箱 worker 启动失败")
+        if self._level.startswith("start-failed"):
+            raise SandboxViolation(f"子进程沙箱 worker 启动失败（{self._level}）")
         self._cmd_q.put((op, event, window,
                          self.policy.max_steps, self.policy.wall_s))
         # 父进程侧墙钟兜底：留一点 IPC 余量（子进程内也有预算检查，此处防挂死）
         try:
             tag, payload = self._res_q.get(timeout=self.policy.wall_s + 0.5)
         except Exception as e:  # noqa: BLE001 — 队列空 = 子进程挂死/被杀
-            self._kill()
-            raise SandboxViolation("子进程求值超时（已终止 worker）") from e
+            code = self._proc.exitcode if self._proc is not None else None
+            self._kill()   # 注意：_kill 会把 _proc 置 None，退出码必须提前取
+            # 带上退出码（-24=SIGXCPU 就表示 CPU rlimit 太紧，不是“代码慢”）
+            raise SandboxViolation(
+                f"子进程求值超时（已终止 worker，exit={code}）"
+            ) from e
         if tag == "ok":
             return payload
         if tag == "violation":

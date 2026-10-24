@@ -41,6 +41,11 @@
      只会暴露成不一致（失败关闭）。**残留边界：同卷硬链接**（真实路径相同，本规则不区分，
      也不该区分——那就是同一个文件）。本机实测：普通/多级路径可读，junction 中间段、
      根内 junction 别名、symlink-final 全拒。
+- **覆盖口径（Win32 那一支）**：`_win_*` / `_final_path` / `_normalize_win_path` /
+  `_open_beneath_windows` 在 Linux 上**永不可执行**，所以带 `# pragma: no cover - Win32 平台互斥`；
+  它们的验证靠**本机原生 Windows 用例**（`pytest tests/test_rawlog_source.py -q` → 20 passed /
+  6 skipped，跳过的都是 POSIX 专用那几条）。Linux 腿的覆盖率只统计真正能跑的 POSIX 分支，
+  所以这里的 pragma 是“口径不适用”，不是“懒得测”。
 - **本模块不做鉴权**：权限来自调用方注入的 `lookup`（按租户查 `raw_log_ref`，配合 RLS）。
   本模块只负责"键 → 正文"。
 - `content_sha256` 是**返回内容**（可能已截断）的摘要，不是整份文件的摘要；
@@ -189,7 +194,7 @@ class _ByHandleFileInformation(ctypes.Structure):
                 ("nFileIndexLow", ctypes.c_uint32)]
 
 
-def _win_kernel32_dll():
+def _win_kernel32_dll():  # pragma: no cover - Win32 平台互斥（见本段头部说明）
     """Windows 专属：装载 kernel32。
 
     为什么要有这层薄包装：CI 的静态腿跑在 Linux 上，`mypy --platform linux` 看不到
@@ -206,14 +211,14 @@ def _win_kernel32_dll():
     raise RuntimeError("只有 Windows 才有 Win32 句柄 API")   # pragma: no cover - 平台互斥
 
 
-def _win_last_error() -> int:
+def _win_last_error() -> int:  # pragma: no cover - Win32 平台互斥
     """同上：`ctypes.get_last_error` 只存在于 Windows 的类型环境。"""
     if sys.platform == "win32":
         return ctypes.get_last_error()
     raise RuntimeError("只有 Windows 才有 Win32 句柄 API")   # pragma: no cover - 平台互斥
 
 
-def _win_fd_from_handle(handle) -> int:
+def _win_fd_from_handle(handle) -> int:  # pragma: no cover - Win32 平台互斥
     """句柄→fd。`msvcrt.open_osfhandle` 与 `os.O_BINARY` 同样只存在于 Windows。"""
     if sys.platform == "win32":
         import msvcrt
@@ -222,7 +227,7 @@ def _win_fd_from_handle(handle) -> int:
     raise RuntimeError("只有 Windows 才有 Win32 句柄 API")   # pragma: no cover - 平台互斥
 
 
-def _win_kernel32():
+def _win_kernel32():  # pragma: no cover - Win32 平台互斥
     """惰性装好 Win32 原型（只在 Windows 上真正用到）。"""
     global _K32
     if os.name != "nt":
@@ -244,7 +249,7 @@ def _win_kernel32():
     return _K32
 
 
-def _normalize_win_path(p: str) -> str:
+def _normalize_win_path(p: str) -> str:  # pragma: no cover - 只被 Win32 路径调用
     """剥掉 Windows 长路径前缀（问号前缀 / UNC 长路径）后归一化，便于逐字比对。"""
     bs = chr(92)
     unc = bs * 2 + "?" + bs + "UNC" + bs
@@ -256,7 +261,7 @@ def _normalize_win_path(p: str) -> str:
     return os.path.normcase(os.path.normpath(p))
 
 
-def _final_path(k32, handle) -> str | None:
+def _final_path(k32, handle) -> str | None:  # pragma: no cover - 只被 Win32 路径调用
     """句柄**实际**指向哪里（POST-open 事实，不是"稍后要打开的路径"）。"""
     buf = ctypes.create_unicode_buffer(32768)
     n = k32.GetFinalPathNameByHandleW(handle, buf, len(buf), 0)
@@ -265,7 +270,7 @@ def _final_path(k32, handle) -> str | None:
     return _normalize_win_path(buf.value)
 
 
-def _open_beneath_windows(root: Path, rel: Path):
+def _open_beneath_windows(root: Path, rel: Path):  # pragma: no cover - Win32 平台互斥
     """Windows 受控打开：**不跟随最后一段 reparse point** + 核对已打开句柄的真实路径。
 
     与 POSIX 的差别（如实写）：POSIX 逐段 `openat` 把"检查"与"打开"合成同一个系统调用，

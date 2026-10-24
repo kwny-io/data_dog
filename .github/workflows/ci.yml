@@ -215,12 +215,23 @@ jobs:
             https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz
           tar -xzf kubeconform.tar.gz kubeconform
           sudo mv kubeconform /usr/local/bin/
-      - name: kubeconform 校验（默认值 + 生产值）
+      # schema 收在 helm/schemas/：kubeconform 的 -ignore-missing-schemas 只容忍 404，
+      # 不容忍连接失败（离线会假红）；-skip 的两个 CRD 上游无 schema，由 verify_chart.py 覆盖。
+      - name: kubeconform 校验（默认值 + 生产值，本地 schema）
         run: |
           helm template dd helm/data-dog \
-            | kubeconform -strict -summary -ignore-missing-schemas
+            | kubeconform -strict -summary -ignore-missing-schemas \
+                -skip PrometheusRule,ServiceMonitor \
+                -schema-location 'helm/schemas/{{.ResourceKind}}{{.KindSuffix}}.json' \
+            | tee /tmp/kc-default.txt
+          python scripts/assert_kc_summary.py 0 < /tmp/kc-default.txt
           helm template dd helm/data-dog -f helm/data-dog/values.prod.yaml \
-            | kubeconform -strict -summary -ignore-missing-schemas
+            | kubeconform -strict -summary -ignore-missing-schemas \
+                -skip PrometheusRule,ServiceMonitor \
+                -schema-location 'helm/schemas/{{.ResourceKind}}{{.KindSuffix}}.json' \
+            | tee /tmp/kc-prod.txt
+          # 生产值额外渲染 HPA + 2 个 CRD：HPA 要真校验，CRD 显式跳过
+          python scripts/assert_kc_summary.py 2 < /tmp/kc-prod.txt
 
   web:
     name: 前端（Next.js 类型检查 + 静态检查 + 单测）

@@ -1,0 +1,47 @@
+# CI 离线复现用镜像 1/2：Python 侧（对齐 ubuntu-latest + actions/setup-python 3.12）
+# 用 slim 而不是 alpine：CI 是 glibc，psycopg / pillow 这类有二进制轮子的包在 musl 上行为不同，
+# 用 alpine 验出来的“绿”不能代表 CI 的绿。
+FROM python:3.12-slim
+
+# 对齐 CI 的基础工具箱：git（pip install -e 需要）、build-essential（万一退化到源码构建）、curl（下 helm/kubeconform）
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends git build-essential curl ca-certificates tar gzip unzip \
+ && rm -rf /var/lib/apt/lists/*
+
+# CI 里 helm/kubeconform 是 curl 下载的二进制；这里预置同版本，避免每条腿重复下载
+ARG HELM_VERSION=v3.16.3
+ARG KUBECONFORM_VERSION=v0.6.7
+RUN curl -fsSL -o /tmp/helm.tgz "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz" \
+ && tar -xzf /tmp/helm.tgz -C /tmp linux-amd64/helm \
+ && mv /tmp/linux-amd64/helm /usr/local/bin/helm \
+ && curl -fsSL -o /tmp/kc.tgz "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz" \
+ && tar -xzf /tmp/kc.tgz -C /tmp kubeconform \
+ && mv /tmp/kubeconform /usr/local/bin/kubeconform \
+ && rm -f /tmp/helm.tgz /tmp/kc.tgz \
+ && helm version --short && kubeconform -v
+
+WORKDIR /work
+# 非 root 腿（uid 65534，对齐 GitHub runner）需要在“工作目录”里写文件（拷贝源码、缓存）。
+# 镜像里默认是 root:755 → 实测 `cp: cannot create directory '/work/web/node_modules': Permission denied`，
+# 表现为 web/e2e 腿集体红（rc=2 / rc=126），而代码本身没问题。
+# 用 1777（同 /tmp）而不是 chown 给固定 uid：IDE 里谁跑都能用，也不把“用户”写死进镜像。
+RUN chmod 1777 /work
+
+# --- 依赖预装（消除腿内公网依赖）--------------------------------------------
+# 2026-10-23 23:38 实测：腿内 `pip install -e ".[dev,postgres]"` 跑 759s 后死在
+#   `ReadTimeoutError(files.pythonhosted.org)` → `ResolutionImpossible`
+# ——red 来自网络，不是代码。把第三方依赖固化进镜像后，腿内只剩本地可编辑安装，
+# 结果只取决于代码，且每条腿从 ~750s 降到几十秒。
+# 只装**第三方依赖**、不装 data_dog 本体：本体必须来自挂载的 /work，否则测的不是当前代码。
+COPY pyproject.toml /build/pyproject.toml
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python -m pip install --upgrade pip setuptools wheel -q \
+ && python - <<'PY' > /tmp/ci-req.txt
+import pathlib, tomllib
+p = tomllib.loads(pathlib.Path('/build/pyproject.toml').read_text('utf-8'))['project']
+req = list(p['dependencies'])
+for extra in ('dev', 'postgres', 'scan', 'sbom'):
+    req += list(p['optional-dependencies'][extra])
+print('\n'.join(dict.fromkeys(req)))
+PY
+RUN --mount=type=cache,target=/root/.cache/pip pip install -q -r /tmp/ci-req.txt

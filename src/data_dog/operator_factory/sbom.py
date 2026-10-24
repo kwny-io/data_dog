@@ -78,6 +78,7 @@ def generate_sbom(*, out_path: str = "", components: list[SbomComponent] | None 
         from cyclonedx.model.bom import Bom
         from cyclonedx.model.component import Component, ComponentType
         from cyclonedx.output.json import JsonV1Dot5
+        from packageurl import PackageURL
     except ImportError:
         res = _minimal_sbom(comps, project=project, version=version)
     else:
@@ -85,8 +86,15 @@ def generate_sbom(*, out_path: str = "", components: list[SbomComponent] | None 
         bom.metadata.component = Component(
             name=project, version=version, type=ComponentType.APPLICATION)
         for c in comps:
-            bom.components.add(Component(name=c.name, version=c.version or None,
-                                         type=ComponentType.LIBRARY))
+            comp = Component(name=c.name, version=c.version or None,
+                             type=ComponentType.LIBRARY)
+            # purl 必填：下游扫描器按 purl 建索引，没有 purl 的组件等于不可查询。
+            # 不显式设置时这条路径产出无 purl 的组件，而 `_minimal_sbom` 有 ——
+            # 两条路径产出不一致，且生产/CI 装的正是 cyclonedx-bom（跑的是这条）。
+            comp.purl = (PackageURL.from_string(c.purl) if c.purl
+                         else PackageURL(type="pypi", name=c.name,
+                                         version=c.version or None))
+            bom.components.add(comp)
         res = SbomResult(bom=json.loads(JsonV1Dot5(bom).output_as_string()),
                          generator="cyclonedx-bom", complete=True)
 

@@ -44,6 +44,11 @@ dev = [
     # 内存版 Redis：让 redis 后端的用例**离线**可跑（不装则那 1 项 skip）。
     # 项目主打"全离线确定性"，测试依赖也一并给全，别让默认套件留残缺。
     "fakeredis>=2.0",
+    # 视觉通道（vision extra）的 5 个用例直接裁 PNG，没 Pillow 就是
+    # `ModuleNotFoundError: No module named 'PIL'`。CI 装的是 `.[dev,postgres]`，
+    # 所以 Pillow 必须进 dev——否则每次 push 的 test job 里这 5 项必红（本仓真踩过：
+    # 容器内 11 项失败中 5 项就是这个）。运行时用户该装 `.[vision]` 而非 `.[dev]`。
+    "pillow>=10.0",
 ]
 ui = [
     "streamlit>=1.30.0",

@@ -178,14 +178,25 @@ def test_apply_rlimits_without_resource_module(monkeypatch):
 def test_apply_rlimits_sets_cpu_nofile_nproc(monkeypatch):
     fake = _FakeResource()
     _install_resource(monkeypatch, fake)
+    # 把时钟钉死，否则断言只能验“形状”而不能验具体数值
+    monkeypatch.setattr(sandbox_exec.time, "process_time", lambda: 10.0)
     assert sandbox_exec._apply_rlimits({"cpu_s": 2.7}) == "rlimit"
-    # cpu 用 int()+1/+2：留一点余量给解释器收尾，硬限不可回落
-    assert fake.limits(fake.RLIMIT_CPU) == [(3, 4)]
+    # CPU 限是**增量**：`int(已用 + cpu_s) + 1`，硬限 = 软限 + 1（不可回落）。
+    # 绝不能写成绝对值 `int(cpu_s)+1`——worker 光重建导入图就可能烧掉 1s 以上，
+    # Linux 容器里会被 SIGXCPU 直接打死（父进程只看到“求值超时”）。
+    cpu_soft, cpu_hard = fake.limits(fake.RLIMIT_CPU)[0]
+    assert cpu_soft == int(10.0 + 2.7) + 1 == 13, cpu_soft
+    assert cpu_hard == cpu_soft + 1 == 14, cpu_hard
+    assert cpu_soft > 10.0, "软限必须大于已用 CPU，否则等于立刻自杀"
     assert fake.limits(fake.RLIMIT_NOFILE) == [(16, 16)]
-    assert fake.limits(fake.RLIMIT_NPROC) == [(0, 0)]
+    # NPROC 必须**完全不动**：Linux 的 NPROC 统计同 uid 的全部任务（含线程），
+    # 而 CPython 子解释器一启动就要建线程——设成 (0,0) 等于让 worker 一开就死。
+    # 且 root 对 NPROC 设限是静默无操作（有 CAP_SYS_RESOURCE），
+    # 于是“root 容器绿 + runner 普通用户红”的假绿就是这么漏出去的（2026-10-23 实测）。
+    assert fake.limits(fake.RLIMIT_NPROC) == [], \
+        "不得对 RLIMIT_NPROC 设限：会把 worker 的线程建死，且 root 下静默无效"
     assert fake.limits(fake.RLIMIT_AS) == []          # 未给 mem_mb → 不动地址空间
-    assert [w for w, _ in fake.calls] == [fake.RLIMIT_CPU, fake.RLIMIT_NOFILE,
-                                          fake.RLIMIT_NPROC]
+    assert [w for w, _ in fake.calls] == [fake.RLIMIT_CPU, fake.RLIMIT_NOFILE]
     print("PASS test_apply_rlimits_sets_cpu_nofile_nproc")
 
 
@@ -195,11 +206,12 @@ def test_apply_rlimits_cpu_zero_or_missing_is_skipped(monkeypatch):
         _install_resource(monkeypatch, fake)
         assert sandbox_exec._apply_rlimits(policy) == "rlimit"
         assert fake.limits(fake.RLIMIT_CPU) == [], policy
-    # 小于 1 秒也至少留 1 秒余量（int()+1），不会设成 (0,1) 把自己立刻打死
+    # 小于 1 秒也至少留 1 秒余量（int()+1），不会设成已用量本身把自己立刻打死
     fake = _FakeResource()
     _install_resource(monkeypatch, fake)
+    monkeypatch.setattr(sandbox_exec.time, "process_time", lambda: 10.0)
     sandbox_exec._apply_rlimits({"cpu_s": 0.5})
-    assert fake.limits(fake.RLIMIT_CPU) == [(1, 2)]
+    assert fake.limits(fake.RLIMIT_CPU) == [(11, 12)]
     print("PASS test_apply_rlimits_cpu_zero_or_missing_is_skipped")
 
 

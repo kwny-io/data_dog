@@ -13,6 +13,7 @@
 """
 from __future__ import annotations
 
+import multiprocessing as mp
 import sys
 import time
 
@@ -164,6 +165,38 @@ def test_run_isolated_helper():
 
 
 # ---------------------------------------------------------------- 诚实档位
+
+def _cpu_rlimit_child(q) -> None:  # noqa: ANN001
+    """子进程：先烧掉 >1s CPU（模拟 spawn 后重建导入图），再造限，然后存活上报。"""
+    from data_dog.operator_factory.sandbox_exec import _apply_rlimits
+
+    while time.process_time() < 1.3:
+        sum(i * i for i in range(50_000))
+    _apply_rlimits({"cpu_s": 0.1, "mem_mb": 0})  # 只看 CPU 这一条
+    time.sleep(0.4)  # 等内核计时 tick 结算（SIGXCPU 在下个 tick 发出）
+    q.put("alive")
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows 无 resource 模块，无 rlimit 可测")
+def test_cpu_rlimit_is_incremental_not_absolute():
+    """回归守卫：`RLIMIT_CPU` 必须按「已用 + 余量」设，不能是绝对值。
+
+    为什么需要这条：默认 `cpu_s=0.1`，若写成绝对值 `int(cpu_s)+1` 就是 1s；
+    而 spawn 子进程启动时先重建整个包的导入图（实测容器内 3.0s CPU），
+    一设限就被内核杀掉（exitcode -9/-24）——父进程什么也收不到，报“子进程求值超时”。
+    Windows 无 `resource` 模块，整条路径被跳过，所以在 Windows 上永远绿：
+    这个缺陷只在 Linux 暴露，正是“CI 从没真绿”那一类。
+    """
+    ctx = mp.get_context("spawn")
+    q = ctx.Queue()
+    p = ctx.Process(target=_cpu_rlimit_child, args=(q,), daemon=True)
+    p.start()
+    try:
+        assert q.get(timeout=30.0) == "alive"
+    finally:
+        p.join(5.0)
+    assert p.exitcode == 0, f"worker 被 rlimit 杀掉：exitcode={p.exitcode}（-24=SIGXCPU, -9=KILL）"
+
 
 def test_isolation_level_reported_honestly():
     with ExecutorPool(SandboxPolicy(kind="subprocess")) as pool:

@@ -132,7 +132,14 @@ def test_sca_runner_exception_is_skipped_not_pass():
 
 # ---------------------------------------------------------------- SBOM
 
-def test_sbom_minimal_is_valid_cyclonedx():
+def test_sbom_output_is_valid_cyclonedx():
+    """两条实现路径（装了库 / 降级）都要产出合法 CycloneDX，且组件带 purl。
+
+    **不要把 `complete` 当契约**：它取决于环境 —— 装了 cyclonedx-bom 走库路径（True），
+    没装走最小实现（False）。原先这里写 `assert res.complete is False`，
+    于是同一个测试本地绿、装了 sbom extra 的 CI 镜像红（2026-10-24 实测）。
+    降级路径的 complete=False 由下面那条用例单独守。
+    """
     res = generate_sbom(components=[SbomComponent("numpy", "2.0.0"),
                                     SbomComponent("pyyaml", "6.0")])
     bom = res.bom
@@ -141,9 +148,24 @@ def test_sbom_minimal_is_valid_cyclonedx():
     assert bom["serialNumber"].startswith("urn:uuid:")
     names = [c["name"] for c in bom["components"]]
     assert "numpy" in names and "pyyaml" in names
-    # 组件带 purl
+    # 组件带 purl（下游扫描器按 purl 建索引；两条路径都必须有）
     assert any(c.get("purl", "").startswith("pkg:pypi/") for c in bom["components"])
-    assert res.complete is False            # 最小实现如实标注不完整
+    assert res.generator          # 必须如实标注来源，不冒充“完整 SBOM”
+
+
+def test_sbom_minimal_fallback_also_carries_purl():
+    """两条路径产出必须一致：没装 cyclonedx-bom 时的最小实现也要带 purl。
+
+    上面那条用例只能盖到“当前环境装了哪条”。这个直接调最小实现，
+    让降级路径也进入覆盖 —— 否则它只在装了库的环境里永远不被执行。
+    """
+    from data_dog.operator_factory.sbom import _minimal_sbom
+
+    res = _minimal_sbom([SbomComponent("numpy", "2.0.0")],
+                        project="data_dog", version="0.1.0")
+    comp = res.bom["components"][0]
+    assert comp["purl"] == "pkg:pypi/numpy@2.0.0"
+    assert res.complete is False            # 降级路径不得冒充完整 SBOM
 
 
 def test_sbom_writes_file(tmp_path):

@@ -73,6 +73,36 @@ def test_ref_grammar_blocks_traversal_before_the_reader(tmp_path):
     assert out["ok"] is False and out["error"] == "invalid_input"
 
 
+@pytest.mark.skipif(not hasattr(os, "O_NOFOLLOW"),
+                    reason="POSIX 专用：验证 openat 逐段的失败分支（Windows 走句柄回落）")
+def test_missing_root_dir_is_not_found(tmp_path):
+    """受控目录本身不存在 → 当“这条不存在”处理，不能抛异常把整条回放链带崩。"""
+    src = rawlog.make_rawlog_source(config=_cfg(tmp_path / "never_created"))
+    out = _resolve(src, "rawlog://absent.log")
+    assert out["ok"] is False and out["error"] == "not_found"
+
+
+@pytest.mark.skipif(not hasattr(os, "O_NOFOLLOW"),
+                    reason="POSIX 专用：O_DIRECTORY 对普通文件是 ENOTDIR")
+def test_root_that_is_a_regular_file_is_refused(tmp_path):
+    """配置写错（base_dir 指向文件）→ 失败关闭（RawLogRefused），不静默读错东西。"""
+    not_a_dir = tmp_path / "file_not_dir"
+    not_a_dir.write_bytes(b"x")
+    src = rawlog.make_rawlog_source(config=_cfg(not_a_dir))
+    with pytest.raises(rawlog.RawLogRefused):
+        src("whatever.log", [])
+
+
+@pytest.mark.skipif(not hasattr(os, "O_NOFOLLOW"),
+                    reason="POSIX 专用：S_ISREG 判定只在 openat 路径上")
+def test_key_pointing_at_a_directory_is_not_treated_as_body(tmp_path):
+    """存储键指向目录 → 不能当“日志正文”返回（目录/设备文件一律 not_found）。"""
+    (tmp_path / "sub").mkdir()
+    src = rawlog.make_rawlog_source(config=_cfg(tmp_path))
+    out = _resolve(src, "rawlog://sub")
+    assert out["ok"] is False and out["error"] == "not_found"
+
+
 def test_symlink_escape_is_refused(tmp_path):
     outside = tmp_path / "outside_secret.log"
     outside.write_text("secret", encoding="utf-8")

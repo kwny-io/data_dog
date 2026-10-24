@@ -1,0 +1,28 @@
+# CI 离线复现用镜像 3/3：浏览器 + 真 Python 后端联跑（对应 .github/workflows/ci.yml 的 e2e-real 腿）
+#
+# 为什么单独一个镜像：这条腿要同时有 node（Next dev server/playwright）和 python（真后端），
+# 而之前是在腿内 `apt-get install python3` + `pip install -e '.[dev]'` —— 又一处“网络决定结论”。
+# 基底用 dd-ci-node:22，因此 node 依赖与 Chromium 已经烘好，这里只补 python 侧。
+#
+# 用法：
+#   docker build -f scripts/ci_offline/Dockerfile.e2e -t dd-ci-e2e:latest .
+#
+# 注意：pyproject.toml 变了要重 build（COPY 会让该层失效）。
+FROM dd-ci-node:22
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends python3 python3-venv python3-dev gcc \
+ && rm -rf /var/lib/apt/lists/*
+
+# 只拷依赖清单，让这一层能缓存；源码由腿内从 git 文件集拷进来。
+WORKDIR /opt/py-deps
+COPY pyproject.toml ./
+COPY README.md ./
+COPY src ./src
+RUN python3 -m venv /venv \
+ && /venv/bin/pip install -q --upgrade pip \
+ && /venv/bin/pip install -q ".[dev]"
+
+ENV PATH="/venv/bin:$PATH"
+WORKDIR /work

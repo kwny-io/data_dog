@@ -38,8 +38,9 @@ ALLOW: dict[str, str] = {
     "mujoco_sim/simulate.py": "真仿真循环（mj_step）：需要真物理积分且耗时不可接受；"
                               "其纯逻辑（_pd_target/_get_model/参数校验）已单测",
     "ui/": "Streamlit 交互层",
-    "storage/partitioning.py": "主体是 PG-only（分区 DDL / 存量转换 / RLS 复制 / 索引改名）：默认腿跑在 SQLite 上、这些分支执行不到——口径不适用，不是没测。实测 PG 腿 86.7%，由 postgres 腿的 --only --no-allow 门禁覆盖",
-    "state/pg.py": "PostgreSQL StateStore（WATCH/MULTI/EXEC 与租约路径）：默认腿是 fakeredis/SQLite，PG 分支执行不到。实测 PG 腿 98.5%，同样由 postgres 腿门禁覆盖",
+    "storage/partitioning.py": "主体是 PG-only（分区 DDL / 存量转换 / RLS 复制 / 索引改名）：默认腿跑在 SQLite 上、这些分支执行不到——口径不适用，不是没测。实测 PG 腿 75.1%（2026-10-23 真跑；此前写的 86.7% 是过时值），由 postgres 腿的 --only --no-allow 棘轮门禁把关（当前 68，只许升不许降；134 行未覆盖已记入台账作补测项）",
+    "storage/pg_locks.py": "PG advisory lock（迁移锁 / 分区切换锁）：默认腿是 SQLite，根本不存在这类锁路径，口径不适用。实测 PG 腿 68.3%，同样由 postgres 腿 --no-allow 棘轮门禁把关",
+    "state/pg.py": "PostgreSQL StateStore（WATCH/MULTI/EXEC 与租约路径）：默认腿是 fakeredis/SQLite，PG 分支执行不到。实测 PG 腿 99.0%（2026-10-23 真跑），同样由 postgres 腿门禁覆盖",
     "mcp_servers/": "MCP 常驻进程适配层（协议握手由 tests/test_mcp_context.py 的桩覆盖）",
 }
 

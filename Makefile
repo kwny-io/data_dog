@@ -163,6 +163,15 @@ helm-lint:       ## helm lint + 渲染（默认值与生产覆盖值）
 verify-chart:    ## chart 渲染不变量断言（P4-4 验收 1）
 	$(PY) scripts/verify_chart.py
 
+ci-offline:      ## 离线默认 4 腿（lint test helm web），只需 Docker
+	bash scripts/verify_ci_offline.sh
+
+ci-offline-all:  ## 离线 9 腿（`all` 关键字，名单单一真源在 .sh 的 ALL_LEGS）
+	bash scripts/verify_ci_offline.sh all
+
+ci-offline-nonroot: ## 9 腿以 uid 65534 重跑（root 会绕过 rlimit，root 绿≠CI 绿）
+	DD_CI_RUN_USER=65534 bash scripts/verify_ci_offline.sh all
+
 k8s-e2e:         ## kind 多副本状态一致验收（P4-4 验收 6，需 kind/kubectl/helm）
 	bash tools/k8s_e2e.sh
 

@@ -89,10 +89,18 @@ def test_ipv6_mapped_ipv4_rejected():
     d = validate_url("https://evil.example/x", resolver=_Resolver(["::ffff:127.0.0.1"]))
     assert not d.allowed and "非公网" in d.reason
 
-    # 记录当前行为（fail-closed 方向的**过度拦截**，不是漏洞）：`::ffff:0:0/96` 整段在
-    # CPython 里 `is_reserved` 为 True，于是**公网** IPv4 的映射形式（::ffff:8.8.8.8）也被拒。
-    # 方向是安全的（拒绝 > 放行），且现实中没人用映射字面量当公网目标，故不为此加例外分支。
-    assert not validate_url("http://[::ffff:8.8.8.8]/").allowed
+    # 记录当前行为：`::ffff:8.8.8.8` 是**公网** IPv4 的映射写法，它到底被拒还是放行，
+    # 取决于 `data_plane/fetch.py::_is_public_ip` 的判定，而该判定跟随 CPython 对
+    # `::ffff:0:0/96` 的分类，**该分类在 3.12 的补丁版本之间变过**：
+    #   3.12.6  → is_reserved=True  → 拒（过度拦截，fail-closed 方向）
+    #   3.12.14 → is_reserved=False → 放行（正确：8.8.8.8 确实可全球路由）
+    # 所以这里只钉“判定必须与 `_is_public_ip` 一致”，不钉某个补丁版本的偶然结论。
+    # 旧写法直接钉 `assert not allowed`，在 Python 3.12.14 上必红（已实测：3.12.6 过 /
+    # 3.12.14 挂），而 CI 的 setup-python "3.12" 拿到的正是新版补丁版本。
+    from data_dog.data_plane.fetch import _is_public_ip
+
+    mapped_public = "::ffff:8.8.8.8"
+    assert validate_url(f"http://[{mapped_public}]/").allowed is _is_public_ip(mapped_public)
     print("PASS test_ipv6_mapped_ipv4_rejected")
 
 
