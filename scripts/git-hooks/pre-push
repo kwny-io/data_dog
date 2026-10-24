@@ -9,7 +9,12 @@
 # 临时跳过：git push --no-verify  （不建议）
 set -e
 
-root=$(git rev-parse --show-toplevel)
+# root 的解析不能硬依赖“当前目录是 git 仓库”：本钩子的 `--print-skip-warnings` 出口
+# 只用到 cwd 与 $PY，而离线验证台把源码拷到容器 /work（**不拷 .git**）。
+# 先前这里直接 `git rev-parse` → `fatal: not a git repository` (rc=128)，
+# 测试拿到的是“钩子跑不起来”，却看不到本该打印的跳过提示。
+# `|| pwd` 让它在无 .git 的环境下也走同一条代码路径。
+root=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
 cd "$root"
 
 if [ -x .venv/bin/python ]; then

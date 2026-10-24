@@ -275,3 +275,37 @@ def test_each_gate_is_controlled_only_by_its_own_variable():
     out = _skip_warning_output(**{pg_env: "postgresql+psycopg://x/y",
                                   redis_env: "redis://127.0.0.1:6379/0"})
     assert "未设 " not in out, f"两个门都设了却仍提示未设：{out}"
+
+
+def test_git_hooks_have_no_crlf_and_parse_under_posix_sh():
+    """hook 的坏法只在 Linux 上现形，所以必须由断言钉住（2026-10-25 真缺陷）。
+
+    两个 hook 都以 `#!/bin/sh` 开头。磁盘上若是 CRLF：
+      1. 首行变成 `#!/bin/sh\r` → Linux 上 `Exec format error` / `bad interpreter`；
+      2. 中间每行的 `then\r`、`do\r` 会让 dash 报
+         `17: Syntax error: "elif" unexpected (expecting "then")`。
+    Windows 的 git-bash 对 CRLF 宽容，所以本机全绿——这正是一次"甲平台绿、乙平台红"
+    被容器腿抓出来的案例（CI 的 python job 里 3 个 case 红，本地 0 红）。
+
+    `.gitattributes` 里虽然有 `scripts/git-hooks/* text eol=lf`，但属性只在
+    **重新 checkout** 时生效，已存在的 CRLF 文件不会被自动改写——所以属性挡不住，
+    还是要断言。顺带跑一次 `sh -n` 兜住"POSIX sh 语法"这一类问题。
+    """
+    hooks = sorted(p for p in (REPO / "scripts" / "git-hooks").glob("*") if p.is_file())
+    assert hooks, "scripts/git-hooks/ 下没有 hook 文件，找错目录了？"
+
+    for hook in hooks:
+        raw = hook.read_bytes()
+        assert b"\r" not in raw, (
+            f"{hook.name} 含 CR 字节（CRLF 换行）：Linux/macOS 上这个 hook 会直接坏掉。"
+            f"修法：用 LF 重写该文件并 `git add`，别只依赖 .gitattributes。"
+        )
+        sh = shutil.which("sh")
+        if sh is None:  # pragma: no cover - 极简环境
+            continue
+        proc = subprocess.run(
+            [sh, "-n", str(hook)], capture_output=True, text=True, timeout=30
+        )
+        assert proc.returncode == 0, (
+            f"{hook.name} 在 POSIX sh（{sh}）下语法不通过：{proc.stderr.strip()}"
+        )
