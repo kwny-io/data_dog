@@ -146,6 +146,12 @@ python -m data_dog.synth.synth_eval --real     # 用真实 LLM 调查合成遥�
 python -m data_dog.synth.synth_eval --json     # 只输出 {accuracy} JSON，便于脚本/简历取数
 ```
 
+> ⚠️ **读这个数字之前先看这句**：离线模式用的是**确定性 provider**（实测 `call_count: 0`，
+> 0 次 LLM 调用），样本是 6 条合成遥测的幻觉注入。所以 `n=6, accuracy=1.0` 的含义是
+> **“判定规则没被改坏”的回归基线**，**不是**“误报率 1%”更不是“模型准确率 100%”。
+> 真实误报率必须 `--real` + 客户真实数据才能谈（见 `docs/architecture.md` §8 诚实边界）。
+> 把离线 `1.0` 当能力证明，是这套系统最容易被误读的一个数字。
+
 ### 可观测性：token 消耗 / 耗时 / 成本
 
 用真实模型跑调查时会自动统计**每次调用的 token 用量、耗时**并按供应商价格表**估算成本**：
