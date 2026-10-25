@@ -8,6 +8,8 @@ import { AlertStateBadge, SeverityBadge } from "@/components/badges";
 import { CopyId, TechValue } from "@/components/tech";
 import { useAlerts, useOutbox } from "@/lib/api/queries";
 import { humanize, technicalLine } from "@/lib/errors";
+import { emptyAlertsHint } from "@/lib/hints";
+import { useTenant } from "@/lib/providers";
 import { ALERT_STATE_ORDER, formatTime, isActiveAlert, ALERT_STATE_LABEL } from "@/lib/domain";
 import { componentName, eventTypeName } from "@/lib/vocabulary";
 import type { AlertEvent, AlertState, PageParams } from "@/lib/api/types";
@@ -16,6 +18,7 @@ export default function AlertsPage() {
   const [page, setPage] = useState<PageParams>({ limit: 50, offset: 0 });
   const [stateFilter, setStateFilter] = useState<AlertState | null>(null);
   const alerts = useAlerts(page);
+  const { tenant } = useTenant();
   const [openId, setOpenId] = useState<string | null>(null);
 
   const counts = useMemo(() => {
@@ -85,7 +88,7 @@ export default function AlertsPage() {
         ) : rows.length === 0 ? (
           <EmptyState
             title={stateFilter ? `没有「${ALERT_STATE_LABEL[stateFilter]}」状态的告警` : "暂无告警"}
-            hint="告警由 P3 上报闭环在候选经策略门判定后产生。"
+            hint={emptyAlertsHint(tenant, stateFilter ? ALERT_STATE_LABEL[stateFilter] : null)}
           />
         ) : (
           <>

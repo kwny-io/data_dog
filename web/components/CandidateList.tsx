@@ -6,6 +6,8 @@ import { Panel, SkeletonRows, EmptyState, ErrorState, Pagination, RowChevron } f
 import { SeverityBadge } from "@/components/badges";
 import { CopyId, TechValue } from "@/components/tech";
 import { useCandidates } from "@/lib/api/queries";
+import { emptyCandidatesHint } from "@/lib/hints";
+import { useTenant } from "@/lib/providers";
 import { humanize, technicalLine } from "@/lib/errors";
 import { componentLabel, severityTone, TONE_CLASS } from "@/lib/domain";
 import type { CandidateEvent, PageParams } from "@/lib/api/types";
@@ -24,6 +26,7 @@ export function CandidateList({
   filters: { device_sn?: string; component_ref?: string };
 }) {
   const q = useCandidates(filters, page);
+  const { tenant } = useTenant();
 
   return (
     <Panel
@@ -38,7 +41,7 @@ export function CandidateList({
       ) : q.data.items.length === 0 ? (
         <EmptyState
           title="没有候选异常"
-          hint="候选由在线数据面从原始日志产出。先提交一批设备日志，解析链会在这里生成候选。"
+          hint={emptyCandidatesHint(tenant)}
         />
       ) : (
         <>
