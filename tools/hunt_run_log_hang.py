@@ -48,6 +48,7 @@ def main() -> int:
         hung = "Timeout (" in r.stderr or dur >= HANG_AFTER_S
         if r.returncode != 0 or hung:
             print(f"!!! 第 {i} 次：rc={r.returncode} 耗时={dur:.1f}s hung={hung}")
+            print(f"HUNT_HANG i={i} rc={r.returncode} dur={dur:.1f}s hung={hung}", flush=True)
             print("---- stderr ----")
             print(r.stderr[-8000:])
             print("---- stdout ----")
@@ -55,8 +56,10 @@ def main() -> int:
             break
         if i % 20 == 0:
             print(f"… 已跑 {i} 次，本次 {dur:.1f}s，无异常", flush=True)
+        print(f"HUNT_PROGRESS i={i}", flush=True)
     else:
         print(f"跑完 {done} 次，全部通过（均 < {HANG_AFTER_S}s）。未复现卡死。")
+        print(f"HUNT_ALL_CLEAN done={done}", flush=True)
     print(f"总耗时 {time.time() - started:.0f}s")
     return 0
 
