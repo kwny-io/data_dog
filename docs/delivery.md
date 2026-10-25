@@ -681,7 +681,7 @@ docker run --rm -p 8000:8000 <你的账号>/data-dog:0.1.0
 | 写入吞吐可测 | 同上 | 120rps×8s = 960 次精确匹配 |
 | 备份能恢复（含删库负对照） | `make drill-restore` | `dump` 非零字节 → 临时库预验 1 条 → `down -v` 后 0 条 → 恢复后 1 条 `temperature_high·critical` |
 | 离线演示三候选三结论 | `python -m data_dog.cli test --offline --all` | `REJECTED 0.85` / `NEEDS_HUMAN_REVIEW 0.60` / `REJECTED 0.80` |
-| 守卫真的会拦（不是摆设） | 任选一条守卫，把被测行为改坏后跑它 | 必须**红**；改回来必须**绿**（本文档 §7 的每条守卫都做过这个正反对照） |
+| 守卫真的会拦（不是摆设） | 任选一条守卫，把被测行为改坏后跑它 | 必须**红**；改回来必须**绿**。本仓守卫的测试 docstring 都写明它防的是什么；逐条正反对照的过程记录在提交附件的《验证记录》里（私人材料不上仓库） |
 | 文档里的接入示例能跑 | `pytest tests/test_doc_ingest_example.py` | 直接把 docs 里的 JSON 抓下来喂给真应用 |
 | 空态说的租户是真的 | `E2E_REAL_BACKEND=1 npx playwright test real-backend` | 4 条通过；断言"界面点名的租户 == 代理实际解析的租户" |
 
