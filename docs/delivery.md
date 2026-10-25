@@ -122,6 +122,45 @@ docker compose down -v           # 停并清库（慎用）
 
 `compose.yaml` 里 app 会 **等 db 健康后**才启动（`depends_on.condition: service_healthy`），避免"应用先起来连不上库"的竞态。
 
+#### 控台也要跑在容器里（可选 profile）
+
+默认 `docker compose up -d` 只起 `db` + `app`；控台是**可选**的：
+
+```bash
+docker compose up -d --build --profile web     # 再加一个 web（Next.js 控制台）
+docker compose ps                              # 三个都应是 healthy
+```
+
+为什么默认不带：控台镜像构建要拉 npm 依赖，而生产/离线环境往往只想跑后端。
+内网可指向内部镜像（**只影响构建期，不进产物**）：
+
+```bash
+WEB_NODE_IMAGE=docker.1ms.run/library/node:22-alpine \
+WEB_NPM_REGISTRY=https://registry.npmmirror.com \
+docker compose up -d --build --profile web
+```
+
+**容器里跑的是哪个用户（曾真踩过）**：`web/Dockerfile` 的 runner 阶段用 `USER node`。
+不要写 `USER nextjs` —— 那是 Next.js **官方示例**自己 `useradd` 出来的用户，
+官方 `node` 镜像里**不存在**；写错的后果是镜像能构建成功、
+`docker run` 却直接失败：
+
+```
+docker: Error response from daemon: unable to find user nextjs:
+  no matching entries in passwd file
+```
+
+复核命令（两行就能分辨）：
+
+```bash
+docker run --rm -u nextjs <image> node -v   # 应报 unable to find user nextjs
+docker run --rm -u node   <image> sh -c 'id -un; node -v'   # 应打印 node + 版本
+```
+
+三容器实测（本地）：`db/app/web` 全部 healthy；经服务端代理探针 `GET /` → 200、
+`GET /api/dd/readyz` → 200（`database.ok=true`、`schema.missing=[]`）、
+`GET /api/dd/v1/alerts` → 200。浏览器**不持凭据**（密钥在服务端代理注入）。
+
 ### 方式 C：只用 Docker 跑应用（连外部数据库）
 
 ```bash
