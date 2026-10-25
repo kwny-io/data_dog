@@ -664,3 +664,26 @@ docker run --rm -p 8000:8000 <你的账号>/data-dog:0.1.0
 | 可观测 | Prometheus 指标 + **PrometheusRule 告警规则**（四组：可用性 / 热路径 P99 / 治理积压 / 静默失败；与 §9 表一一对应）+ JSON 结构化日志 + W3C traceparent 传播 + **调查运行日志可回看**（`investigation_run_log`：ReAct 轨迹/用量耗时/失败上下文，`GET /v1/investigations/{id}/log`、`/jobs/{job_id}/log`、`/v1/investigations/runs`；告警通知带 run 引用。见 [run_log.md](run_log.md)） | Alertmanager 的**接收方 / 路由 / 静默**由集群侧配（chart 只出规则）；日志聚合与**分布式追踪**仍需外部设施（无 OTel SDK，`trace_id` 只做 correlation-id 传播） |
 | 前端控制台 | **收敛为 `web/`（Next.js）**——`ui/`（Streamlit）定位为演示台（A10）；**服务端代理**（浏览器不持有凭据）+ 可选 Basic 门（`DD_WEB_BASIC_AUTH`）；租户默认由 `DD_WEB_TENANT` 单租户决定，可选用 `DD_WEB_TENANTS` **允许清单** + `dd_web_tenant` cookie 做租户**选择**（清单外 403，失败关闭）；**用户级授权最小步**：`DD_WEB_TRUST_PROXY_AUTH=1` + `DD_WEB_USER_TENANTS="alice:a,b;bob:b"`（可信反代注入用户头，用户只能在**自己的**租户内选，越权/未知用户/缺头一律 403）；**真浏览器 E2E 已落地**（`web/e2e/`：devmock + `next dev` + Playwright，覆盖服务端代理 / 密钥不进浏览器 / 租户 cookie / 异步轮询 / refs 面板懒解析），**真后端腿**（`E2E_REAL_BACKEND=1`）另覆盖 浏览器→代理→**真实服务** 的密钥连携与租户 403；**启动护栏**：`DD_WEB_TRUST_PROXY_AUTH=1` 而既无 Basic 门也无 `DD_WEB_TRUST_PROXY_ACK=1` → 拒绝启动、防伪造回归钉住信任关闭时该头不生效 | **身份（谁是我）由外部认证代理提供，本仓不实现**：没有登录页 / 用户目录 / OIDC；**控制台层授权已验证**（租户选择 + 用户级租户约束，越权/缺头 403 有单测 + 真后端 E2E），但服务端**仍无**用户级授权（后端只认 `X-Tenant-Id`）；启用信任开关有**失败关闭的启动护栏**与防伪造回归，**护栏仍无法验证反代真的剥了头**——生产须自行确保 |
 | 多地部署 | 跨地域多活为**应用层**近似，RPO > 0 | 数据库同步复制设施（非应用代码可解） |
+
+---
+
+## 11. 怎么复核本文档里的每个数字
+
+这一节的存在理由：文档里的"9/9 全绿""P99 309ms""恢复后 1 条"如果只能靠信任，
+那它们和"我觉得没问题"没有区别。下面每条主张都给出**可亲手执行的命令**。
+
+| 本文档的主张 | 复核命令 | 你会看到 |
+|---|---|---|
+| 离线九腿可复现（只需 Docker） | `bash scripts/verify_ci_offline.sh all` | `rc.tsv` 9 行、`SUMMARY.md` 结论表；**工作区有未提交改动时会标 `DIRTY` 而不是 `PASS`** |
+| root 绿 ≠ CI 绿（root 绕过 `RLIMIT_NPROC`） | `DD_CI_RUN_USER=65534 bash scripts/verify_ci_offline.sh all` | 非 root 轮同样 9 行；两轮都 `rc=0` 才算过 |
+| 真 CI 的 9 个 job 是绿的（不信总状态） | `gh api repos/kwny-io/data_dog/actions/runs?head_sha=<sha>` 再 `gh api …/runs/<id>/jobs` | 逐个 job 的 `conclusion`，`jq '[.jobs[]|.conclusion]|unique'` 应为 `["success"]` |
+| 热路径不调大模型 | `bash tools/bench.sh` | `[OK] 热路径无 LLM`，rejected 0，写 P99 数值 |
+| 写入吞吐可测 | 同上 | 120rps×8s = 960 次精确匹配 |
+| 备份能恢复（含删库负对照） | `make drill-restore` | `dump` 非零字节 → 临时库预验 1 条 → `down -v` 后 0 条 → 恢复后 1 条 `temperature_high·critical` |
+| 离线演示三候选三结论 | `python -m data_dog.cli test --offline --all` | `REJECTED 0.85` / `NEEDS_HUMAN_REVIEW 0.60` / `REJECTED 0.80` |
+| 守卫真的会拦（不是摆设） | 任选一条守卫，把被测行为改坏后跑它 | 必须**红**；改回来必须**绿**（本文档 §7 的每条守卫都做过这个正反对照） |
+| 文档里的接入示例能跑 | `pytest tests/test_doc_ingest_example.py` | 直接把 docs 里的 JSON 抓下来喂给真应用 |
+| 空态说的租户是真的 | `E2E_REAL_BACKEND=1 npx playwright test real-backend` | 4 条通过；断言"界面点名的租户 == 代理实际解析的租户" |
+
+**如果你只能跑一条命令**：`bash scripts/verify_ci_offline.sh all`。
+它不需要 GitHub 账户、不需要 API Key、不需要网络。
