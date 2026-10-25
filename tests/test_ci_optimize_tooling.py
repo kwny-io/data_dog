@@ -35,6 +35,26 @@ def _ci_jobs() -> set[str]:
     return set(data["jobs"])
 
 
+def test_every_ci_job_has_timeout_minutes():
+    """每个 job 必须声明 `timeout-minutes`：没声明时 GitHub 默认给 360 分钟。
+
+    2026-10-25 实测：`tests/test_run_log.py` 有 ~0.2% 概率“死等”（不是断言失败，
+    进程无任何输出到 1 小时）。无 timeout 时一次卡死能烧掉 6 小时的 job 预算，
+    把“偶发卡死”放大成“整轮 CI 废掉”；有 timeout 则 20 分钟内快速收工并可重建。
+    新增 job 忘了写 = 本测试红，而不是下次卡死时才发现。
+    """
+    jobs = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))["jobs"]
+    missing = sorted(name for name, spec in jobs.items() if "timeout-minutes" not in (spec or {}))
+    assert not missing, (
+        f"这些 job 没声明 timeout-minutes（默认 360 分钟）：{missing}。"
+        f"按实测耗时留 3–8 倍余量写上。"
+    )
+    # 值必须是正数，避免写成 0 / 负数 / 字符串时的“形同没写”
+    bad = {n: s.get("timeout-minutes") for n, s in jobs.items()
+           if not isinstance(s.get("timeout-minutes"), int) or s["timeout-minutes"] <= 0}
+    assert not bad, f"timeout-minutes 必须是正整数：{bad}"
+
+
 def test_offline_legs_match_ci_jobs():
     """离线 9 腿必须与 ci.yml 的 job 集合**逐个对齐**（不是"超集"也不是"子集"）。
 

@@ -45,6 +45,7 @@ jobs:
   lint:
     name: 静态检查与类型检查（ruff + mypy）
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -72,6 +73,9 @@ jobs:
   test:
     name: 全量测试（SQLite）
     runs-on: ubuntu-latest
+    # 实测 ~182s。这里卡死的概率虽低（430 次取证统计 ≥1/430 ≈ 0.2%），
+    # 但一旦卡住，无 timeout 会烧到 360 分钟才收工——先把爆半径封住。
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -96,6 +100,10 @@ jobs:
   postgres:
     name: PostgreSQL 集成测试
     runs-on: ubuntu-latest
+    # 超时上限（实测 ~119s；留 8 倍余量）。为什么每个 job 都要写：
+    # 2026-10-25 发现一个 ~0.2% 概率的“死等”型 flake（tests/test_run_log.py），
+    # 没有 timeout-minutes 时一次卡死会烧掉 job 默认 360 分钟，把“偶发卡死”放大成“整轮 CI 废掉”。
+    timeout-minutes: 20
     services:
       postgres:
         image: postgres:16-alpine
@@ -142,6 +150,7 @@ jobs:
   redis:
     name: Redis 集成测试（真服务）
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     services:
       redis:
         image: redis:7-alpine
@@ -172,6 +181,7 @@ jobs:
   supply-chain:
     name: 供应链（依赖 SCA + SBOM 产物）
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -204,6 +214,7 @@ jobs:
   helm:
     name: Helm chart（lint + 渲染 + 不变量 + kubeconform）
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: azure/setup-helm@v4
@@ -245,6 +256,7 @@ jobs:
   web:
     name: 前端（Next.js 类型检查 + 静态检查 + 单测）
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: web
@@ -268,6 +280,7 @@ jobs:
   web-e2e:
     name: 前端 E2E（真 Chromium：代理 + 租户 + 轮询 + refs 面板）
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     defaults:
       run:
         working-directory: web
@@ -303,6 +316,7 @@ jobs:
   web-e2e-real-backend:
     name: 前端 E2E（真后端：浏览器 → Next 代理 → 真实 Python 服务）
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     defaults:
       run:
         working-directory: web

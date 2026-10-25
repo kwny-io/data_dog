@@ -54,6 +54,52 @@ raw envelope
 | `fetch.py` | **SSRF 安全**：`validate_url` 受控引用校验（仅 http/https，拒绝内网/环回/保留）+ `safe_request` 安全取数（逐跳复验重定向、连接钉 IP） |
 | `pipeline.py` | 端到端编排 |
 
+### 3.4 最小可复制接入示例（照抄就能产出候选）
+
+接入是最容易“看着文档做却得 0 候选”的地方，所以这里给**一份可复制、且被测试守着**的示例：
+`tests/test_doc_ingest_example.py` 会从本文抽出下面这段 JSON 原样 POST 一遍，
+要求 `ingested=1` **且真的产出候选**。改坏了文档 = CI 红（文档与代码同源）。
+
+两个必知点：
+
+1. **七个字段一个都不能少**：`event_id` / `occurred_at` / `received_at` / `sequence` /
+   `vendor` / `model` / `firmware`。少了任何一个 → 200 但
+   `partial:true` + `rejected_by_reason:{"missing_fields":1}`，**不报错、也永远没有候选**。
+2. **指标在 `payload_inline` 里**（一段 JSON 字符串，不是对象）：解析器从它取温度/电流等量，
+   再和知识包的阈值比。字段对但 `payload_inline` 里没有超阈值的量，依旧不会有候选。
+
+身份**不在正文**，走请求头：`X-Tenant-Id` / `X-Device-Sn`（正文里同名一律忽略）。
+
+<!-- dd-doc-sample: ingest-event -->
+```json
+{
+  "event_id": "doc-example-1",
+  "occurred_at": "2026-09-13T10:00:00Z",
+  "received_at": "2026-09-13T10:00:00.100Z",
+  "sequence": 1,
+  "vendor": "unitree",
+  "model": "go2",
+  "firmware": "3.2.1",
+  "protocol_version": "motor-log-v2",
+  "component_hint": "joint_motor.front_left_hip",
+  "payload_inline": "{\"temperature\": 96, \"current\": 12.0, \"mode\": 0}"
+}
+```
+<!-- /dd-doc-sample: ingest-event -->
+
+一条命令看效果（服务已在 `127.0.0.1:8000` 起来时）：把上面那段 JSON 存成 `event.json`，然后
+
+```bash
+curl -s -X POST http://127.0.0.1:8000/v1/telemetry \
+  -H 'content-type: application/json' \
+  -H 'X-Tenant-Id: tenant-demo' -H 'X-Device-Sn: device-go2-0001' \
+  -d "{\"events\":[$(cat event.json)]}"
+```
+
+看到 `"candidates":[{...}]` 就说明链路通了（`temperature=96` 超过该关节的阈值）；
+若得 0 条，看 `rejected_by_reason`：`missing_fields` = 字段不全，
+`payload_not_object` / `payload_inline_not_string` = `payload_inline` 给成了对象而非字符串。
+
 ### 3.5 响应语义：`ok` / `partial` / `stats`（#102）
 
 `POST /v1/telemetry` 是**批处理**接口，且限流做在批内**每个事件**上（`gateway.ingest`），
