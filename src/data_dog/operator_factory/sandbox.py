@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import multiprocessing as mp
 from dataclasses import dataclass
+from queue import Full
 from typing import Any
 
 from .dsl import SandboxViolation  # 再导出：对外统一从 sandbox 导入
@@ -145,8 +146,21 @@ class SubprocessExecutor:
         self._ensure()
         if self._level.startswith("start-failed"):
             raise SandboxViolation(f"子进程沙箱 worker 启动失败（{self._level}）")
-        self._cmd_q.put((op, event, window,
-                         self.policy.max_steps, self.policy.wall_s))
+        item = (op, event, window, self.policy.max_steps, self.policy.wall_s)
+        # 投递也必须有上界。worker 已死、管道缓冲区又满时，multiprocessing 的
+        # put() 会**永久阻塞**：进程不动、不打栈、不报错。2026-10-25 观测到的
+        # "10 秒写出 0 字节日志后死等"（约 1000 次执行 2 次，且 dump 不到栈）
+        # 与此形态一致；240 轮隔离复跑没重现，所以本处不是"按复现修"，而是把
+        # **无界等待这个设计缺陷**改成无界→有界，把挂死变成具名失败。
+        put_timeout = self.policy.wall_s + 1.0
+        try:
+            self._cmd_q.put(item, timeout=put_timeout)
+        except Full as e:
+            code = self._proc.exitcode if self._proc is not None else None
+            self._kill()   # 同 _res_q 超时路径：先取退出码，_kill 会清掉 _proc
+            raise SandboxViolation(
+                f"子进程沙箱无响应（投递超时 {put_timeout:.1f}s，exit={code}）"
+            ) from e
         # 父进程侧墙钟兜底：留一点 IPC 余量（子进程内也有预算检查，此处防挂死）
         try:
             tag, payload = self._res_q.get(timeout=self.policy.wall_s + 0.5)

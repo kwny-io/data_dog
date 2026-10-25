@@ -16,6 +16,7 @@ from __future__ import annotations
 import multiprocessing as mp
 import sys
 import time
+from queue import Full
 
 import pytest
 
@@ -289,3 +290,36 @@ def test_compile_rule_still_raises_dsl_error():
     """沙箱改动不得影响编译期错误语义（白名单外函数仍拒绝）。"""
     with pytest.raises(DSLError, match="未知函数"):
         compile_rule({"rule_id": "X", "when": "evil(x)"}, declared_fields=["x"])
+
+
+class _FullQueue:
+    """模拟“投递进已满且无人消费的管道”：put 抛 queue.Full。
+
+    为什么这不是假想：worker 已死（例如被 SIGKILL 或卡在 C 层）时，管道缓冲区
+    一旦写满，multiprocessing 的 put() 没有任何超时，父进程就会**永久阻塞**——
+    现象是进程不动、不打栈、不报错（实测形态：写出 0 字节日志后死等）。
+    """
+
+    def put(self, item: object, timeout: float | None = None) -> None:  # noqa: ARG002
+        raise Full
+
+
+def test_subprocess_put_timeout_fails_named_instead_of_hanging():
+    """worker 不消费时，投递必须有界并报具名错误，而不是把宿主挂死。"""
+    op = _op_with_dsl("R", "x > 0", ["x"])
+    pool = SubprocessExecutor(SandboxPolicy(kind="subprocess"))
+    try:
+        pool._ensure()                 # 起 worker，拿到真实 policy/wall_s
+        pool._cmd_q = _FullQueue()     # 之后所有投递都满
+        started = time.monotonic()
+        with pytest.raises(SandboxViolation) as exc:
+            pool.run(op, {"x": 1})
+        elapsed = time.monotonic() - started
+        msg = str(exc.value)
+        assert "投递超时" in msg            # 说清是投递侧，不是“求值超时”
+        assert "exit=" in msg               # 带退出码，便于区分死因
+        # 有界：不会等满整个 wall_s 之外还拖下去（wall_s 默认 3s + 1s 余量）
+        assert elapsed < 10.0
+        assert pool._proc is None           # 已清理 worker，不留孤儿
+    finally:
+        pool.close()
