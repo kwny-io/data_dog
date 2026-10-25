@@ -23,6 +23,7 @@ export function TenantBadge() {
 
   return (
     <span
+      data-testid="tenant-badge"
       title={title}
       className="inline-flex h-8 items-center gap-1.5 rounded-full border border-rule-strong bg-panel/50 px-2.5 text-xs text-ink-muted"
     >

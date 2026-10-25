@@ -36,7 +36,14 @@ async function whoami(page: Page): Promise<WhoAmI> {
   });
 }
 
-const TENANT_BADGE = "租户由服务端决定（DD_WEB_TENANT）；浏览器无法切换";
+/**
+ * 租户徽标的**稳定钩子**（`data-testid`）。
+ *
+ * 以前这里是一整句中文 title 文案，于是"改文案"= "测试红"：本轮把徽标从
+ * 无条件"浏览器无法切换"改成按模式如实说明（单租户 / DD_WEB_TENANTS 白名单），
+ * 两处断言当场找不到元素。定位器绑文案是错的——**用 testid 定位，用文案断言**。
+ */
+const TENANT_BADGE = "tenant-badge";
 
 test.describe("控制台外壳：服务端代理 / 凭据 / 租户", () => {
   test("页面加载后 /readyz 经服务端代理返回「就绪」，租户徽标显示服务端租户", async ({
@@ -46,7 +53,7 @@ test.describe("控制台外壳：服务端代理 / 凭据 / 租户", () => {
     // HealthBadge 的 title 由 /readyz 响应决定；它出现即证明代理链路真的通了
     // （浏览器不带任何凭据，密钥在服务端被加上）。
     await expect(page.getByTitle(/服务就绪/)).toBeVisible();
-    await expect(page.getByTitle(TENANT_BADGE)).toContainText(SERVER_TENANT);
+    await expect(page.getByTestId(TENANT_BADGE)).toContainText(SERVER_TENANT);
   });
 
   test("上游密钥只由服务端附加：浏览器请求不带它，客户端脚本里也没有它", async ({
@@ -104,7 +111,7 @@ test.describe("控制台外壳：服务端代理 / 凭据 / 租户", () => {
 
     // 徽标仍显示服务端租户：它是**只读展示**，不跟随 cookie。这是当前实现的事实，
     // 这里如实断言它（多租户登录属后端开放问题，不在本次范围）。
-    await expect(page.getByTitle(TENANT_BADGE)).toContainText(SERVER_TENANT);
+    await expect(page.getByTestId(TENANT_BADGE)).toContainText(SERVER_TENANT);
 
     // 清单外 → 403，失败关闭（不是静默回落到默认租户）。
     await context.addCookies([
