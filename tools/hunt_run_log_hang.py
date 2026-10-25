@@ -8,13 +8,14 @@ dump 所有线程栈 + exit），把"卡在哪一行"变成证据。
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import time
 from pathlib import Path
 
 TEST = "tests/test_run_log.py::test_sync_investigation_writes_readable_run_log"
-ROUNDS = 240
+ROUNDS = int(os.environ.get('HUNT_ROUNDS', '240'))
 HANG_AFTER_S = 90
 
 CHILD = f"""
