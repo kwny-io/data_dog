@@ -51,6 +51,8 @@ services:
       timeout: 3s
       retries: 3
       start_period: 15s
+    # 同 compose.yaml：宽限期必须显著大于 write-behind 排空期限，否则末批事件被 SIGKILL
+    stop_grace_period: 30s
     restart: unless-stopped
 
   db:

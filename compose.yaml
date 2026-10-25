@@ -53,6 +53,10 @@ services:
       timeout: 3s
       retries: 3
       start_period: 15s
+    # Docker 默认停机宽限期是 10s，而应用排空 write-behind 队列的期限也是 10s——
+    # 两者相等意味着"排空"和 SIGKILL 抢同一条线，末批事件有概率被硬杀（静默丢数）。
+    # 宽限期必须**显著大于**排空期限；这条耦合由 tests/test_compose_shutdown_budget.py 守。
+    stop_grace_period: 30s
     restart: unless-stopped
 
   # ---------------------------------------------------------------- 控制台
