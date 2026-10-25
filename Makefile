@@ -5,6 +5,12 @@ PY ?= $(shell if [ -x .venv/bin/python ]; then echo .venv/bin/python; \
               elif [ -n "$(OS)" ] && [ -x .venv/Scripts/python.exe ]; then echo .venv/Scripts/python.exe; \
               else echo python; fi)
 PORT ?= 8000
+WEB_PORT ?= 3000
+# 演示租户/设备：必须与控台的 DD_WEB_TENANT（compose 默认 tenant-demo）一致，
+# 否则“按文档跑完 ingest，控台永远是空”——数据落在另一个租户，而是多租户隔离在正常工作。
+# 一致性有守卫：tests/test_demo_tenant_consistency.py
+TENANT ?= tenant-demo
+DEVICE_SN ?= device-demo-0001
 
 .PHONY: help gates hooks numbers requirements format install test lint typecheck cov serve probe ingest e2e ui bench up up-prod down down-prod logs ps health clean helm-lint verify-chart k8s-e2e retention partition partition-check cov-gate cov-gate-pg perf-probe config-check
 
@@ -98,10 +104,11 @@ probe:           ## 探针自检
 ingest:          ## 发一条演示日志(96°C 过温 → 应产出 critical 候选)
 	curl -s -X POST http://127.0.0.1:$(PORT)/v1/telemetry \
 	  -H "Content-Type: application/json" \
-	  -H "X-Tenant-Id: tenant-real" \
-	  -H "X-Device-Sn: device-go2-0001" \
+	  -H "X-Tenant-Id: $(TENANT)" \
+	  -H "X-Device-Sn: $(DEVICE_SN)" \
 	  -d '{"events":[{"event_id":"e1","occurred_at":"2026-09-13T10:00:00Z","received_at":"2026-09-13T10:00:00.1Z","sequence":1,"vendor":"unitree","model":"go2","firmware":"3.2.1","protocol_version":"motor-log-v2","component_hint":"joint_motor.front_left_hip","payload_inline":"{\"temperature\":96,\"current\":12.0,\"mode\":0}"}]}'
 	@echo
+	@echo "→ 控台看这条：http://127.0.0.1:$(WEB_PORT)（租户 $(TENANT)，需与控台 DD_WEB_TENANT 一致）"
 
 e2e:             ## 端到端整链回放
 	$(PY) -m data_dog.e2e.replay_demo

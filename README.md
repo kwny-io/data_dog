@@ -13,7 +13,7 @@
 | | 亮点 | 证据 |
 |---|---|---|
 | 🔗 | **全链闭环，一条命令跑通** | 厂商文档 →[P1]→ 算子 →[P2]→ 候选 →[Agent]→ 报告 →[P3]→ 策略门 → SaaS 反馈，`python -m data_dog.e2e.replay_demo` |
-| 🧪 | **全量测试，全离线确定性** | `pytest -q` → 本机全绿（123 个测试文件，1500+ 项，fake provider，无需 API Key、不联网；跳过项**全部是按环境条件跳过**：未设 `DD_TEST_PG_URL` 的真 PostgreSQL 用例、未设 `DD_TEST_REDIS_URL` 的真 Redis 契约用例，以及"本机已装可选依赖/平台相关"的分支——两类集成用例由 CI 的 `postgres` / `redis` 腿实测；Redis 后端的行为测试另由 `.[dev]` 里的 `fakeredis` 离线跑。**具体条数不写死**：写死的 passed/skipped 数字脚本守不住、注定漂（已漂过一次），以命令输出为准；能被脚本守住的是文件数与行数，见下方“规模”） |
+| 🧪 | **全量测试，全离线确定性** | `pytest -q` → 本机全绿（124 个测试文件，1500+ 项，fake provider，无需 API Key、不联网；跳过项**全部是按环境条件跳过**：未设 `DD_TEST_PG_URL` 的真 PostgreSQL 用例、未设 `DD_TEST_REDIS_URL` 的真 Redis 契约用例，以及"本机已装可选依赖/平台相关"的分支——两类集成用例由 CI 的 `postgres` / `redis` 腿实测；Redis 后端的行为测试另由 `.[dev]` 里的 `fakeredis` 离线跑。**具体条数不写死**：写死的 passed/skipped 数字脚本守不住、注定漂（已漂过一次），以命令输出为准；能被脚本守住的是文件数与行数，见下方“规模”） |
 | 🔒 | **热路径确定性：上报不交给模型判断** | 上不上报由**确定性策略门**（四条件决策表 + 冲突消解）决定，同输入永远同结论；模型只出现在"调查报告"那一步 |
 | 🧱 | **不拿 `eval` 执行厂商字符串** | 自建**受限 DSL**：词法 → AST 解释器，无动态执行原语、函数闭集白名单、编译期类型检查 |
 | 🔍 | **诚实抽取，区分"能证实 / 待确认"** | 官方 SDK 头文件明写电机 **90°C 触发保护** → `verified`；无出处的 75°C → `unconfirmed`，**不冒充厂商事实** |
@@ -23,7 +23,7 @@
 | 📊 | **带 ground truth 的规模化评估（双栏）** | **忠实 MuJoCo 数据集 10 万条**，分层抽跑真实 Agent：**确定性 provider** n=2000 → **准确率 0.818**（Wilson 95% CI 0.801–0.834）、normal 误报率 **0.064**；**真 LLM** n=500 → **0.708**（0.667–0.746）、normal 误报率 **0.72**（故障召回反而更高）。逐类召回一并如实报（**F4 偏置 0.43 为当前最低**）；误报根因（裁决口径把"证据不足"与"证据充分但正常"混为一谈）**已定位并改口径，效果标注为未实测**（本机 key 余额为零）；另有 7 个评估 case（含 2 个对抗性：提示注入 / 身份伪装） |
 | 🚚 | **能交付：服务 + 容器 + HTTPS** | FastAPI（liveness / readiness 分离）+ Dockerfile + compose（含 Caddy 自动申请 HTTPS）+ Makefile |
 
-**规模**：源码 158 个 Python 文件 / 31014 行，测试 123 个文件 / 29010 行；前端 `web/` 为 Next.js 15 控制台（70 个 TS/TSX 文件）；5 份正式事件 JSON Schema；40 个 `make` 命令（另有 `help`）。
+**规模**：源码 158 个 Python 文件 / 31014 行，测试 124 个文件 / 29089 行；前端 `web/` 为 Next.js 15 控制台（70 个 TS/TSX 文件）；5 份正式事件 JSON Schema；40 个 `make` 命令（另有 `help`）。
 
 ---
 
@@ -529,6 +529,17 @@ docker compose up -d --build --profile web
 #    docker compose up -d --build --profile web
 ```
 
+> **让控台真的有数据（否则你看到的是空列表，不是坏了）**：
+> ```bash
+> make ingest            # 投一条 96°C 过温演示日志 → 产出一个候选
+> ```
+> 控台默认读租户 `tenant-demo`（`DD_WEB_TENANT`），`make ingest` 默认投同一个
+> （`TENANT ?= tenant-demo`）。**两侧必须一致**——投到别的租户的数据不会出现在
+> 控台，这是多租户隔离在正常工作，不是 bug。这条一致性有守卫：
+> `tests/test_demo_tenant_consistency.py`（默认值一边改、另一边没跟，测试就红）。
+> 实测：投递前 `candidates count=1` → 投递后 `count=2`，新设备 `device-demo-9001`
+> 出现在 `/api/dd/v1/candidates` 里。
+
 > **关于 `--build` 的耗时**（实测，不是估）：**首次**构建要装全部依赖，需要网络；
 > 改一行代码后的增量重建约 **1 分钟**、且**不会重装依赖**（依赖层被缓存）。
 > 所以改完代码请**老实带 `--build`**——跳过它会跑旧镜像，比慢更坑。
@@ -540,7 +551,19 @@ docker compose up -d --build --profile web
 > 更要紧的是确认“你打的是本服务”——`curl -s localhost:8000/openapi.json | head -c 80`
 > 应出现 `data_dog`；如果出现别的产品名（本机实测遇过另一个项目占着
 > `127.0.0.1:8000`，返回的是它家的 404 JSON），那就是打错了，换端口重试。
-> 同一台机器上常驻多个服务时，这个自检比“服务是不是死了”更常成为真实原因。
+> 同一台机器上常驻多个服务时，这个自检比"服务是不是死了"更常成为真实原因。
+>
+> **更阴的一种：端口被另一个服务绑在具体 IP 上（Windows 实测）。** 本机当时
+> `127.0.0.1:8010` 被另一个项目（原生 uvicorn）占着，而 Docker 把容器发在
+> `0.0.0.0:8010`——两个 socket 都"成功"了，但**具体 IP 绑定优先于通配**，于是
+> `curl 127.0.0.1:8010` 打到的是**别的产品**：接口返回 404、Problem 头里是别家的命名空间。
+> 症状极像"我们的接口没注册"。两个动作能分清：
+> ```bash
+> netstat -ano | findstr :8010        # 看同一端口是否有多条 LISTENING、PID 是否不同
+> curl -s -D - -o /dev/null http://127.0.0.1:8010/healthz   # 看 server / 自定义版本头
+> docker compose exec -T app python -c "import urllib.request;print(urllib.request.urlopen('http://127.0.0.1:8000/openapi.json').status)"
+> ```
+> 第三条是**容器内自证**（不经宿主端口），它通而宿主端口不通，就是端口撞了，不是服务坏了。
 
 > **复用旧数据卷时注意**：如果 `pgdata` 是“迁移体系之前”留下的库（有表、但没有
 > `alembic_version`），`upgrade_head()` 会撞 `DuplicateTable`。此时服务**会照常启动但
