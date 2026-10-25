@@ -114,6 +114,38 @@ dataset_eval.py      分层抽样 → 按 config 重放仿真 → 现有 Agent �
 
 ## 6. 评估结果与**诚实边界**（关键）
 
+### 先决条件：数据集不在仓库里（重要）
+
+`/data/` 在 `.gitignore` 里（第 79 行），所以**全新克隆后没有数据集**，下面那条
+评估命令直接跑会报 `FileNotFoundError: … 下没有 shard_*.jsonl`。两条路：
+
+**(a) 自己生成**（需要 `mujoco`，见 `pip install -e ".[mujoco]"`）：
+
+```bash
+# 60s 档、10 万条（本文数字用的就是这个规模；--shard-size 默认 500）
+python -m data_dog.mujoco_sim.gen_dataset \
+  --trials 100000 --duration 60 --workers 8 --out data/mj_60s_100k
+```
+
+**(b) 只想快速看一眼管线能不能跑**（分钟级，不追数字）：
+
+```bash
+python -m data_dog.mujoco_sim.gen_dataset --trials 300 --duration 2 --out /tmp/mj_quick
+PYTHONPATH=src python -m data_dog.synth.dataset_eval --manifest /tmp/mj_quick --n 50 --seed 7
+```
+
+**小样本自洽性（已测）**：在正式集（`data/mj_60s_100k`）上抽 `--n 50 --seed 7` →
+accuracy **0.7917**、Wilson 95%CI 0.657–0.883、n=48（2 条 fell 被剔除）、
+normal 误报 3/18——与下文的 0.818（CI 0.801–0.834）重叠，说明采样与评估口径一致。
+但 n=50 **不能**用来支持 0.818，只能证明管线没坏。
+
+**耗时实情**：每条 trial 要重跑一遍 MuJoCo 仿真。已测：`--trials 40 --duration 2 --workers 4`
+耗时 7.4s（≈**5 trial/s**）；`--duration 60` 单条算力约为其 30 倍，所以 10 万条
+在本机是**十几小时量级**（**未实测跑完**，此处是据上述吞吐外推，不是实测值）。
+评估侧同理：`n=2000` 要重放 2000 条，在本机是**小时级**（`n=200` 十五分钟跑不完）。
+因此本文附了逐条结果 JSON，评委不必重跑就能核算；要重跑就把它当后台任务，
+别在演示前十分钟开。
+
 ### 命令
 
 ```bash
