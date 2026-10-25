@@ -2,7 +2,7 @@
 # 注意：Makefile 的命令行必须以 TAB 缩进。
 
 PY ?= $(shell if [ -x .venv/bin/python ]; then echo .venv/bin/python; \
-              elif [ -x .venv/Scripts/python.exe ]; then echo .venv/Scripts/python.exe; \
+              elif [ -n "$(OS)" ] && [ -x .venv/Scripts/python.exe ]; then echo .venv/Scripts/python.exe; \
               else echo python; fi)
 PORT ?= 8000
 
@@ -83,7 +83,11 @@ cov:             ## 带覆盖率跑测试（阈值与 CI 一致：总分 85% + �
 	$(PY) -m pytest -q --cov=src/data_dog --cov-report=term-missing --cov-report=json:coverage.json --cov-fail-under=85
 	$(PY) scripts/cov_gate.py --json coverage.json --min 70
 
-serve:           ## 本机起服务
+demo:            ## 一条命令看效果（离线、无网络、无 API Key、无 Docker）
+	$(PY) -m data_dog.cli test --offline --all
+
+serve:           ## 本机起服务（零安装：SQLite 自动建表）
+	@echo "→ http://127.0.0.1:$(PORT)（另开终端跑 make probe 自检）"
 	$(PY) -m data_dog.service
 
 probe:           ## 探针自检
