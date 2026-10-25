@@ -3,6 +3,8 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
 
+import { effectiveTenant, readCookieValue, TENANT_COOKIE_NAME } from "@/lib/hints";
+
 // ------------------------------------------------------------- query client
 
 function makeQueryClient(): QueryClient {
@@ -24,18 +26,38 @@ let browserClient: QueryClient | undefined;
 export function Providers({
   children,
   tenant,
+  tenants = [],
 }: {
   children: React.ReactNode;
-  /** 当前租户，由**服务端**（`resolveProxyConfig().tenant` → `DD_WEB_TENANT`）决定，
-   *  只用于展示。浏览器改不了它：代理会丢弃浏览器传来的 `X-Tenant-Id`。 */
+  /** 服务端默认租户（`DD_WEB_TENANT`）。 */
   tenant: string;
+  /** `DD_WEB_TENANTS` 允许清单。非空时浏览器可用 `dd_web_tenant` cookie **在清单内**选租户
+   *  （由代理执行）；界面必须跟着显示真实生效的那个，否则会指向错的租户。 */
+  tenants?: string[];
 }) {
   const client = useMemo(() => {
     if (typeof window === "undefined") return makeQueryClient();
     browserClient ??= makeQueryClient();
     return browserClient;
   }, []);
-  const tenantValue = useMemo(() => ({ tenant }), [tenant]);
+
+  // SSR 阶段用服务端默认值（与服务端渲染输出一致，无 hydration 失配）；
+  // 挂载后再读 cookie 算出**代理真实生效**的租户。
+  const [effective, setEffective] = useState(tenant);
+  useEffect(() => {
+    const fromCookie = readCookieValue(document.cookie, TENANT_COOKIE_NAME);
+    setEffective(effectiveTenant(tenant, tenants, fromCookie));
+  }, [tenant, tenants]);
+
+  const tenantValue = useMemo(
+    () => ({
+      tenant: effective,
+      serverTenant: tenant,
+      selectable: tenants.length > 0,
+      allowed: tenants,
+    }),
+    [effective, tenant, tenants],
+  );
 
   return (
     <QueryClientProvider client={client}>
@@ -120,8 +142,14 @@ export const themeInitScript = `(function(){try{var t=localStorage.getItem("${TH
 // 而在单密钥模式下，那正是租户冒充的入口，且改动其实**不会生效**（静默失效更糟）。
 
 interface TenantCtx {
-  /** 服务端决定的租户（展示用；不是可切换状态）。 */
+  /** **代理真实生效**的租户（cookie 在允许清单内时为它，否则为服务端默认）。展示用。 */
   tenant: string;
+  /** 服务端默认租户（`DD_WEB_TENANT`）。 */
+  serverTenant: string;
+  /** 是否开了租户选择（`DD_WEB_TENANTS` 非空）。 */
+  selectable: boolean;
+  /** 允许清单本身（用于界面说清"能选哪些"）。 */
+  allowed: string[];
 }
 
 const TenantContext = createContext<TenantCtx | null>(null);

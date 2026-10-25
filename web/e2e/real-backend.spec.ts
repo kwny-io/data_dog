@@ -86,4 +86,28 @@ test.describe("真后端腿：浏览器 → 服务端代理 → 真实 data_dog 
     // 这条是"没有悄悄跑回 devmock"的护栏：真腿与默认腿的端口不同，别配串了。
     expect((await page.request.get("/api/dd/v1/whoami")).status()).toBe(404);
   });
+
+  test("空列表必须说得清：点名当前租户 + 明说这不是接口故障", async ({ page, context }) => {
+    // 真实失败场景：数据投到了别的租户 → 列表永远为空 → 用户误判"接口坏了"。
+    // 这里用 ALLOWED_TENANT（本腿从不往它投数据）制造"合法的空租户"，
+    // 断言界面把"租户"子和"不是故障"都说出来。
+    // 单测（web/lib/hints.test.ts）只能证明字符串，这一条证的是**它真被渲染出来**。
+    await context.addCookies([
+      { name: TENANT_COOKIE, value: ALLOWED_TENANT, url: BASE_URL },
+    ]);
+    await page.goto("/investigate");
+
+    // 先确认确实是空列表（否则下面的断言可能靠旧数据碰巧通过）。
+    // 写死 `items` 必须是数组：若契约悄悄换成裸数组，这里先红（不让 `?? []` 空跑通过）。
+    const listed = await page.request.get("/api/dd/v1/candidates");
+    expect(listed.status()).toBe(200);
+    const body = await listed.json();
+    expect(Array.isArray(body.items), `响应里没有 items 数组：${JSON.stringify(body).slice(0, 200)}`).toBe(true);
+    expect(body.items).toHaveLength(0);
+
+    const hint = page.getByText(/这.*不是接口故障|不是接口故障/);
+    await expect(hint).toBeVisible();
+    // 必须点名当前租户——否则用户不知道该往哪个租户投数据
+    await expect(hint).toContainText(ALLOWED_TENANT);
+  });
 });

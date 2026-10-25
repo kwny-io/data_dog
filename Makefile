@@ -184,6 +184,9 @@ ci-offline-all:  ## 离线 9 腿（`all` 关键字，名单单一真源在 .sh �
 ci-offline-nonroot: ## 9 腿以 uid 65534 重跑（root 会绕过 rlimit，root 绿≠CI 绿）
 	DD_CI_RUN_USER=65534 bash scripts/verify_ci_offline.sh all
 
+drill-restore:   ## 备份/恢复演练（含删库负对照，约 2 分钟，需 Docker）
+	bash tools/drill_backup_restore.sh
+
 k8s-e2e:         ## kind 多副本状态一致验收（P4-4 验收 6，需 kind/kubectl/helm）
 	bash tools/k8s_e2e.sh
 

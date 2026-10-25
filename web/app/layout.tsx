@@ -48,9 +48,10 @@ export const metadata: Metadata = {
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
-  // 租户在**服务端**解析（DD_WEB_TENANT），只把字符串传给客户端用于展示。
-  // 浏览器不持有凭据、也不能决定租户——见 app/api/dd 与 lib/api/proxy.ts。
-  const { tenant } = resolveProxyConfig();
+  // 租户在**服务端**解析（DD_WEB_TENANT）；开了 DD_WEB_TENANTS 允许清单后，
+  // 浏览器可用 cookie 在清单内选择租户（由代理执行并校验）。两个值都传给客户端：
+  // 默认值用于 SSR，允许清单用于算出**真实生效**的租户来展示。
+  const { tenant, tenants } = resolveProxyConfig();
   return (
     <html lang="zh-CN" suppressHydrationWarning>
       <head>
@@ -62,7 +63,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       <body className="min-h-dvh antialiased">
         <ConsoleBackground />
         <SmoothScroll />
-        <Providers tenant={tenant}>
+        <Providers tenant={tenant} tenants={tenants}>
           <AppShell>{children}</AppShell>
         </Providers>
       </body>

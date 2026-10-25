@@ -28,3 +28,47 @@ export function emptyAlertsHint(tenant: string, stateLabel?: string | null): str
     `若数据投到了别的租户，这里会一直为空（隐私隔离在正常工作，不是接口故障）。`
   );
 }
+
+/**
+ * 代理**真实生效**的租户（客户端展示用）。
+ *
+ * 为什么必须有这个函数：`lib/api/proxy.ts::resolveTenant` 在配置了 `DD_WEB_TENANTS`
+ * 允许清单后，会按 `dd_web_tenant` cookie 在清单内选择租户；而界面（租户徽标、空态文案）
+ * 原先只显示 `DD_WEB_TENANT` 服务端默认值。两者一旦不同，界面就会**指向错的租户**——
+ * 空态里写着"先往租户 A 投数据"，而列表其实在查租户 B。这正是空态文案本身要解决的
+ * 那个失败场景（"数据投到别的租户了"），只是换了个方向。
+ *
+ * 边界（与代理保持一致，宁可显示服务端租户也不显示一个会被 403 的值）：
+ *  - 允许清单为空（单租户模式）：代理**直接忽略** cookie → 返回服务端租户；
+ *  - cookie 不在清单内：代理会 403 失败关闭 → 界面回落到服务端租户，不显示越权值。
+ */
+export function effectiveTenant(
+  serverTenant: string,
+  allowList: readonly string[],
+  cookieValue: string | null | undefined,
+): string {
+  if (allowList.length === 0) return serverTenant;
+  const chosen = (cookieValue ?? "").trim();
+  if (!chosen) return serverTenant;
+  return allowList.includes(chosen) ? chosen : serverTenant;
+}
+
+/**
+ * 租户选择 cookie 名。
+ *
+ * 与 `lib/api/proxy.ts::TENANT_COOKIE` **必须同名**（有一个单测钉住两者相等）。
+ * 这里重复一份是刻意的：`proxy.ts` 是服务端模块，客户端组件（Providers/Badge）
+ * 一旦 import 它，就会把服务端代码（环境变量读取、密钥拼接）拉进浏览器 bundle。
+ */
+export const TENANT_COOKIE_NAME = "dd_web_tenant";
+
+/** 从 `document.cookie` 里取某个 cookie 的值（浏览器外返回 null）。 */
+export function readCookieValue(cookieHeader: string | null | undefined, name: string): string | null {
+  if (!cookieHeader) return null;
+  for (const part of cookieHeader.split(";")) {
+    const eq = part.indexOf("=");
+    if (eq < 0) continue;
+    if (part.slice(0, eq).trim() === name) return decodeURIComponent(part.slice(eq + 1).trim());
+  }
+  return null;
+}
