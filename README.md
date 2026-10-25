@@ -519,6 +519,14 @@ python -m data_dog.service                 # 起在 0.0.0.0:8000
 # 或一条命令起整套（应用 + PostgreSQL）
 docker compose up -d --build
 docker compose ps
+
+# 连控制台（Next.js）一起起：多一个 profile
+docker compose up -d --build --profile web
+# ├─ 控制台: http://localhost:3000  后端: http://localhost:8000
+# └─ 首次构建要拉 npm 依赖，需要网络；内网可指定镜像源（只影响构建期，不进产物）
+#    WEB_NODE_IMAGE=docker.1ms.run/library/node:22-alpine \
+#    WEB_NPM_REGISTRY=https://registry.npmmirror.com \
+#    docker compose up -d --build --profile web
 ```
 
 > **关于 `--build` 的耗时**（实测，不是估）：**首次**构建要装全部依赖，需要网络；

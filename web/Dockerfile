@@ -21,14 +21,23 @@
 #   `NEXT_PUBLIC_*` 现在只剩"代理基路径/超时"这类**非机密**构建期常量。
 
 # ---------------------------------------------------------------- deps
-FROM node:22-alpine AS deps
+# 基镜像可覆盖：默认官方 alpine；企业内网/离线环境用
+#   docker build --build-arg NODE_IMAGE=<镜像仓库>/library/node:22-bookworm-slim
+# 把地址钉在组织镜像仓库（与 CI 腿镜像同一原则：加速器/镜像源属运行环境，不写进仓库）。
+ARG NODE_IMAGE=node:22-alpine
+
+FROM ${NODE_IMAGE} AS deps
 WORKDIR /app
+# 企业内网/加速器：npm ci 前把 registry 指向内部镜像（只影响构网，不影响产物）。
+#    --build-arg NPM_REGISTRY=https://registry.npmmirror.com
+ARG NPM_REGISTRY=""
 # 只拷贝清单 → 依赖层可缓存，改代码不必重装依赖
 COPY package.json package-lock.json ./
-RUN npm ci
+RUN if [ -n "$NPM_REGISTRY" ]; then npm config set registry "$NPM_REGISTRY"; fi \
+    && npm ci
 
 # ---------------------------------------------------------------- builder
-FROM node:22-alpine AS builder
+FROM ${NODE_IMAGE} AS builder
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
@@ -43,7 +52,7 @@ ENV NEXT_TELEMETRY_DISABLED=1
 RUN npm run build
 
 # ---------------------------------------------------------------- runner
-FROM node:22-alpine AS runner
+FROM ${NODE_IMAGE} AS runner
 WORKDIR /app
 
 ENV NODE_ENV=production \
@@ -56,8 +65,10 @@ COPY --from=builder /app/public ./public
 COPY --from=builder /app/.next/standalone ./
 COPY --from=builder /app/.next/static ./.next/static
 
-# 非 root 运行（最小权限）；nextjs 用户由官方镜像预置
-USER nextjs
+# 非 root 运行（最小权限）。官方 node 镜像预置的就是 **`node`（uid 1000）**；
+# 曾误写成 `nextjs`（那是 next.js 官方示例里自己 useradd 出来的用户，官方镜像里不存在），
+# 结果是镜像能构建、`docker run` 却报 "unable to find user nextjs" 直接起不来。
+USER node
 
 EXPOSE 3000
 
