@@ -42,6 +42,12 @@ services:
       DD_SERVICE_PORT: "8000"
       # 对外提供访问时**必须**设置；留空则不校验（仅适合本机开发）
       DD_API_KEY: ${DD_API_KEY:-}
+      # 调查链路是否走离线确定性 provider。
+      # 不设时后端没有 LLM 凭据 → POST /v1/investigations 回 503（“未配置 LLM 凭据”）。
+      # 这一项**必须能从 compose 传进去**，否则“起容器看演示”这条路径本身就走不通：
+      # 没有它，容器起得来、页面打得开，但调查台永远 503，界面看起来像没数据。
+      # 默认 0（不改变生产语义）；演示/取证时 DD_INVESTIGATE_OFFLINE=1 compose up。
+      DD_INVESTIGATE_OFFLINE: ${DD_INVESTIGATE_OFFLINE:-0}
     ports:
       - "${APP_PORT:-8000}:8000"
     depends_on:
