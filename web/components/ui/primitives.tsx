@@ -2,7 +2,6 @@ import clsx from "clsx";
 
 import { TONE_CLASS, type Tone } from "@/lib/domain";
 import { HScroll } from "@/components/ui/hscroll";
-import { Spotlight } from "@/components/ui/Spotlight";
 
 /* ------------------------------------------------------------------ Panel *
  * A holographic plate: frosted glass over the orb field, soft rounded corners,
@@ -13,9 +12,12 @@ import { Spotlight } from "@/components/ui/Spotlight";
  *   - a short spectrum *rake* at the left edge marks the section the way a nav
  *     rail and the logo frame do — one ornament language across the console;
  *   - the header separates from the body with a hairline that fades out to the
- *     right, so it never competes with the top-edge shimmer for attention;
- *   - the whole plate is a pointer-tracked spotlight, so a live panel answers
- *     the cursor without any element lighting up on its own. */
+ *     right, so it never competes with the top-edge shimmer for attention.
+ *
+ * No pointer-tracked spotlight: a highlight following the cursor across every
+ * panel made the console read as a demo rather than an instrument. The border,
+ * the top rule and the hover lift carry the affordance; nothing needs to follow
+ * the mouse. */
 
 export function Panel({
   children,
@@ -25,6 +27,7 @@ export function Panel({
   actions,
   accent = true,
   lift = true,
+  variant = "plate",
   aside,
   as: Tag = "section",
 }: {
@@ -40,19 +43,30 @@ export function Panel({
   accent?: boolean;
   /** Warm the border + deepen the halo on hover. Off for nested/static plates. */
   lift?: boolean;
+  /** `plate` is the full holographic surface (glass + halo + border).
+   *  `quiet` drops all three for a thin, borderless field: a low-alpha tint and
+   *  a single hairline above the header, nothing else. Use it for panels that
+   *  are supporting detail rather than the view's focal point — ten equally-lit
+   *  plates on one screen have no hierarchy, which reads as weight, not depth. */
+  variant?: "plate" | "quiet";
   as?: "section" | "div" | "article";
 }) {
+  const quiet = variant === "quiet";
   return (
-    <Spotlight
-      as={Tag}
+    <Tag
       className={clsx(
-        "glass glow relative overflow-hidden",
-        "rounded-[var(--radius-token)] border border-rule",
-        lift && "lift",
+        // `relative` is explicit rather than incidental: the accent span is
+        // absolutely positioned. `.glass` happens to establish a containing
+        // block via backdrop-filter, but relying on that would tie the accent's
+        // geometry to a filter detail.
+        "relative overflow-hidden rounded-[var(--radius-token)]",
+        quiet
+          ? "bg-panel/40 ring-1 ring-rule/40"
+          : clsx("glass glow border border-rule", lift && "lift"),
         className,
       )}
     >
-      {accent && (
+      {accent && !quiet && (
         <span
           aria-hidden
           className="pointer-events-none absolute inset-x-0 top-0 z-10 h-px bg-gradient-to-r from-transparent via-spec-violet/60 to-transparent"
@@ -73,7 +87,7 @@ export function Panel({
         </header>
       )}
       {children}
-    </Spotlight>
+    </Tag>
   );
 }
 
@@ -89,6 +103,7 @@ export function MetricTile({
   hint,
   tone = "primary",
   pending,
+  hero = false,
   className,
 }: {
   label: string;
@@ -99,9 +114,42 @@ export function MetricTile({
   tone?: Tone;
   /** When true, the tile renders the pending shape instead of a value. */
   pending?: boolean;
+  /** Render as a bare read-out on the page substrate: no plate, no border, no
+   *  halo, and the value at display size. Exactly one of these per view is the
+   *  point — it is what the eye should land on first. Everything else stays a
+   *  plate, so the hierarchy is stated by contrast rather than by size alone. */
+  hero?: boolean;
   className?: string;
 }) {
   const c = TONE_CLASS[tone];
+
+  if (hero) {
+    return (
+      <div className={clsx("px-1 py-1", className)}>
+        <div className="eyebrow">{label}</div>
+        {pending ? (
+          <span className="reading mt-2 block text-[64px] font-semibold leading-none text-ink-faint">
+            —
+          </span>
+        ) : (
+          <div className="mt-2 flex items-baseline gap-2">
+            <span
+              className={clsx(
+                "reading text-[64px] font-semibold leading-[0.9] tracking-tight",
+                c.text,
+              )}
+            >
+              {value}
+            </span>
+            {unit && <span className="text-sm text-ink-muted">{unit}</span>}
+          </div>
+        )}
+        <span aria-hidden className={clsx("mt-3 block h-0.5 w-12 rounded-full bg-current", c.text)} />
+        {hint && <div className="mt-2 text-xs text-ink-faint">{hint}</div>}
+      </div>
+    );
+  }
+
   return (
     <Panel accent={false} lift className={clsx("px-4 py-3", className)}>
       {/* A reading instrument: a tone-coloured datum bar sits under the value,
@@ -322,10 +370,10 @@ export function Button({
 }) {
   const variants = {
     primary:
-      "shine bg-spectrum text-on-primary border-transparent shadow-[0_0_22px_-6px_var(--glow-ring)] hover:brightness-110",
-    secondary: "shine bg-panel/50 text-ink border-rule-strong hover:bg-paper-sunken",
+      "bg-spectrum text-on-primary border-transparent shadow-[0_0_22px_-6px_var(--glow-ring)] hover:brightness-110",
+    secondary: "bg-panel/50 text-ink border-rule-strong hover:bg-paper-sunken",
     ghost: "bg-transparent text-ink-muted border-transparent hover:bg-paper-sunken hover:text-ink",
-    danger: "shine bg-panel/50 text-critical border-critical hover:bg-critical-soft",
+    danger: "bg-panel/50 text-critical border-critical hover:bg-critical-soft",
   } as const;
   const sizes = { sm: "px-2.5 py-1 text-xs", md: "px-3.5 py-1.5 text-sm" } as const;
   return (

@@ -60,23 +60,43 @@ export default function DashboardPage() {
     <div className="stagger space-y-5">
       <PageHeading />
 
-      {/* Metric row */}
-      <section className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
-        <MetricTile label="候选事件总数" value={candidatesTotal.toLocaleString("zh-CN")} hint="库内候选事件行数" />
+      {/* Metric row. P95 leads: it is the one number an operator is here to
+          read, and it is the only one with a threshold to fail. It sits bare on
+          the substrate at display size while the three counts stay as plates,
+          so the hierarchy is stated by contrast — not by four equal boxes. */}
+      <section className="grid grid-cols-1 items-end gap-5 xl:grid-cols-[auto_1fr]">
         <MetricTile
-          label="活动告警"
-          value={activeAlerts}
-          tone={activeAlerts > 0 ? "warning" : "confirmed"}
-          hint="已检测 / 已确认 / 已升级 / 恢复中"
-        />
-        <MetricTile label="待投递告警" value={outboxPending} hint="等待投递至外部的告警" tone={outboxPending > 0 ? "warning" : "confirmed"} />
-        <MetricTile
+          hero
           label="请求 P95"
           value={p95 !== undefined ? p95.toFixed(3) : "—"}
           unit="s"
           tone={p95 !== undefined && p95 > 0.5 ? "warning" : "primary"}
-          hint={uptime ? `运行 ${formatUptime(uptime)}` : "自启动以来的 HTTP 耗时"}
+          hint={
+            <>
+              {uptime ? `运行 ${formatUptime(uptime)}` : "自启动以来的 HTTP 耗时"}
+              {p95 !== undefined && p95 > 0.5 && " · 超过 0.5s 目标"}
+            </>
+          }
         />
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+          <MetricTile
+            label="候选事件总数"
+            value={candidatesTotal.toLocaleString("zh-CN")}
+            hint="库内候选事件行数"
+          />
+          <MetricTile
+            label="活动告警"
+            value={activeAlerts}
+            tone={activeAlerts > 0 ? "warning" : "confirmed"}
+            hint="已检测 / 已确认 / 已升级 / 恢复中"
+          />
+          <MetricTile
+            label="待投递告警"
+            value={outboxPending}
+            hint="等待投递至外部的告警"
+            tone={outboxPending > 0 ? "warning" : "confirmed"}
+          />
+        </div>
       </section>
 
       {/* Trend */}
@@ -141,7 +161,7 @@ export default function DashboardPage() {
           )}
         </Panel>
 
-        <Panel title="请求状态码分布" subtitle="各状态码的累计请求数">
+        <Panel variant="quiet" title="请求状态码分布" subtitle="各状态码的累计请求数">
           {metrics.isPending ? (
             <SkeletonRows rows={4} />
           ) : Object.keys(requestsByStatus).length === 0 ? (
@@ -176,17 +196,17 @@ export default function DashboardPage() {
         </Panel>
       </div>
 
-      <Panel title="后续动作" subtitle="不知道从哪开始时的建议入口">
+      <Panel variant="quiet" title="后续动作" subtitle="不知道从哪开始时的建议入口">
         <div className="flex flex-wrap gap-3 p-4">
           <Link
             href="/investigate"
-            className="shine inline-flex items-center gap-2 rounded-[var(--radius-token)] border border-rule-strong bg-panel/50 px-3 py-2 text-sm text-ink transition-colors hover:border-spec-violet/60"
+            className="inline-flex items-center gap-2 rounded-[var(--radius-token)] border border-rule-strong bg-panel/50 px-3 py-2 text-sm text-ink transition-colors hover:border-spec-violet/60"
           >
             去调查台选一个候选开始调查 →
           </Link>
           <Link
             href="/alerts"
-            className="shine inline-flex items-center gap-2 rounded-[var(--radius-token)] border border-rule-strong bg-panel/50 px-3 py-2 text-sm text-ink transition-colors hover:border-spec-violet/60"
+            className="inline-flex items-center gap-2 rounded-[var(--radius-token)] border border-rule-strong bg-panel/50 px-3 py-2 text-sm text-ink transition-colors hover:border-spec-violet/60"
           >
             查看告警状态机 →
           </Link>

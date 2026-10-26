@@ -56,9 +56,13 @@ export default function EvalsPage() {
         />
       </section>
 
-      {/* Results region: the real IA, standing by for the endpoint. */}
+      {/* Results region: the real IA, standing by for the endpoint. Kept quiet
+          on purpose — every cell here is a pending slot, and a pending region
+          lit as brightly as the real catalog below would claim a weight it has
+          not earned. The catalog is this page's actual content. */}
       <div className="grid grid-cols-1 gap-5 xl:grid-cols-[1.6fr_1fr]">
         <Panel
+          variant="quiet"
           title="逐用例结果"
           subtitle="每个用例的裁决 / 证据召回 / 是否越界"
         >
@@ -70,7 +74,7 @@ export default function EvalsPage() {
           </div>
         </Panel>
 
-        <Panel title="通过率趋势" subtitle="历次运行的滚动通过率">
+        <Panel variant="quiet" title="通过率趋势" subtitle="历次运行的滚动通过率">
           <div className="p-4">
             <PendingSlot
               title="历史趋势"

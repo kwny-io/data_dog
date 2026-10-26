@@ -61,7 +61,7 @@ export function CandidateList({
                   aria-current={selectedId === c.candidate_id ? "true" : undefined}
                   aria-label={`查看候选 ${componentLabel(c.component_ref)} 详情`}
                   className={clsx(
-                    "row-tick shine absolute inset-0 z-0 transition-all group-hover/row:bg-paper-sunken group-hover/row:row-tick-active",
+                    "row-tick absolute inset-0 z-0 transition-all group-hover/row:bg-paper-sunken group-hover/row:row-tick-active",
                     selectedId === c.candidate_id && "row-tick-active bg-primary-soft",
                   )}
                 />

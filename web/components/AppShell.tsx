@@ -38,7 +38,7 @@ function TopBar() {
     <header className="glass sticky top-0 z-30 border-b border-rule">
       <span
         aria-hidden
-        className="flow-line pointer-events-none absolute inset-x-0 bottom-[-1px] h-px opacity-70"
+        className="pointer-events-none absolute inset-x-0 bottom-[-1px] h-px bg-gradient-to-r from-transparent via-spec-violet/45 to-transparent"
       />
       <div className="mx-auto flex h-14 w-full max-w-[1600px] items-center gap-4 px-4 lg:px-6">
         <Link href="/" aria-label="遥测故障调查台">
@@ -69,21 +69,14 @@ function SideNav({ pathname }: { pathname: string }) {
                 className={clsx(
                   // Nav is a distinct interaction plane: a persistent left rail
                   // marks it as a link even at rest, so it never reads as plain
-                  // text. The active state lights the rail with a travelling
-                  // shimmer (flow-line) — the same "energised edge" as the top
-                  // bar and the primary CTA, so live things share one signature.
-                  "relative block rounded-r-[var(--radius-token)] border-l-2 px-3 py-2 text-sm transition-all",
+                  // text. The active state brightens that rail to the spectrum
+                  // and adds an inset halo — state, stated once, with no motion.
+                  "block rounded-r-[var(--radius-token)] border-l-2 px-3 py-2 text-sm transition-all",
                   active
                     ? "border-spec-violet bg-primary-soft font-medium text-primary shadow-[inset_0_0_20px_-8px_var(--glow-ring)]"
                     : "border-rule-strong text-ink-muted hover:border-spec-cyan hover:bg-paper-sunken hover:text-ink",
                 )}
               >
-                {active && (
-                  <span
-                    aria-hidden
-                    className="flow-line pointer-events-none absolute inset-y-1.5 left-[-2px] w-0.5 rounded-full"
-                  />
-                )}
                 {item.label}
                 <span className="mt-0.5 block text-[11px] text-ink-faint">{item.hint}</span>
               </Link>

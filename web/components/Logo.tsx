@@ -1,14 +1,14 @@
 /* The mark: a hex frame carrying a rising telemetry pulse — the product's
- * whole story in one glyph (a device signal, read). It sits inside a framed
- * plate whose border runs a travelling light (.flow-border), so the identity
- * reads as "live system", not a static wordmark.
+ * whole story in one glyph (a device signal, read). The plate around it is a
+ * static hairline; the gradient lives in the glyph itself, so the identity is
+ * carried by the drawing rather than by an animation running around it.
  *
  * Pure SVG + CSS, no state — safe as a server component on every route. */
 
 export function Logo({ compact = false }: { compact?: boolean }) {
   return (
     <span className="flex items-center gap-2.5">
-      <span className="flow-border relative grid h-8 w-8 shrink-0 place-items-center rounded-[8px] bg-panel/60">
+      <span className="grid h-8 w-8 shrink-0 place-items-center rounded-[8px] border border-rule-strong bg-panel/60">
         <svg
           viewBox="0 0 24 24"
           className="h-4.5 w-4.5"

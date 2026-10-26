@@ -28,7 +28,7 @@ export function ThemeToggle() {
       onClick={() => setTheme(next)}
       title={mounted ? `主题：${label}（点击切换到「${surface(next)}」）` : "切换主题"}
       aria-label={mounted ? `主题：${label}。点击切换到${surface(next)}` : "切换主题"}
-      className="shine inline-flex h-8 w-8 items-center justify-center rounded-full border border-rule-strong bg-panel/50 text-ink-muted transition-colors hover:border-spec-violet/60 hover:text-ink"
+      className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-rule-strong bg-panel/50 text-ink-muted transition-colors hover:border-spec-violet/60 hover:text-ink"
     >
       {!mounted ? (
         <span aria-hidden className="h-[15px] w-[15px]" />

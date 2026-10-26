@@ -80,7 +80,7 @@ export function InvestigationPanel({
       <Panel title="Agent 调查" subtitle="提交后轮询，最长 90 秒 · 可取消">
         <div className="flex flex-wrap items-center gap-3 px-4 py-3">
           {!mutation.isPending ? (
-            <Button variant="primary" className="shine-loop" onClick={start}>
+            <Button variant="primary" onClick={start}>
               ▶ 开始调查
             </Button>
           ) : (
@@ -175,7 +175,7 @@ function ProgressTrack({ elapsed }: { elapsed: number }) {
       aria-label="调查进度（按 90 秒时限估算）"
     >
       <div
-        className="shine-loop relative h-full rounded-full bg-spectrum transition-[width]"
+        className="h-full rounded-full bg-spectrum transition-[width]"
         style={{ width: `${pct}%` }}
       />
     </div>

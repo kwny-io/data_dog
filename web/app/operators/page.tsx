@@ -160,8 +160,10 @@ export default function OperatorsPage() {
         )}
       </Panel>
 
-      {/* P4 plane: designed IA, standing by for the endpoint. */}
+      {/* P4 plane: designed IA, standing by for the endpoint. Quiet, because
+          nothing in it is real yet — the table above is what this page is for. */}
       <Panel
+        variant="quiet"
         title="算子注册与灰度"
         subtitle="P4 平面：注册表 / 审计 / 灰度发布"
       >
