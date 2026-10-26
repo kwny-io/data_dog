@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  describeRuntimeError,
   effectiveTenant,
   emptyAlertsHint,
   emptyCandidatesHint,
@@ -81,5 +82,48 @@ describe("readCookieValue", () => {
     expect(readCookieValue(raw, TENANT_COOKIE_NAME)).toBe("tenant-alt");
     expect(readCookieValue(raw, "missing")).toBeNull();
     expect(readCookieValue(null, TENANT_COOKIE_NAME)).toBeNull();
+  });
+});
+
+/**
+ * 错误路径也要"说得清"：界面不能用 `[429] rate_limited:` 这种机器格式对操作员说话。
+ * 每条分支都必须给出**下一步动作**，而不只是复述状态码。
+ */
+describe("错误文案：每条路径都有可执行的下一步", () => {
+  const cases = [
+    { err: { status: 429, code: "rate_limited", message: "[429] rate_limited" }, must: "再试" },
+    { err: { status: 503, message: "[503] unavailable" }, must: "/readyz" },
+    { err: { status: 500, message: "[500] execution_failed" }, must: "requestId" },
+    { err: { status: 401, code: "denied", message: "[401] denied" }, must: "租户" },
+    { err: { status: 404, code: "not_found", message: "[404] not_found" }, must: "别的租户" },
+    { err: { name: "TimeoutError", message: "请求超时" }, must: "P99" },
+    { err: { name: "NetworkError", message: "fetch failed" }, must: "后端" },
+  ];
+
+  for (const { err, must } of cases) {
+    it(`${err.status ?? err.name} 给出动作（含「${must}」）`, () => {
+      const { title, action } = describeRuntimeError(err);
+      expect(title.length).toBeGreaterThan(0);
+      expect(action).toContain(must);
+    });
+  }
+
+  it("限流时如果后端给了等待秒数，就说具体秒数", () => {
+    const { action } = describeRuntimeError({ status: 429, retryAfterSeconds: 7 });
+    expect(action).toContain("7 秒");
+  });
+
+  it("限流但没给秒数时不说假话（不编具体数字）", () => {
+    const { action } = describeRuntimeError({ status: 429 });
+    expect(action).not.toMatch(/\d+ 秒后/);
+  });
+
+  it("未知错误保留原始信息，不吞掉线索", () => {
+    const { action } = describeRuntimeError({ message: "some weird thing" });
+    expect(action).toContain("some weird thing");
+  });
+
+  it("null 也不崩（throws 空值）", () => {
+    expect(describeRuntimeError(null).title).toContain("未知");
   });
 });

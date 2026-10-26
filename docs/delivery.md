@@ -693,6 +693,9 @@ docker run --rm -p 8000:8000 <你的账号>/data-dog:0.1.0
 | 守卫真的会拦（不是摆设） | 任选一条守卫，把被测行为改坏后跑它 | 必须**红**；改回来必须**绿**。本仓守卫的测试 docstring 都写明它防的是什么；逐条正反对照的过程记录在提交附件的《验证记录》里（私人材料不上仓库） |
 | 文档里的接入示例能跑 | `pytest tests/test_doc_ingest_example.py` | 直接把 docs 里的 JSON 抓下来喂给真应用 |
 | 空态说的租户是真的 | `E2E_REAL_BACKEND=1 npx playwright test real-backend` | 4 条通过；断言"界面点名的租户 == 代理实际解析的租户" |
+| **别人克隆下来能不能跑**（不只是我这台机器） | `bash tools/clone_repro.sh` | 克隆到干净目录 → 建 venv → 装 → 生成数据集 → 跑文档守卫 → 跑离线 demo；末行 `CLONE_REPRO=PASS`。任一步失败都 `CLONE_REPRO=FAIL` 且非零退出 |
+| 文档里的模块路径真的存在 | `pytest tests/test_doc_module_refs.py` | 扫所有 docs + README 里的 `python -m data_dog.*` 与 `src/data_dog/*.py` 引用，逐个 `find_spec`。删除模块或写错路径必红 |
+| 仿真数据集 / 准确率数字 | `pip install -e ".[sim]"` 后 `python -m data_dog.mujoco_sim.gen_dataset --trials 2000 --duration 10 --out data/mujoco` → `PYTHONPATH=src python -m data_dog.synth.dataset_eval --manifest data/mujoco --n 500 --seed 7` | 依赖 extra 名是 **`sim`**（不是 `mujoco`）——本项目**真踩过**：只装 `.[dev]` 时 `gen_dataset` 报 `ModuleNotFoundError: No module named 'mujoco'`（由 `tools/clone_repro.sh` 在全新克隆里发现）。大规模数据集未入库（`.gitignore` 排除 `data/`），必须现场生成 |
 
 **如果你只能跑一条命令**：`bash scripts/verify_ci_offline.sh all`。
 它不需要 GitHub 账户、不需要 API Key、不需要网络。
