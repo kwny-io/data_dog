@@ -8,8 +8,19 @@
 #   输出最后一行固定为 CI_RESULT=PASS 或 CI_RESULT=FAIL（机器读这一行）。
 #   退出码：0=全绿 / 1=有 job 失败 / 3=还没找到该 commit 的 run（超时）
 set -u
-BRANCH="${1:-main}"
-EXPECT_SHA="${2:-}"
+# 参数顺序容错：文档写的是 `[branch] [sha]`，但实际调用时把 sha 写在前面很常见
+# （我自己就传反过一次，结果脚本去查一个叫 7de8cad… 的分支，静默等满 90 分钟）。
+# 判据只看形状：像 sha（≥7 位 hex）的那个是 sha，剩下一个是分支。
+ARG1="${1:-main}"
+ARG2="${2:-}"
+is_sha() { case "$1" in (*[!0-9a-f]*) return 1;; esac; [ ${#1} -ge 7 ]; }
+if is_sha "$ARG1"; then
+  BRANCH="${ARG2:-main}"
+  EXPECT_SHA="$ARG1"
+else
+  BRANCH="$ARG1"
+  EXPECT_SHA="$ARG2"
+fi
 DEADLINE=$(( $(date +%s) + 5400 ))   # 最多等 90 分钟
 
 find_run() {
@@ -24,7 +35,7 @@ find_run() {
     }
 }
 
-echo "=== 等 $BRANCH 的 run（期望 commit: ${EXPECT_SHA:-HEAD}）==="
+echo "=== 等 branch=$BRANCH 的 run（期望 commit: ${EXPECT_SHA:-HEAD}）==="
 FOUND=""
 while [ "$(date +%s)" -lt "$DEADLINE" ]; do
   FOUND=$(find_run)

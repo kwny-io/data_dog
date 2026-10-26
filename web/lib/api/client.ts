@@ -72,12 +72,28 @@ const DEFAULT_STATUS: Record<ApiErrorCode, number> = {
   persist_failed: 207,
 };
 
+/** Parse a `Retry-After` header into seconds. RFC 9110 allows either a delay
+ *  in seconds or an HTTP-date; we handle the seconds form and ignore anything
+ *  else rather than inventing a number. Returning `undefined` makes the UI say
+ *  "稍后" instead of a fabricated countdown. */
+export function parseRetryAfter(raw: string | null): number | undefined {
+  if (!raw) return undefined;
+  const trimmed = raw.trim();
+  if (!/^\d+$/.test(trimmed)) return undefined;
+  const seconds = Number(trimmed);
+  return Number.isFinite(seconds) ? seconds : undefined;
+}
+
 export class ApiError extends Error {
   readonly code: ApiErrorCode;
   readonly status: number;
   readonly detail?: unknown;
   readonly reason?: string;
   readonly requestId?: string;
+  /** `Retry-After` from the response, when the server sent one. The backend
+   *  already knows the wait (5s / 10s / 60s at its three rate-limit points);
+   *  hardcoding a number here would contradict the server's own advice. */
+  readonly retryAfterSeconds?: number;
 
   constructor(init: {
     code: ApiErrorCode;
@@ -85,6 +101,7 @@ export class ApiError extends Error {
     detail?: unknown;
     reason?: string;
     requestId?: string;
+    retryAfterSeconds?: number;
   }) {
     super(`[${init.status}] ${init.code}${init.reason ? `: ${init.reason}` : ""}`);
     this.name = "ApiError";
@@ -93,6 +110,7 @@ export class ApiError extends Error {
     this.detail = init.detail;
     this.reason = init.reason;
     this.requestId = init.requestId;
+    this.retryAfterSeconds = init.retryAfterSeconds;
   }
 
   /** Cross-tenant reads return 404 by design (spec §3.0): the UI should say
@@ -269,6 +287,7 @@ export async function request<T>(path: string, opts: RequestOptions = {}): Promi
   }
 
   const requestId = res.headers.get("X-Request-Id") ?? undefined;
+  const retryAfterSeconds = parseRetryAfter(res.headers.get("Retry-After"));
 
   // 204 or empty body: nothing to unwrap.
   if (res.status === 204) return undefined as T;
@@ -286,9 +305,21 @@ export async function request<T>(path: string, opts: RequestOptions = {}): Promi
       ? `服务返回了 HTML 页面而非 JSON（HTTP ${res.status}）`
       : text.slice(0, 200);
     if (!res.ok) {
-      throw new ApiError({ code: "execution_failed", status: res.status, detail, requestId });
+      throw new ApiError({
+        code: "execution_failed",
+        status: res.status,
+        detail,
+        requestId,
+        retryAfterSeconds,
+      });
     }
-    throw new ApiError({ code: "contract_mismatch", status: res.status, detail: "非 JSON 响应", requestId });
+    throw new ApiError({
+      code: "contract_mismatch",
+      status: res.status,
+      detail: "非 JSON 响应",
+      requestId,
+      retryAfterSeconds,
+    });
   }
 
   if (isErrorEnvelope(body)) {
@@ -298,6 +329,7 @@ export async function request<T>(path: string, opts: RequestOptions = {}): Promi
       detail: body.detail,
       reason: body.reason,
       requestId,
+      retryAfterSeconds,
     });
   }
 
@@ -306,7 +338,13 @@ export async function request<T>(path: string, opts: RequestOptions = {}): Promi
   if (!res.ok) {
     const detail = (body as { detail?: unknown } | undefined)?.detail;
     const code: ApiErrorCode = res.status === 401 ? "denied" : "execution_failed";
-    throw new ApiError({ code, status: res.status, detail, requestId });
+    throw new ApiError({
+      code,
+      status: res.status,
+      detail,
+      requestId,
+      retryAfterSeconds,
+    });
   }
 
   return body as T;
@@ -331,7 +369,11 @@ function pageQuery(params?: PageParams): RequestOptions["query"] {
  *  a missing `items` array would otherwise blow up deep in a component. */
 function requireArray<T>(page: Page<T>): Page<T> {
   if (!Array.isArray(page.items)) {
-    throw new ApiError({ code: "contract_mismatch", status: 200, detail: "响应缺少 items 数组" });
+    throw new ApiError({
+      code: "contract_mismatch",
+      status: 200,
+      detail: "响应缺少 items 数组",
+    });
   }
   return page;
 }
@@ -348,7 +390,10 @@ export const api = {
   },
 
   /** Prometheus text. Returns raw text; the dashboard parses the lines it needs. */
-  async metrics(opts?: { signal?: AbortSignal; ctx?: RequestContext }): Promise<string> {
+  async metrics(opts?: {
+    signal?: AbortSignal;
+    ctx?: RequestContext;
+  }): Promise<string> {
     const res = await fetch(`${API_BASE_URL}/metrics`, {
       headers: buildHeaders(opts?.ctx ?? {}),
       signal: opts?.signal,
@@ -366,7 +411,10 @@ export const api = {
 
   /** JSON summary (spec §3.7). Absent on the backend today → callers degrade. */
   summary(opts?: { signal?: AbortSignal }) {
-    return request<import("./types").Summary>("/v1/summary", { ...opts, timeoutMs: 5000 });
+    return request<import("./types").Summary>("/v1/summary", {
+      ...opts,
+      timeoutMs: 5000,
+    });
   },
 
   listCandidates(
@@ -457,15 +505,16 @@ export const api = {
     opts?: { signal?: AbortSignal; ctx?: RequestContext; pollMs?: number },
   ): Promise<InvestigationResult> {
     const signal = opts?.signal;
-    const submitted = await request<
-      InvestigationResult | { ok: true; job_id: string }
-    >("/v1/investigations", {
-      method: "POST",
-      body: { candidate_id: candidateId },
-      longTask: true,
-      signal,
-      ctx: opts?.ctx,
-    });
+    const submitted = await request<InvestigationResult | { ok: true; job_id: string }>(
+      "/v1/investigations",
+      {
+        method: "POST",
+        body: { candidate_id: candidateId },
+        longTask: true,
+        signal,
+        ctx: opts?.ctx,
+      },
+    );
     if (!("job_id" in submitted) || "report" in submitted) {
       // Synchronous mode: the POST already carries the whole result.
       return submitted as InvestigationResult;

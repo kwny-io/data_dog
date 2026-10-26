@@ -17,14 +17,15 @@ export default function GlobalError({
     message: error.message,
     status: (error as { status?: number }).status,
     code: (error as { code?: string }).code,
+    retryAfterSeconds: (error as { retryAfterSeconds?: number }).retryAfterSeconds,
   });
   return (
     <Panel title="页面出错" className="mx-auto mt-8 max-w-2xl">
       <div className="space-y-3 px-5 py-6">
-        <p className="text-sm text-ink">{explain.title}</p>
-        <p className="text-sm text-ink-faint">{explain.action}</p>
-        <p className="reading break-all text-xs text-ink-faint">
-          {error.message}
+        <p className="text-ink text-sm">{explain.title}</p>
+        <p className="text-ink-faint text-sm">{explain.action}</p>
+        <p className="reading text-ink-faint text-xs break-all">
+          技术细节：{error.message}
           {error.digest ? ` · digest ${error.digest}` : ""}
         </p>
         <Button variant="primary" onClick={reset}>
