@@ -113,7 +113,12 @@ echo "  证据保留在 $TMP/（dump.pgc / restore.log / verify_restore.log / ps
 echo
 if [ "$fail" -eq 0 ]; then
   echo "结论：备份/恢复演练通过 ✓（备份可用性预验 + 删库负对照 + 恢复校验 全过）"
+  # ASCII 哨兵：给自动化一个**不依赖中文/emoji/退出码传递**的判据。
+  # 今晚因 grep 中文或 emoji 判错两次（把崩溃当“未复现”、把通过当失败），
+  # 所以凡是“机器要读”的结论都必须有一个纯 ASCII、稳定的标记行。
+  echo "DRILL_RESULT=PASS"
 else
   echo "结论：演练失败 ✗"
+  echo "DRILL_RESULT=FAIL"
 fi
 exit "$fail"
