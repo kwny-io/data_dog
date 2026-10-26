@@ -11,12 +11,20 @@ BRANCH=feat/software-layer
 GIT="git -c http.proxy= -c https.proxy= -c http.version=HTTP/1.1"
 
 for attempt in $(seq 1 15); do
+  # 先把本地分支尖端推上去（这一步之前缺了，导致脚本在“远端两边都旧”时报“已同步”）
+  $GIT push --no-verify origin "$BRANCH" >/tmp/pm_branch_$attempt.log 2>&1 || true
   $GIT fetch -q origin main "$BRANCH" 2>/dev/null
   feat=$($GIT rev-parse "origin/$BRANCH" 2>/dev/null)
+  local_head=$($GIT rev-parse HEAD 2>/dev/null)
   main=$($GIT rev-parse origin/main 2>/dev/null)
   if [ -z "$feat" ] || [ -z "$main" ]; then
     echo "第 $attempt 次：拿不到远端引用（网络），等 15s"
     sleep 15; continue
+  fi
+  if [ "$feat" != "$local_head" ]; then
+    echo "第 $attempt 次：本地 HEAD $local_head 还没推上远端（远端分支 $feat），重试"
+    grep -iE "fatal|error" "/tmp/pm_branch_$attempt.log" | head -2
+    sleep $((attempt * 10)); continue
   fi
   if [ "$feat" = "$main" ]; then
     echo "main 已同步：$main"
