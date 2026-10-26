@@ -119,7 +119,7 @@ dataset_eval.py      分层抽样 → 按 config 重放仿真 → 现有 Agent �
 `/data/` 在 `.gitignore` 里（第 79 行），所以**全新克隆后没有数据集**，下面那条
 评估命令直接跑会报 `FileNotFoundError: … 下没有 shard_*.jsonl`。两条路：
 
-**(a) 自己生成**（需要 `mujoco`，见 `pip install -e ".[mujoco]"`）：
+**(a) 自己生成**（需要 `mujoco`，见 `pip install -e ".[sim]"`——extra 名是 `sim` 不是 `mujoco`）：
 
 ```bash
 # 60s 档、10 万条（本文数字用的就是这个规模；--shard-size 默认 500）
