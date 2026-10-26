@@ -45,7 +45,10 @@ COPY . .
 # 生产：前端与后端同源（Caddy 反代），控制台请求同源 /api/dd/*。
 # 本地/分域部署时在 build 时覆盖（仅**非机密**的基路径/超时；密钥不要走这里）：
 #   --build-arg NEXT_PUBLIC_API_BASE_URL=https://dog.example.com/api/dd
-ARG NEXT_PUBLIC_API_BASE_URL=""
+#
+# 默认值必须是 `/api/dd` 而不是空串：这个值会被内联进浏览器包，空串会让控制台把
+# `/v1/candidates` 打到页面自己的源上 → 404 → 界面只显示 0 而且不报错（实测踩到）。
+ARG NEXT_PUBLIC_API_BASE_URL="/api/dd"
 ARG NEXT_PUBLIC_INVESTIGATE_TIMEOUT_MS="110000"
 ENV NEXT_TELEMETRY_DISABLED=1
 

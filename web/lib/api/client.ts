@@ -32,10 +32,14 @@ import type {
  * ⚠ **Never** put a credential here. `NEXT_PUBLIC_*` is inlined into the browser
  * bundle, which is exactly the leak this proxy exists to remove; the upstream
  * service address and the key live in server-only `DD_WEB_*` variables. */
-export const API_BASE_URL = (process.env.NEXT_PUBLIC_API_BASE_URL ?? "/api/dd").replace(
-  /\/$/,
-  "",
-);
+export const API_BASE_URL = (() => {
+  const raw = (process.env.NEXT_PUBLIC_API_BASE_URL ?? "").trim().replace(/\/+$/, "");
+  // 空串必须回落到同源代理。`web/Dockerfile` 里 `ARG NEXT_PUBLIC_API_BASE_URL=""`
+  // 的默认值就是空串，而 `??` 不会拦空串——浏览器于是把 `/v1/candidates` 打到
+  // 页面**自己的源**，404 之后界面只是显示 0，页面仍然 200。这种“静默全零”
+  // 比直接报错危险得多：容器 healthy、探针绿、演示时看起来只是“没数据”。
+  return raw === "" ? "/api/dd" : raw;
+})();
 
 /** Default per-request timeout for ordinary reads/writes. */
 const DEFAULT_TIMEOUT_MS = 15_000;
