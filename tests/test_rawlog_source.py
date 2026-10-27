@@ -254,9 +254,16 @@ _WIN = os.name == "nt"
 
 
 def _junction(link, target) -> bool:
-    """用 mklink /J 造目录 junction：**不需要管理员或开发者模式**（符号链接才需要）。"""
+    """用 mklink /J 造目录 junction：**不需要管理员或开发者模式**（符号链接才需要）。
+
+    必须显式给 `encoding`：`cmd` 在中文 Windows 上按 GBK 输出（"已为 … 创建的联接"），
+    默认 `text=True` 会按 UTF-8 解码 → 在**读取线程里**抛 `UnicodeDecodeError`，
+    被 pytest 收成 `PytestUnhandledThreadExceptionWarning`。测试照样绿，但每跑一次全量就多一条
+    噪声 warning —— 会掩盖真正的 crash。`errors="replace"` 兜底：这里只用退出码，不用文案。
+    """
     proc = subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(target)],
-                          capture_output=True, text=True)
+                          capture_output=True, text=True,
+                          encoding="utf-8", errors="replace")
     return proc.returncode == 0 and link.exists()
 
 
