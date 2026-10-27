@@ -1,0 +1,54 @@
+{
+  "fixture_id": "power_soc_low_positive",
+  "component": "joint_motor.front_left_hip",
+  "event": {
+    "bms_soc": 11,
+    "temperature": 35,
+    "current": 12.3
+  },
+  "window": {
+    "series": {
+      "bms_soc": [
+        40,
+        35,
+        30,
+        25,
+        20,
+        16,
+        13,
+        12,
+        12,
+        11
+      ],
+      "temperature": [
+        35,
+        35,
+        35,
+        35,
+        35,
+        35,
+        35,
+        35,
+        35,
+        35
+      ],
+      "current": [
+        12.3,
+        12.3,
+        12.3,
+        12.3,
+        12.3,
+        12.3,
+        12.3,
+        12.3,
+        12.3,
+        12.3
+      ]
+    },
+    "samples": 10
+  },
+  "expect_hit": [
+    "POWER_SOC_LOW"
+  ],
+  "expect_miss": []
+}

@@ -61,6 +61,11 @@ class FieldSpec:
     source: str = ""             # 来源文档（含 revision）
     locator: str = ""            # 定位（行号/小节）
     confidence: str = "verified"  # verified | inferred | unconfirmed
+    # 字段所属结构体（MotorState / BmsState / IMUState / LowState / SportModeState / Error）。
+    # **没有它，同名字段会被张冠李戴**：`temperature` 在 IMUState 与 MotorState 里都有，
+    # `current` 只在 BmsState 里（是电池总线电流，不是电机电流）。按名字跨结构体取
+    # "第一个出现"会让电机算子的温度取到 IMU、电流取到电池——量纲和语义都错。
+    structure: str = ""
 
 
 @dataclass
@@ -168,8 +173,23 @@ def _line_of(text: str, needle: str) -> int:
     return 0
 
 
+# 清洗后 IDL 的首行携带来源文件名，结构体名就在文件名里：
+#   [来源: raw\unitree_sdk2__MotorState_.idl.txt] [structured: True] ...
+_STRUCT_OF_SOURCE = re.compile(r"unitree_sdk2__(?P<name>\w+?)_?\.idl")
+
+
+def _structure_of(idl_text: str, revision: DocumentRevision) -> str:
+    m = _STRUCT_OF_SOURCE.search(revision.source) or _STRUCT_OF_SOURCE.search(idl_text)
+    return m.group("name") if m else ""
+
+
 def extract_fields(idl_text: str, revision: DocumentRevision) -> list[FieldSpec]:
-    """从清洗后的 IDL 字段表抽字段规格。单位来自命名约定 → confidence=inferred。"""
+    """从清洗后的 IDL 字段表抽字段规格。单位来自命名约定 → confidence=inferred。
+
+    **必须带结构体**：字段名在多个结构体间重复（`temperature` 同时在 IMUState 与
+    MotorState，`mode` 同时在 MotorState 与 SportModeState），只按名字挑会张冠李戴。
+    """
+    structure = _structure_of(idl_text, revision)
     out: list[FieldSpec] = []
     for line in idl_text.splitlines():
         m = _IDL_FIELD.match(line)
@@ -182,6 +202,7 @@ def extract_fields(idl_text: str, revision: DocumentRevision) -> list[FieldSpec]
             source=f"{revision.source}@{revision.revision_id}",
             locator=f"line:{_line_of(idl_text, f'- {name}:')}",
             confidence="inferred" if unit else "verified",
+            structure=structure,
         ))
     return out
 

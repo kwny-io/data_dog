@@ -34,6 +34,10 @@ class DeclarativeRule:
     value: float
     severity_hint: str = "warning"
     message: str = ""
+    # 阈值出处：verified（厂商文档/协议头明写）/ assumption（项目假设）。
+    # 默认空串，旧的构造点（只给前 6 个位置参数）行为不变。
+    provenance: str = ""
+    subsystem: str = ""      # A 关节电机 / B 热 / C 电源 / E 通信 / F 整机步态
 
 
 @dataclass
@@ -119,9 +123,21 @@ class Fixture:
     def window_ctx(self) -> WindowContext | None:
         if not self.window:
             return None
+        series = self.window.get("series", {})
+        # samples：窗口内**应有**的样本条数。离线 fixture 里可显式写
+        # {"samples": 30} 来表达"30 帧里有几帧该字段缺失（丢包）"；不写则
+        # 取最长序列长度（即所有字段都齐 → 覆盖率 1.0），与旧 fixture 兼容。
+        samples = self.window.get("samples")
+        if samples is None:
+            samples = max((len(v) for v in series.values()), default=0)
+        # times：field → 与 series[field] 等长的事件时间（秒）。**不给就没有**
+        # ——`window.span()` 会返回 None，依赖它的规则按"数据不足"不命中。
+        # 这样 fixture 不会在"没写时间"的情况下悄悄用样本序号冒充秒数。
         return WindowContext(
-            series=self.window.get("series", {}),
+            series=series,
             baseline=self.window.get("baseline", {}),
+            samples=int(samples),
+            times=dict(self.window.get("times") or {}),
         )
 
 

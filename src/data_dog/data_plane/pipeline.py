@@ -131,16 +131,18 @@ class DataPlane:
         # Enricher：工况 + 基线（载荷已在上方解析并校验过，这里复用同一份）
         condition = self.enricher.condition_from(payload)
         component = _component_of(env)
-        baseline = {}
-        for fld in metrics:
-            b = self.enricher.baseline_for(component, fld, condition)
-            if b is not None:
-                baseline[fld] = b
+        at_s = _epoch_s(env.occurred_at)
+        # **先取基线，再并入本样本**：基线必须只反映"此刻之前"的历史，
+        # 否则当下这条故障样本会立刻抬高自己的基线，把判据稀释掉。
+        # 未满 warmup → baseline_for 返回 None → 结果里就没有该字段 →
+        # 依赖基线的 DSL 规则按"缺基线不命中"降级（见 chain.Detector._detect_dsl）。
+        baseline = self.enricher.snapshot(
+            component, {fld: condition for fld in metrics if not fld.startswith("_")})
 
         # 窗口特征（G2：传入事件时间，使窗口按事件时间有序；未启用水位线时
         # 事件时间仍被采用，乱序不会污染 mean/slope——这是纯增益，无回归）。
         key = f"{env.device_sn}|{component}"
-        self.window.push(key, metrics, occurred_at_s=_epoch_s(env.occurred_at))
+        self.window.push(key, metrics, occurred_at_s=at_s)
 
         norm = NormalizedTelemetryEvent(
             event_id=env.event_id, tenant_id=env.tenant_id, device_sn=env.device_sn,
@@ -157,7 +159,15 @@ class DataPlane:
 
         # Detector（执行 P1 生成的算子）+ Candidate Builder
         if detector is not None:
-            hits = detector.detect(metrics)
+            # 窗口上下文真的传下去：趋势/均值/计数/丢包率类判据从此可执行
+            # （以前算完 WindowFeature 就丢，这些判据形同虚设）。
+            hits = detector.detect(
+                metrics,
+                series=self.window.series(key),
+                samples=self.window.sample_count(key),
+                times=self.window.times(key),
+                baseline=baseline,
+            )
             if hits:
                 self.builder.add(
                     device_sn=env.device_sn, component_ref=component,
@@ -166,6 +176,10 @@ class DataPlane:
                     raw_ref=env.payload_ref, baseline=baseline,
                     tenant_id=env.tenant_id,
                 )
+
+        # 基线的更新放在检测之后：本样本参与基线只影响**后续**事件，
+        # 不会回头改写刚刚这条事件的判据（时序上不可倒退）。
+        self.enricher.observe_metrics(component, metrics, condition, at_s=at_s)
         return norm, None
 
     # ---- 批量 ----
