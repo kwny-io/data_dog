@@ -36,6 +36,15 @@ DOCS = sorted(REPO.glob("docs/*.md")) + [REPO / "README.md"]
 MODULE_REF = re.compile(r"\bpython -m (data_dog(?:\.[A-Za-z_][\w]*)+)")
 # `src/data_dog/agent/degradation.py`
 PATH_REF = re.compile(r"\bsrc/(data_dog/[\w/]+\.py)")
+# 反引号里裸写的模块路径：`data_dog.mujoco_sim.gen_dataset`
+# 这条是变异测试补出来的：原守卫只认 `python -m ...`，而当初真正写错的那次
+# （`data_dog.mujoco.gen_dataset`）是裸写模块路径，守卫当场放行。
+BACKTICK_MODULE_REF = re.compile(r"`(data_dog(?:\.[A-Za-z_][\w]*)+)`")
+# 仓库内其它路径引用：`tools/push_all.sh`、`web/lib/api/client.ts`、`k8s/deployment.yaml`
+# 同类事故：文档写着一条命令，文件早被改名/删除，人眼看不出来。
+REPO_PATH_REF = re.compile(
+    r"`((?:tools|scripts|web|k8s|deploy|migrations)/[\w./-]+\.(?:sh|py|ts|tsx|mjs|json|ya?ml))`"
+)
 
 
 def _doc_files() -> list[Path]:
@@ -80,3 +89,36 @@ def test_documented_source_file_paths_exist() -> None:
                 bad.append(f"{doc.relative_to(REPO)}: src/{rel}")
     assert seen > 0, "没扫到任何 src/data_dog/*.py 引用——正则或文档结构变了"
     assert not bad, "文档引用了不存在的源文件：\n" + "\n".join(bad)
+
+
+def test_backticked_module_paths_are_importable() -> None:
+    """裸写在反引号里的模块路径也必须存在。
+
+    这是变异测试逼出来的：原守卫只识别 `python -m data_dog.x.y`，把
+    `` `data_dog.no_such_module` `` 直接写进文档时它依然绿。而真实事故
+    （克隆脚本里的 `data_dog.mujoco.gen_dataset`）正是裸写形态。
+    """
+    bad: list[str] = []
+    seen = 0
+    for doc in _doc_files():
+        text = doc.read_text(encoding="utf-8")
+        for mod in sorted(set(BACKTICK_MODULE_REF.findall(text))):
+            seen += 1
+            if not _importable(mod):
+                bad.append(f"{doc.relative_to(REPO)}: {mod}")
+    assert seen > 0, "没扫到任何反引号模块引用——正则或文档结构变了"
+    assert not bad, "文档引用了不存在的模块：\n" + "\n".join(bad)
+
+
+def test_backticked_repo_paths_exist() -> None:
+    """反引号里的仓库路径（tools/scripts/web/k8s）必须真实存在。"""
+    bad: list[str] = []
+    seen = 0
+    for doc in _doc_files():
+        text = doc.read_text(encoding="utf-8")
+        for rel in sorted(set(REPO_PATH_REF.findall(text))):
+            seen += 1
+            if not (REPO / rel).is_file():
+                bad.append(f"{doc.relative_to(REPO)}: {rel}")
+    assert seen > 0, "没扫到任何仓内路径引用——正则或文档结构变了"
+    assert not bad, "文档引用了不存在的文件：\n" + "\n".join(bad)
