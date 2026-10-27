@@ -93,3 +93,12 @@ pip-audit.json
 /build.log
 /push2.log
 /repro_flake.log
+
+# 本地产物与外发材料：不进版本库。
+# 校验见 tests/test_no_deliverables_in_repo.py
+/data_dog-PDF/
+*.pdf
+!vendor_docs/**/*.pdf
+*材料*.html
+数据口径*.md
+验证记录*.md
