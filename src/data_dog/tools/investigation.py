@@ -11,6 +11,7 @@ from typing import Any
 from ..context import RuntimeContext, default_context
 from ..errors import ToolErrorCode, err, ok
 from ..evidence.store import EvidenceSource
+from ..settings import llm_vision_enabled
 
 
 class InvestigationTools:
@@ -151,10 +152,20 @@ class InvestigationTools:
         comp = meta.get("component_ref", "")
         if comp and not self.ctx.can_access(self.ctx.device_sn, comp):
             return err(ToolErrorCode.DENIED, comp)
+        payload = dict(meta)
+        if not llm_vision_enabled():
+            # 视觉证据通道开着，但当前模型不声明能看图：**不发 base64、也不读帧字节**。
+            # 旧行为是无条件拼上 __images__，配纯文本模型时上游 400，整条调查失败关闭——
+            # “没配多模态”变“分析不了”。现在降级为“只给帧元数据 + 原因”，
+            # 让技服看到“本图未入模”而不至于以为帧坏了。
+            payload["note"] = (
+                "视觉通道未启用：仅返回帧元数据，未把图像送入模型。"
+                "若模型支持多模态，设置 DD_LLM_VISION=1"
+            )
+            return ok(payload)
         raw = self.visual.get_bytes(meta["frame_id"])
         if raw is None:
             return err(ToolErrorCode.NOT_FOUND, f"帧文件缺失：{frame_id}")
-        payload = dict(meta)
         payload["__images__"] = [{
             "mime_type": meta.get("mime_type", "image/png"),
             "data_base64": base64.b64encode(raw).decode("ascii"),

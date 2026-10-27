@@ -27,8 +27,8 @@
   **当时的证据引用**（无损）一起给 Agent，新的在前、最多 5 条。
 - **只在有既往记录时**才把工具暴露给模型（`specs()` 按 `supports_prior_memory` 过滤），
   系统提示同步追加"先验 ≠ 本次证据"的边界说明（`PRIOR_MEMORY_PROMPT`）。
-- 落点：`tools/investigation.py`、`agent/loop.py`、`service/evidence.py`
-  （`RepoEvidenceBridge`）、`service/runtime.py`（`_prior_report_items`）。
+- 落点：`src/data_dog/tools/investigation.py`、`src/data_dog/agent/loop.py`、`src/data_dog/service/evidence.py`
+  （`RepoEvidenceBridge`）、`src/data_dog/service/runtime.py`（`_prior_report_items`）。
 - **MVP 边界**：`reports` 行不含 device / component，故现在按 `(device, component)` 取候选
   建立映射，再在租户**最近 200 条报告**里内存过滤；规模化应给 `reports` 加
   `(device_sn, component_ref)` 列 + 索引，直接 SQL 过滤。
@@ -46,14 +46,15 @@
 - 图像以 OpenAI 兼容的"内容分片"（data URL）送多模态模型；**base64 不写进 tool 文本**
   （避免白烧 token），而是作为一条**独立观察**消息注入上下文。
 - 调帧要过可信上下文（A4）：跨设备 / 越权部件 → `denied`。
-- 落点：`evidence/visual.py`、`providers/client.py`（`LLMChatMessage.images` + `_to_api`）、
-  `tools/investigation.py`、`agent/loop.py`（`VISUAL_HARNESS_PROMPT`）、`service/runtime.py`。
+- 落点：`src/data_dog/evidence/visual.py`、`src/data_dog/providers/client.py`（`LLMChatMessage.images` + `_to_api`）、
+  `src/data_dog/tools/investigation.py`、`src/data_dog/agent/loop.py`（`VISUAL_HARNESS_PROMPT`）、`src/data_dog/service/runtime.py`。
 
 ### 开关与依赖
 
 | 项 | 值 | 说明 |
 |---|---|---|
 | `DD_VISUAL_EVIDENCE_DIR` | 空（默认） | 设了才启用视觉通道；空 = 工具不暴露（纯文本链路**零变化**） |
+| `DD_LLM_VISION` | `0`（默认） | 当前模型是否**能接收原始图像**。`0` = `view_visual_frame` 只回帧元数据（尺寸/时间戳/部件）并在结果里写明“视觉通道未启用，设 `DD_LLM_VISION=1`”，**不发 base64、不调上游多模态接口**；`1` = 才把原帧当 content parts 送进模型。两个开关分开的理由：帧存不存在、模型能不能看图，是两件事——旧版把它们当一件事，配纯文本模型时上游 400 会让**整条调查失败关闭**（没配多模态 → 分析不了） |
 | Pillow | 可选依赖 `.[vision]` | 裁剪需要；缺失时视觉工具不暴露（不报错、不降级） |
 | provider | **须多模态** | 纯文本模型（如 `deepseek-chat`）看不到图；开关只决定证据是否可得，不判断模型能力 |
 

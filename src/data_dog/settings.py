@@ -1038,6 +1038,21 @@ def visual_evidence_dir() -> str:
     return _get("DD_VISUAL_EVIDENCE_DIR", default="")
 
 
+def llm_vision_enabled() -> bool:
+    """当前 LLM 是否能接收原始图像（默认 **False**）。
+
+    为什么需要独立开关：`visual_evidence_dir()` 只决定"帧可得不得"，不判断模型能力。
+    旧行为是两者耦合——开了视觉证据就无条件把 base64 原帧拼成 content parts 发出去；
+    一旦配的是纯文本模型（如 deepseek-chat），上游直接 400，**整条调查失败关闭**。
+    即"看不到图"退化成了"分析不了"，而用户只是没配多模态模型而已。
+
+    现在：模型侧能力由调用方显式声明（`DD_LLM_VISION=1`）。未声明时，
+    `view_visual_frame` 只回帧元数据（尺寸/时间戳/部件），并把
+    "视觉通道未启用"写进结果，Agent 与技服人员都能看到原因，而不是静默失明。
+    """
+    return _get_bool("DD_LLM_VISION", default=False)
+
+
 def investigate_recover_interval_s() -> float:
     """异步 job 的**卡死恢复扫描**间隔（秒）。默认 60s。
 

@@ -102,7 +102,8 @@ def test_list_frames_filters(tmp_path):
     print("PASS test_list_frames_filters")
 
 
-def test_visual_tools_gated_and_authorized(tmp_path):
+def test_visual_tools_gated_and_authorized(tmp_path, monkeypatch):
+    monkeypatch.setenv("DD_LLM_VISION", "1")   # 本节验“能看图时”的行为
     t_off = InvestigationTools(_BareStore())
     assert "view_visual_frame" not in {s["name"] for s in t_off.specs()}
     vs = VisualFrameStore(tmp_path / "vf")
@@ -138,7 +139,8 @@ class _VisionProvider:
              "missing_evidence": [], "recommended_actions": []})}
 
 
-def test_agent_injects_image_not_base64(tmp_path):
+def test_agent_injects_image_not_base64(tmp_path, monkeypatch):
+    monkeypatch.setenv("DD_LLM_VISION", "1")   # 本节验“能看图时”的行为
     from data_dog.schemas.events import CandidateEvent
     vs = VisualFrameStore(tmp_path / "vf")
     fr = vs.put(_png(), device_sn="d1", component_ref=COMP,
@@ -159,3 +161,42 @@ def test_agent_injects_image_not_base64(tmp_path):
     assert tool_msgs and "data_base64" not in tool_msgs[-1].content
     assert trace and "__images__" not in trace[0]["result"]   # 轨迹里不留 base64
     print("PASS test_agent_injects_image_not_base64")
+
+
+def test_default_is_text_only_no_images(tmp_path, monkeypatch):
+    """默认（未声明 DD_LLM_VISION）必须**不发图**，且把原因告诉人。
+
+    这个用例守的是一个真实失败模式：配了纯文本模型（如 deepseek-chat）时，
+    旧代码会无条件把 base64 原帧拼进 content parts，上游直接 400，
+    整条调查失败关闭——“没配多模态”被放大成“分析不了”。
+    降级后应是“看不到图，但分析照做”。
+    """
+    monkeypatch.delenv("DD_LLM_VISION", raising=False)
+    vs = VisualFrameStore(tmp_path / "vf")
+    fr = vs.put(_png(), device_sn="d1", component_ref=COMP,
+                observed_at="2026-10-12T00:00:00Z")
+    tools = InvestigationTools(_BareStore(), visual=vs).with_task("d1")
+    out = tools.call("view_visual_frame", {"frame_id": fr["frame_id"]})
+    assert out["ok"] is True
+    assert "__images__" not in out, "未声明视觉能力却仍把原帧送去入模"
+    assert "DD_LLM_VISION" in out.get("note", ""), "降级了但没说原因"
+    print("PASS test_default_is_text_only_no_images")
+
+
+def test_agent_text_only_does_not_inject_image_message(tmp_path, monkeypatch):
+    """纯文本模型下，Agent 上下文里不应出现任何带图消息。"""
+    monkeypatch.delenv("DD_LLM_VISION", raising=False)
+    from data_dog.schemas.events import CandidateEvent
+    vs = VisualFrameStore(tmp_path / "vf")
+    fr = vs.put(_png(), device_sn="d1", component_ref=COMP,
+                observed_at="2026-10-12T00:00:00Z")
+    prov = _VisionProvider()
+    prov.frame_id = fr["frame_id"]
+    cand = CandidateEvent(candidate_id="cand_y", device_sn="d1", component_ref=COMP,
+                          signal="temperature_high", severity_hint="warning",
+                          window_start="09:55", window_end="10:00", sample_count=1)
+    AgentLoop(prov, InvestigationTools(_BareStore(), visual=vs)).investigate(cand)
+    for call in prov.calls:
+        assert not [m for m in call if getattr(m, "images", None)], \
+            "纯文本模型收到了带图消息（上游会 400 并让调查失败关闭）"
+    print("PASS test_agent_text_only_does_not_inject_image_message")
