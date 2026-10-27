@@ -175,7 +175,8 @@
 
 ### 7.1 边界
 - 独立工况只有 4 个；normal 文件各 1 个。"误报率 8.6%"的置信区间仍宽（10/70 全部集中在 op_0）。
-- 复现：`python scripts/cwru_recalibrate.py --lolo --invariant --windows-per-file 50 --stride 24000`（⚠️ 旧口径，见 §8）。
+- 复现：`python scripts/cwru_recalibrate.py --lolo --invariant --windows-per-file 50 --stride 24000`（⚠️ 旧口径，见 §8.1）。
+- **本节数字的行号锚**：0.839 / 0.706 在 L164–L166，0.961 / 0.882 / 0.043 在 L216–L217 —— 引用请带行号，别只写数字。
 
 ---
 
