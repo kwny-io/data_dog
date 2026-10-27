@@ -416,26 +416,46 @@ def test_shell_entry_points_are_lf_and_parse():
     points = _shell_entry_points()
     assert points, "没找到任何 shell 入口，路径解析写错了？"
 
+    # 第一段：CR 字节检查。这一段**不依赖 bash**，所以必须先做完再谈解析，
+    # 否则环境里没有 bash 时一个 skip 会把真正的 CRLF 缺陷一起吞掉。
     problems: list[str] = []
+    clean: list[Path] = []
     for path in points:
-        rel = path.relative_to(REPO).as_posix()
         raw = path.read_bytes()
         if b"\r" in raw:
-            problems.append(f"{rel}: 含 CR 字节（CRLF 换行）")
+            problems.append(f"{path.relative_to(REPO).as_posix()}: 含 CR 字节（CRLF 换行）")
             continue
-        first = raw.split(b"\n", 1)[0].decode("utf-8", "replace")
-        interp = "sh" if first.startswith("#!/bin/sh") else "bash"
-        exe = shutil.which(interp)
-        if exe is None:  # pragma: no cover - 极简环境
-            continue
-        proc = subprocess.run([exe, "-n", str(path)], capture_output=True, text=True, timeout=60)
-        if proc.returncode != 0:
-            problems.append(f"{rel}: {interp} -n 失败: {proc.stderr.strip()}")
+        clean.append(path)
+
+    # 第二段：用**真能执行**的解释器做语法解析。
+    # 为什么不再用 `shutil.which(interp)`：Windows 上它会命中
+    # `C:\Windows\System32\bash.EXE`（WSL relay），没装发行版时直接
+    # `execvpe(/bin/bash) failed` 返回 1 —— 报的是**假的红**（环境问题，不是脚本坏）。
+    # 本文件里的 `_usable_bash()` 就是为此写的，本用例当时漏用了它。
+    bash = _usable_bash()
+    sh = shutil.which("sh") if os.name != "nt" else None
+    parse_skipped = None
+    if bash is None:
+        parse_skipped = ("找不到能执行的 bash（Windows 无 Git-Bash 且 WSL 未装发行版）："
+                         "CR 字节检查已全部执行，语法解析本机无法验证")
+    else:
+        for path in clean:
+            rel = path.relative_to(REPO).as_posix()
+            first = path.read_bytes().split(b"\n", 1)[0].decode("utf-8", "replace")
+            # POSIX sh 脚本在 Linux 上仍用真 sh 解析（dash 比 bash 严格，不能降级）
+            interp = "sh" if first.startswith("#!/bin/sh") else "bash"
+            exe = sh if (interp == "sh" and sh) else bash
+            proc = subprocess.run([exe, "-n", str(path)], capture_output=True, text=True, timeout=60)
+            if proc.returncode != 0:
+                problems.append(f"{rel}: {interp} -n 失败: {proc.stderr.strip()}")
 
     assert not problems, (
         "以下 shell 入口有问题（修法：用 LF 重写该文件并 `git add`，"
         "别只依赖 .gitattributes——它对已存在文件无效）：\n  " + "\n  ".join(problems)
     )
+    if parse_skipped:
+        # skip ≠ pass：不能装作解析过了（本仓库第 22 项教训）
+        pytest.skip(parse_skipped)
 
 
 def test_verdict_never_says_pass_for_a_dirty_worktree():
