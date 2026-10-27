@@ -370,25 +370,25 @@ def test_no_private_paths_are_tracked():
     print("PASS test_no_private_paths_are_tracked")
 
 
-def test_no_competition_materials_are_tracked():
-    """参赛/对外宣讲材料不进代码仓。
+def test_no_external_materials_are_tracked():
+    """对外交付材料（宣讲稿 / 演示二进制 / 交付 PDF）不进代码仓。
 
-    2026-10-25 用户明确要求：“参赛材料不要写到提交的feature里”。
-    这些东西的本体（PDF / 演示稿 / 路演页）属于交付材料，不属于工程资产：
-    它们会和代码一起被版本化、被用 diff 看，却没有一个可回滚的失败模式。
-    它们的正确位置是桌面（当前的 `data_dog-参赛材料.pdf/.html`、
-    `data_dog-明日PDF素材.md`、`data_dog-答辩七问.md` 都在桌面上）。
+    这些东西的本体属于交付物，不属于工程资产：它们会和代码一起被版本化、
+    被用 diff 看，却没有一个可回滚的失败模式。它们的正确位置是**仓库外的本机
+    桌面目录**，不作为 tracked 文件出现。
 
     但“用过的 pdf”不能一刀切：`vendor_docs/` 和 `third_party/` 下的第三方
     手册/许可证原文是**证据**（依从性/许可证审计要用），必须能进仓。
     """
     if not (ROOT / ".git").exists():
-        print("SKIP test_no_competition_materials_are_tracked（无 .git：容器拷贝模式）")
+        print("SKIP test_no_external_materials_are_tracked（无 .git：容器拷贝模式）")
         return
 
     tracked = _git_tracked_files()
 
-    # 名字里出现即拦：中英文两种写法都算
+    # 名字里出现即拦：中英文两种写法都算。
+    # 词表本身就是判据，必须真的写出这些词才能拦——它不会因为出现在代码里
+    # 就构成“对外材料”，真正的判据是**文件名**匹配 + PDF/演示后缀。删词等于废掉守卫。
     banned_keywords = (
         "参赛", "competition", "hackathon", "路演", "pitch", "路縯",
         "商业计划书", "计划书", "答辩", "演示视频", "宣讲",
@@ -406,11 +406,11 @@ def test_no_competition_materials_are_tracked():
         elif low.endswith(banned_suffixes):
             bad.append(f"{path}（演示/文稿二进制后缀）")
         elif any(k in low for k in banned_keywords):
-            bad.append(f"{path}（参赛/宣讲关键词）")
+            bad.append(f"{path}（对外材料关键词）")
 
     assert not bad, (
-        "参赛/对外材料不该进 feature 分支（留在桌面）：\n  "
+        "对外交付材料不该进 feature 分支（留在本机桌面目录）：\n  "
         + "\n  ".join(bad)
         + "\n修法：git rm --cached <文件>；证据类 PDF 放 third_party/ 或 vendor_docs/ 才允许跟踪"
     )
-    print("PASS test_no_competition_materials_are_tracked")
+    print("PASS test_no_external_materials_are_tracked")

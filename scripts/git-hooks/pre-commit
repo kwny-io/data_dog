@@ -6,7 +6,7 @@
 # 启用：make hooks   （等价于 git config core.hooksPath scripts/git-hooks）
 # 临时跳过：git commit --no-verify  （不建议：CI 会拦，只是把失败推后）
 #
-# 第三个检查是“这个提交里有没有私人文件/参赛材料”——它必须在这里，
+# 第三个检查是“这个提交里有没有私人文件/对外交付材料”——它必须在这里，
 # 不是在 pre-push：那时提交已经存在，amend 才能改，且很可能已经被别处引用。
 set -e
 
@@ -38,13 +38,13 @@ fi
 echo "[pre-commit] README 规模数字核对（scripts/readme_counts.py --check）"
 "$PY" scripts/readme_counts.py --check
 
-# 仓库是 public 的，且参赛/对外材料不进 feature 分支。
+# 仓库是 public 的，且对外交付材料不进 feature 分支。
 # 这两条以前只在 pre-push 的全量测试里生效——于是 `git add -A` 把私人文件或某个 PDF
 # 踩进暂存区时，**提交已经落下了**，要等到推送才报。守卫的时机必须早于提交才叫守卫。
-# 只跑这两个用例（亚秒级），但覆盖两个真事故模式：私人文档上传、参赛材料入仓。
-echo "[pre-commit] 私人文件 / 参赛材料守卫（traced files）"
+# 只跑这两个用例（亚秒级），但覆盖两个真事故模式：私人文档上传、交付材料入仓。
+echo "[pre-commit] 私人文件 / 对外材料守卫（traced files）"
 "$PY" -m pytest tests/test_project_meta.py -q \
-    -k "no_private_paths_are_tracked or no_competition_materials_are_tracked" \
+    -k "no_private_paths_are_tracked or no_external_materials_are_tracked" \
     --no-header -p no:cacheprovider
 
 echo "[pre-commit] 通过"
