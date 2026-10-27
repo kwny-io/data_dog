@@ -7,8 +7,9 @@
  * `detail` is shown only as secondary, technical context.
  */
 
-import { ApiError, NetworkError, TimeoutError } from "./api/client";
+import { ApiError } from "./api/client";
 import type { ApiErrorCode } from "./api/types";
+import { classify, waitPhrase } from "./error-classify";
 
 export interface HumanError {
   /** Short, plain-language headline. */
@@ -85,7 +86,11 @@ const MESSAGES: Record<ApiErrorCode, Omit<HumanError, "code">> = {
 };
 
 export function humanize(err: unknown): HumanError {
-  if (err instanceof TimeoutError) {
+  // The category and the retry decision come from `error-classify` — the single
+  // judge both this module and `hints.ts` answer to. This module only supplies
+  // the console's wording for that category.
+  const c = classify(err);
+  if (c.category === "timeout") {
     return {
       title: "请求超时",
       hint: "服务在时限内没有响应。请检查网络后重试。",
@@ -93,7 +98,7 @@ export function humanize(err: unknown): HumanError {
       code: "timeout",
     };
   }
-  if (err instanceof NetworkError) {
+  if (c.category === "network") {
     return {
       title: "无法连接到服务",
       hint: "服务可能未启动，或本地开发时跨域被拦截（需后端开启 CORS）。",
@@ -103,7 +108,13 @@ export function humanize(err: unknown): HumanError {
   }
   if (err instanceof ApiError) {
     const base = MESSAGES[err.code] ?? MESSAGES.execution_failed;
-    return { ...base, code: err.code };
+    // A 429 carries the server's own Retry-After; dropping it here is what made
+    // this page say "请稍等几秒" while the error boundary said "约 5 秒后".
+    const hint =
+      c.category === "rate_limited"
+        ? `已触发限流。${waitPhrase(c.waitSeconds)}再试即可，不要并发重试。`
+        : base.hint;
+    return { ...base, hint, retryable: c.retryable, code: err.code };
   }
   return { ...MESSAGES.execution_failed, code: "execution_failed" };
 }

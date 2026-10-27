@@ -1,3 +1,5 @@
+import { classify, waitPhrase } from "./error-classify";
+
 /**
  * 空态文案（纯函数，便于单测钉住"说得清"）。
  *
@@ -82,7 +84,7 @@ export function readCookieValue(cookieHeader: string | null | undefined, name: s
  * 该重试，还是该去找运维"。
  *
  * 纯函数、不碰 DOM：便于单测钉住（`web/tests/hints.test.ts`）。
- * 判定顺序刻意从"最能给出动作"到"最泛"。
+ * 分类与"能不能重试"的判据在 `lib/error-classify`（两份渲染器共用，避免两边说法不一）。
  */
 export interface RuntimeErrorLike {
   name?: string;
@@ -105,48 +107,47 @@ export interface ErrorExplanation {
 export function describeRuntimeError(err: RuntimeErrorLike | null | undefined): ErrorExplanation {
   if (!err) return { title: "发生了未知错误", action: "刷新页面重试；若持续出现，把本页标题告诉运维。" };
 
-  const status = typeof err.status === "number" ? err.status : undefined;
-  const code = (err.code ?? "").toLowerCase();
+  // 分类与「能不能重试」的唯一判据在 `lib/error-classify`：本文件只提供错误页的措辞。
+  // 以前它和 `lib/errors.ts` 各判一次，同一个 429 在列表页说“请稍等几秒”、在错误页说“约 5 秒后”。
+  const c = classify(err);
 
-  if (err.name === "TimeoutError") {
+  if (c.category === "timeout") {
     return {
       title: "请求超时（后端可能在忙，或本次查询范围太大）",
       action: "缩小时间范围后重试；连续超时说明后端过载，需要看 Prometheus 的 P99 是否已越线。",
     };
   }
-  if (err.name === "NetworkError") {
+  if (c.category === "network") {
     return {
       title: "连不上后端服务",
       action: "确认后端已启动（compose 里是 backend:8000，或本机 make run），再点重试。界面本身没坏。",
     };
   }
-  if (status === 429 || code === "rate_limited") {
-    const wait = err.retryAfterSeconds;
-    const waitText = wait && wait > 0 ? `约 ${wait} 秒后` : "稍后";
+  if (c.category === "rate_limited") {
     return {
       title: "请求被限流（不是故障，是保护）",
-      action: `${waitText}再试即可；批量刷新多个页面会同时触发限流，先等一个页面加载完。`,
+      action: `${waitPhrase(c.waitSeconds)}再试即可；批量刷新多个页面会同时触发限流，先等一个页面加载完。`,
     };
   }
-  if (status === 401 || status === 403 || code === "denied") {
+  if (c.category === "denied") {
     return {
       title: "这个租户没有访问该资源的权限",
       action: "换回有权限的租户，或让管理员在 DD_WEB_TENANTS / API Key 里放行；权限是按租户隔离的，不是页面出错。",
     };
   }
-  if (status === 404 || code === "not_found") {
+  if (c.category === "not_found") {
     return {
       title: "没找到该资源",
       action: "可能已被清理，或它属于别的租户（跨租户读取按设计返回 404，不返回 403）。回到列表重新选一条。",
     };
   }
-  if (status === 503) {
+  if (c.category === "unavailable") {
     return {
       title: "后端暂时不可用（启动中 / 只读降级 / 依赖未就绪）",
       action: "查 /readyz 看是哪个依赖没就绪；SQLite 单副本时写操作在只读阶段会被拒，等待就绪后重试。",
     };
   }
-  if (status !== undefined && status >= 500) {
+  if (c.category === "server_error") {
     return {
       title: "服务内部错误",
       action: "带上页面底部的 requestId / digest 找运维查日志——日志里有同一条 requestId 的完整上下文。",
