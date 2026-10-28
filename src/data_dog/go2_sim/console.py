@@ -70,6 +70,9 @@ body{
 .pan .ttl .tag{font-size:9.5px;letter-spacing:.08em;padding:2px 7px;
   border-radius:99px;background:rgba(168,85,247,.16);color:#d8b4fe;
   border:1px solid rgba(168,85,247,.3)}
+/* 数据面拒收时标签转红：`.row .bad` 只作用于行内，标签要单独一条。 */
+.pan .ttl .tag.bad{background:rgba(244,63,94,.16);color:#fda4af;
+  border-color:rgba(244,63,94,.35)}
 #tl{left:16px;top:16px;width:300px}
 #tr{right:16px;top:16px;width:274px}
 #bl{left:16px;bottom:16px;width:352px}
@@ -329,9 +332,14 @@ function renderState(s){
     b.classList.toggle('on', !s.paused && Number(b.dataset.speed) === s.speed);
   });
   const dp = s.data_plane || {};
+  // 被拒的条数必须显示出来：限流/解析失败会让"候选变少"看起来像
+  // "没有故障"，那是演示里最容易讲错的一句。有拒收就标黄。
+  const rejected = dp.rejected || 0;
   $('#planeTag').textContent = dp.available
-      ? `已接入 ${dp.normalized||0}` : '未接入';
+      ? `已接入 ${dp.normalized||0}${rejected ? ` / 拒 ${rejected}` : ''}`
+      : '未接入' + (dp.error ? '：' + dp.error : '');
   $('#planeTag').style.opacity = dp.available ? 1 : .45;
+  $('#planeTag').classList.toggle('bad', !!rejected);
 }
 
 function renderTelemetry(d){

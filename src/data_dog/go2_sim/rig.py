@@ -355,6 +355,21 @@ class Go2Sim:
                                           self._model.actuator_ctrlrange[a][1]))
             m.mj_step(self._model, d)
         self._T[:] = MOTOR_PARAMS["T_amb"]
+        # 关节以外子系统的状态**也必须复位**：它们的 SOC / 电池包温度 /
+        # 通信计数都只写在构造函数里，没有 setter。不复位的话，服务连续跑
+        # 几分钟后 `/api/reset` 换姿态，电池仍然带着上一局耗掉的电量和升到
+        # 57°C 的包温，于是"正常工况"一上来就报 POWER_SOC_LOW +
+        # BATTERY_OVERHEAT——实测就是这么发现的（soc=0）。
+        #
+        # 直接重建实例而不是逐字段清零：这些类的状态都集中在 `__init__`，
+        # 新增字段时重建能自动覆盖，漏改的风险比手写一份清零列表小。
+        self._battery = BatteryModel(seed=self.seed)
+        self._imu = ImuModel(seed=self.seed + 1)
+        self._thermal = ThermalState()
+        self._system = SystemState()
+        self._lost_count = 0
+        self._crc_fails = 0
+        self._last = None
         self._t = 0.0
         self._steps = 0
         self._fell = False

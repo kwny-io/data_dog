@@ -58,6 +58,20 @@ class _PlaneSink:
     数据面本身（Gateway+Detector+CandidateBuilder）是纯内存可跑的，
     这里就地建一份，走的仍是同一条 `process_one` 链路——不是绕过。
 
+    **为什么要两条 DataPlane**（本文件最容易被误改的一处）
+    ------------------------------------------------------
+    一台设备只能有**一个**绑定。`CompatibilityResolver.resolve()` 只按
+    vendor/model/firmware/protocol 匹配、**不看部件**，匹配到 2 个就
+    `ambiguous` 失败关闭（`resolver.py:94`，被
+    `test_resolver_unique_no_match_ambiguous` 钉住）。所以电机算子和
+    子系统算子**不能注册进同一个 resolver**——实测会得到
+    `{'ok': False, 'error': 'ambiguous', ...}`，整台设备的候选全灭。
+
+    这里改为**按信封的 `component_hint` 分流到两条独立的 DataPlane**：每条
+    各自一个 resolver、各自一个绑定，同一条链路上的网关/解析/窗口/检测一步
+    不少。分流在数据面**之前**做，所以不是绕过 resolver，而是给两个不同
+    部件族各配一个正确的 resolver。
+
     ⚠ 与生产路径的差异（必须知道）：生产里事件经 MQTT/HTTP 进入**另一个进程**
     的 `ServiceState`，候选落 DB。这里候选只在内存，进程退出即失。
 
@@ -67,28 +81,57 @@ class _PlaneSink:
 
     def __init__(self, *, device_sn: str = DEMO_DEVICE,
                  tenant_id: str = DEMO_TENANT) -> None:
-        from ..data_plane.p2_demo import _detector_config
-        from ..data_plane.pipeline import DataPlane, build_demo_resolver
-
         self.auth = {"tenant_id": tenant_id, "device_sn": device_sn}
         self._lock = threading.Lock()
         self.error: str | None = None
-        self.plane = None
-        try:
-            cfg = _detector_config()
-            self.plane = DataPlane(build_demo_resolver(cfg))
-        except Exception as e:              # noqa: BLE001
-            # 缺厂商文档时不致命：页面照常跑，只是不产候选。如实报出来。
-            self.error = f"{type(e).__name__}: {e}"
+        self._planes: list[tuple[str, Any, tuple[str, ...]]] = []
+        self._build_planes()
         self._candidates: list[dict[str, Any]] = []
         self._normalized = 0
         self._rejected = 0
 
+    def _build_planes(self) -> None:
+        """建两条数据面，并把各自的部件归属记下来。
+
+        任一条建不起来都**不致命**：另一条照跑，页面上如实显示哪条缺了。
+        早期版本是一条建不起来就整体不产候选，一个子系统的问题会连带
+        把电机那条也打死。
+        """
+        from ..data_plane.p2_demo import _detector_config
+        from ..data_plane.pipeline import DataPlane, build_demo_resolver
+        from .emit import DEMO_COMPONENT, SUBSYSTEM_SOURCES
+        from .subsystem_operator import build_subsystem_operator
+
+        errs: list[str] = []
+        for label, factory, comps in (
+            ("motor", _detector_config, (DEMO_COMPONENT,)),
+            ("subsystem", build_subsystem_operator, tuple(SUBSYSTEM_SOURCES)),
+        ):
+            try:
+                self._planes.append((label, DataPlane(build_demo_resolver(factory())), comps))
+            except Exception as e:          # noqa: BLE001
+                errs.append(f"{label}: {type(e).__name__}: {e}")
+        if errs:
+            self.error = "; ".join(errs)
+
+    def _route(self, env: dict[str, Any]):
+        hint = env.get("component_hint")
+        for _label, plane, comps in self._planes:
+            if hint in comps:
+                return plane
+        return None
+
     def push(self, ev: SimEvent) -> None:
-        if self.plane is None:
+        if not self._planes:
             return
+        env = dict(ev.env)
+        plane = self._route(env)
+        if plane is None:
+            # 没挂算子的部件：照旧送进电机那条，让它按原有语义被解析/拒绝，
+            # 而不是在这里静默吞掉——吞掉会让"为什么没有候选"变成谜。
+            plane = self._planes[0][1]
         with self._lock:
-            norm, err = self.plane.process_one(dict(ev.env), self.auth)
+            norm, err = plane.process_one(env, self.auth)
             if err is not None:
                 self._rejected += 1
                 return
@@ -100,7 +143,10 @@ class _PlaneSink:
                 self._collect()
 
     def _collect(self) -> None:
-        for c in self.plane.builder.build():
+        built: list[Any] = []
+        for _label, plane, _comps in self._planes:
+            built.extend(plane.builder.build())
+        for c in built:
             d = c.to_dict() if hasattr(c, "to_dict") else dict(c.__dict__)
             # 去重：同一 (component, 窗口起点) 只保留最新的那条
             key = (d.get("component_ref"), d.get("window_start") or
@@ -116,6 +162,21 @@ class _PlaneSink:
                                                 d.get("occurred_at") or ""),
                               reverse=True)
 
+    def reset(self) -> None:
+        """重开一局时把这局的结果清干净。
+
+        **不清会把演示讲错**：`/api/reset` 只重建仿真，候选列表还挂着上一局
+        的条目，于是"刚 reset 到 normal，页面上仍有 8 条候选"——观众会以为
+        正常工况就在报故障。数据面也一并重建：窗口缓冲、去重键、限流令牌
+        都按"一台设备的一次运行"来算，跨局累积会让窗口里混进上一局的点。
+        """
+        with self._lock:
+            self._candidates.clear()
+            self._normalized = 0
+            self._rejected = 0
+            self._planes.clear()
+            self._build_planes()
+
     def candidates(self, limit: int = 20) -> list[dict[str, Any]]:
         with self._lock:
             self._collect()
@@ -123,18 +184,21 @@ class _PlaneSink:
 
     def stats(self) -> dict[str, Any]:
         with self._lock:
+            planes = {}
+            for label, plane, comps in self._planes:
+                planes[label] = {
+                    "components": list(comps),
+                    "ingested": plane.stats.ingested,
+                    "resolved": plane.stats.resolved,
+                    "rejected": plane.stats.rejected,
+                    "rejected_by_reason": dict(plane.stats.rejected_by_reason),
+                }
             return {
-                "available": self.plane is not None,
+                "available": bool(self._planes),
                 "error": self.error,
                 "normalized": self._normalized,
                 "rejected": self._rejected,
-                **({} if self.plane is None else {
-                    "plane_ingested": self.plane.stats.ingested,
-                    "plane_resolved": self.plane.stats.resolved,
-                    "plane_rejected": self.plane.stats.rejected,
-                    "plane_rejected_by_reason":
-                        dict(self.plane.stats.rejected_by_reason),
-                }),
+                "planes": planes,
             }
 
 
@@ -301,6 +365,8 @@ def create_app(*, config: SimConfig | None = None,
             raise HTTPException(400, f"未知姿态 {body.posture!r}")
         changes = {k: v for k, v in body.model_dump().items() if v is not None}
         session.reconfigure(**changes)
+        # 候选与数据面窗口必须跟着重开，否则新一局会顶着上一局的故障列表。
+        sink.reset()
         return {"ok": True, **changes}
 
     @app.get("/", response_class=HTMLResponse)

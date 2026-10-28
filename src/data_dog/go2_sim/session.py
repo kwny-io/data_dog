@@ -34,7 +34,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from .emit import envelope
+from .emit import envelope, subsystem_envelopes
 from .rig import Go2Sim, SimConfig, Telemetry
 
 # 可选倍率。上限 15x 的依据是实测**空闲机器**上的吞吐：
@@ -83,9 +83,13 @@ class SimSession:
                  history: int = 600) -> None:
         self.sim = Go2Sim(config)
         self._on_event = on_event
-        # 投递抽样：100Hz 全发会让 4 个部件 × 100 = 400 msg/s，
-        # 既撞网关限流又没必要（温度曲线的信息在 10Hz 完全够）。
-        # 仿真本身仍是 100Hz——抽样只影响"发出去多少"，不影响物理。
+        # 投递抽样：物理仍跑 100Hz，但每秒只挑 `publish_hz` 个点发出去。
+        # 每个点发 **5 条信封**（1 电机 + 电池/IMU/散热/整机 4 个子系统），
+        # 所以 10Hz 投递 = 50 条/s，网关默认 200/s 有余量。
+        # 温度/压力曲线的信息在 10Hz 完全够，100Hz 全发纯属浪费带宽。
+        #
+        # **这是墙钟频率，不是仿真频率**（见 `next_pub_wall`）：不管 1x 还是
+        # 15x，都是每秒 10 次。若按仿真时刻算，15x 下会变成 750 条/s 打穿限流。
         self.publish_hz = max(0.5, float(publish_hz))
         self._pub_every = max(1, int(round(100.0 / self.publish_hz)))
         self.speed = 1.0
@@ -104,6 +108,11 @@ class SimSession:
         self._frame_error: str | None = None
         self._stop = threading.Event()
         self._wake = threading.Event()
+        # reset 与 step 的互斥锁：`sim.reset()` 会换掉 MjData，而仿真线程
+        # 可能正拿旧 data 步进/编码。不加锁就会把上一局的遥测投进新一局。
+        self._sim_lock = threading.Lock()
+        # reset 时置位，让 `_run` 把墙钟/仿真时钟基准一起归零
+        self._reset_clock = threading.Event()
         self._thread: threading.Thread | None = None
         self.stats = SessionStats()
         self._seq = 0
@@ -154,13 +163,23 @@ class SimSession:
         self._wake.set()
 
     def inject(self, key: str, **kw: Any) -> None:
-        self.sim.inject(key, **kw)
+        # 注入改的是故障状态表，与仿真线程的 step 互斥（见 reconfigure）。
+        with self._sim_lock:
+            self.sim.inject(key, **kw)
 
     def reconfigure(self, **changes: Any) -> None:
         """改姿态/严重度等需要重建环境的项——**会复位**，与 inject 不同。
 
         姿态改的是关节目标角语义，运行中切换等于换了一台机器摆的姿势，
         物理状态没有连续性可言，所以必须重建（并如实告知调用方）。
+
+        **必须和仿真线程互斥**：`sim.reset()` 换掉内部的 MjData，
+        而仿真线程可能正拿着旧的 data 在 `step()` 或编码信封。实测到的
+        现象是 reset 之后页面上还会冒出上一局的候选（窗口时间是 reset
+        之前的 t），因为旧 data 的遥测在 reset 之后才被投递出去。
+        这里用 `_sim_lock` 把"重建"和"步进"隔开；顺带把投递基准与
+        会话起点一起重置，否则 `actual_speed` 会拿重开后的 t 除以
+        进程启动以来的总墙钟，显示成 0.02x（实际 4.6x）。
         """
         cfg = self.sim.config
         merged = SimConfig(
@@ -172,10 +191,13 @@ class SimSession:
             fault_duration_s=changes.get("fault_duration_s", cfg.fault_duration_s),
             thermal_scale=changes.get("thermal_scale", cfg.thermal_scale),
         )
-        self.sim.reset(merged)
-        with self._hist_lock:
-            self._hist.clear()
-        self._seq = 0
+        with self._sim_lock:
+            self.sim.reset(merged)
+            with self._hist_lock:
+                self._hist.clear()
+            self._seq = 0
+            self._t0 = time.monotonic()
+            self._reset_clock.set()
 
     # ---------------------------------------------------------------- 读取
     # ---------------------------------------------------------------- 画面
@@ -259,6 +281,45 @@ class SimSession:
             self._frame_t = float(t)
             self._frame_error = None
 
+    # 一次批量步进里最多补发多少条。守住上限是为了让"卡了一下"不会
+    # 紧接着变成一阵暴雨——那比掉一帧更容易打穿网关限流。
+    _MAX_PUB_PER_CHUNK = 4
+
+    def _chunk_index_at(self, slot_wall: float, sim_before: float, n: int,
+                        t_wall0: float) -> int:
+        """这个墙钟格子里**应有的**仿真时刻，落在这一批的第几个遥测点。
+
+        墙钟 → 仿真时刻的换算是这个循环的核心不变量：
+        `sim_t = (wall - t_wall0) * speed`。这里只是它的逆运算，
+        用来把"该发的那一格"落回具体的遥测点，而不是一律取批尾——
+        取批尾会让 15x 下的所有信封挤在同一小段时间里。
+        """
+        sim_at = (slot_wall - t_wall0) * self.speed
+        # 相对这批起点偏移多少个 100Hz 遥测点
+        idx = int(round((sim_at - sim_before) * 100.0))
+        return max(0, min(n - 1, idx))
+
+    def _publish(self, t_last: Telemetry) -> None:
+        """一个遥测点 → 一整套信封，逐条投递给下游。异常不许静默。"""
+        try:
+            env = envelope(t_last, sequence=self._seq)
+            batch = [env] if env is not None else []
+            # 非电机子系统（电池/IMU/散热/整机）：不接进来，检测器只有
+            # 关节温度一条线可看，B2/B3 那 10 条故障永远不可能被报出——
+            # 不是规则没写，是数据根本没离开仿真器。
+            batch += subsystem_envelopes(t_last, sequence=self._seq)
+            for one in batch:
+                self._on_event(SimEvent(t=float(t_last.t), env=one))
+                self.stats.published += 1
+        except Exception as e:                    # noqa: BLE001
+            # **不许静默**：这里曾经只有一句 `dropped += 1`，什么原因都不留。
+            # 结果是页面照常跑、温度照常涨、候选一直是 0，而"多少帧在哪一步
+            # 消失"完全看不见——排查时只能猜。记首个原因 + 计数。
+            self.stats.dropped += 1
+            if self.stats.dropped == 1 or self.stats.dropped % 100 == 0:
+                self.stats.drop_reason = (
+                    f"{type(e).__name__}: {e} (共 {self.stats.dropped} 帧)")
+
     def history(self, n: int = 200) -> list[Telemetry]:
         with self._hist_lock:
             items = list(self._hist)
@@ -302,10 +363,33 @@ class SimSession:
     def _run(self) -> None:
         t_wall0 = time.monotonic()
         sim_done = 0.0          # 已推进的仿真时间（秒）
-        next_pub = 0.0          # 下一次投递的仿真时刻
+        # 下一次投递的**墙钟**时刻（time.monotonic 绝对值）。
+        #
+        # 早期这里记的是仿真时刻，`next_pub += 1/publish_hz` 加的是仿真秒。
+        # 那样 `publish_hz` 在变速下就变成"每仿真秒多少条"：1x 是 10Hz，
+        # 15x 就是 150Hz —— 而每条遥测要发 5 个部件的信封（电机 + 电池 +
+        # IMU + 散热 + 整机），15x 下就是 750 条/秒。网关令牌桶是 200/s、
+        # burst 400（`gateway.py:61`），超出的部分被静默判为 rate_limited，
+        # 表现成"倍率越高候选越少"，而且看不出原因。
+        #
+        # 投递频率本来就该跟**墙钟**走：下游是网络和消费者，它们感受的是
+        # 每秒多少条，不是每仿真秒多少条。事件时间仍按仿真时钟写进信封
+        # （`emit` 的 occurred_at），两件事不该混。
+        #
+        # 代价要讲清楚：15x 下每条信封之间跨 1.5 仿真秒，窗口里点数变少
+        # （10 秒窗口只有 ~7 个点而不是 100 个）。那是数据密度本来就低，
+        # 不是这里丢数据——真要 15x 下也密，得调高 publish_hz 并同步调高
+        # 网关限流，那是部署决策。
+        next_pub_wall = time.monotonic()
 
         try:
             while not self._stop.is_set():
+                # 上一轮 reset 过 → 时钟基准全部归零，别把旧账背到新一局。
+                if self._reset_clock.is_set():
+                    self._reset_clock.clear()
+                    t_wall0 = time.monotonic()
+                    sim_done = 0.0
+                    next_pub_wall = time.monotonic()
                 if self.paused:
                     # 暂停期间墙钟仍在走，必须把基准一起前移，否则恢复瞬间
                     # 会认为"欠了几十秒"，一口气补跑（看起来像跳帧）。
@@ -314,6 +398,8 @@ class SimSession:
                     self._wake.wait(0.2)
                     self._wake.clear()
                     t_wall0 = time.monotonic() - sim_done / max(self.speed, 1e-6)
+                    # 投递基准也跟着走，否则恢复瞬间会认为"欠了一整段暂停"。
+                    next_pub_wall = time.monotonic() + 1.0 / self.publish_hz
                     continue
 
                 # 本 tick 应推进到的仿真时刻
@@ -330,38 +416,42 @@ class SimSession:
                         sim_done += lost / 100.0
                         n = self._MAX_STEPS_PER_TICK
                     if n > 0:
-                        chunk = self.sim.step(n)
+                        sim_before = sim_done
+                        # 与 `reconfigure` 的 reset 互斥：否则可能拿被换掉的
+                        # MjData 步进，把上一局的读数投进新一局。
+                        with self._sim_lock:
+                            chunk = self.sim.step(n)
                         self.stats.steps += n
                         sim_done += n / 100.0
                         with self._hist_lock:
                             self._hist.extend(chunk)
                         self._render_if_due()
 
-                        # 投递：按**仿真时刻**节流，不按步数——
-                        # 步数节流在变速时会跟着变频率（15x 就成了 150Hz）。
+                        # 投递：按**墙钟**格子从这一批遥测点里挑，见
+                        # `next_pub_wall` 的说明。
+                        #
+                        # 一次迭代里可能跨过好几个 1/publish_hz 的格子
+                        # （批量步进时一批就是 0.5 仿真秒），也可能一个都
+                        # 不到。所以不能"每轮最多发一条"，要在这一批里
+                        # 按格子挑点——否则实际投递频率会掉到 publish_hz
+                        # 以下（实测 15x 时只剩 6 条/s 而不是 10 条/s）。
                         if chunk and self._on_event is not None:
-                            t_last = chunk[-1]
-                            if float(t_last.t) >= next_pub:
-                                next_pub = float(t_last.t) + 1.0 / self.publish_hz
+                            now_wall = time.monotonic()
+                            slots = 0
+                            while (next_pub_wall <= now_wall
+                                   and slots < self._MAX_PUB_PER_CHUNK):
+                                slots += 1
+                                # 不写成 `now + 1/hz`：那样每轮都被抬高一点点，
+                                # 实际频率会漂低。按"该到点的那一格"推进。
+                                slot_wall = next_pub_wall
+                                next_pub_wall += 1.0 / self.publish_hz
+                                idx = self._chunk_index_at(
+                                    slot_wall, sim_before, n, t_wall0)
                                 self._seq += 1
-                                try:
-                                    env = envelope(t_last, sequence=self._seq)
-                                    if env is not None:
-                                        self._on_event(SimEvent(t=float(t_last.t),
-                                                                env=env))
-                                        self.stats.published += 1
-                                except Exception as e:    # noqa: BLE001
-                                    # **不许静默**：这里曾经只有一句
-                                    # `dropped += 1`，什么原因都不留。结果是
-                                    # 页面照常跑、温度照常涨、候选一直是 0，
-                                    # 而"多少帧在哪一步消失"完全看不见——
-                                    # 排查时只能猜。记首个原因 + 计数。
-                                    self.stats.dropped += 1
-                                    if self.stats.dropped == 1 or \
-                                            self.stats.dropped % 100 == 0:
-                                        self.stats.drop_reason = (
-                                            f"{type(e).__name__}: {e}"
-                                            f" (共 {self.stats.dropped} 帧)")
+                                self._publish(chunk[idx])
+                            if next_pub_wall < now_wall - 1.0:
+                                # 长时间卡顿后别攒一堆欠账一次性补发
+                                next_pub_wall = now_wall + 1.0 / self.publish_hz
                 elif due < -0.5:
                     # 倍率被调低后 target 会落后于已推进量，重设基准
                     t_wall0 = time.monotonic() - sim_done / max(self.speed, 1e-6)
