@@ -23,43 +23,113 @@ from .pipeline import DeclarativeRule, Fixture, Operator, replay_all
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
+# 窗口类判据的**最小样本门槛**：不足 8 条就不做趋势/占比/丢包判断。
+# 这不是调参，是语义：一条样本算不出斜率、算不出"持续占比"、也算不出丢包率。
+# 它同时守住"启动首事件不得误报"——既有演示场景都是单事件，因此天然不触发。
+MIN_WINDOW_SAMPLES = 8
+
 
 def cleaned_dir() -> Path:
     """厂商清洗后文档目录（运行时解析，尊重 DD_VENDOR_DOCS 覆盖）。"""
     return vendor_docs_dir() / "unitree" / "cleaned"
 
 
+def _win(expr: str, *, min_samples: int = MIN_WINDOW_SAMPLES) -> str:
+    """给窗口判据套上"样本足够"前置条件（降级语义的唯一入口，别在各处手写）。"""
+    return f"window.samples() >= {min_samples} and ({expr})"
+
+
+def _pick_field(pkg, name: str, prefer: str = ""):
+    """按名字取字段规格；同名跨结构体时**必须**按结构体挑，不能取"第一个出现"。
+
+    真实缺陷：`temperature` 同时出现在 IMUState 与 MotorState，`current` 只在
+    BmsState。按名字取首个会让电机算子拿 IMU 的温度、电池的电流。
+    """
+    cands = [f for f in pkg.fields if f.name == name]
+    if not cands:
+        return None
+    for f in cands:
+        if f.structure == prefer:
+            return f
+    return cands[0] if len(cands) == 1 else None
+
+
+def _field(pkg, name: str, prefer: str) -> dict | None:
+    f = _pick_field(pkg, name, prefer)
+    if f is None:
+        return None
+    return {
+        "name": f.name, "source": f.name, "type": f.type, "unit": f.unit,
+        "optional": False,
+        # 结构体必须带出去：下游 FieldSpec 靠它区分"电机温度"与"IMU 温度"。
+        "structure": f.structure,
+        "provenance": "verified",     # 字段本身在厂商 IDL 里明写
+    }
+
+
 def build_motor_operator(pkg) -> Operator:
     """从知识包装配 front_left_hip 电机检测算子。
 
-    - fields：来自 IDL 字段规格（真实字段）
+    - fields：来自 IDL 字段规格（真实字段，**按结构体挑**，不按名字取首个）
     - rules（声明式）：**只用有权威出处的数值**——电机温度保护阈值 90°C 来自官方开源协议头
       （unitree_actuator_sdk，BSD-3），标记为厂商事实。
-    - dsl_rules：多字段窗口 + 位运算；其中 75°C warning 阈**无权威出处**，显式标为项目假设。
+    - dsl_rules：多字段窗口 + 位运算。**除 90°C 外没有任何厂商数值阈值**，所以每条阈值型
+      判据都显式标 `provenance="assumption"`、message 里写明"项目假设"。
+
+    规则按子系统分组（A 关节/电机、B 热、E 通信、F 整机负载），见 `_RULES_BY_SUBSYSTEM`。
+    分不出物理上真正的故障类型时**不硬凑规则**——那些列在报告的"需采集侧补字段"清单里。
     """
-    fields = [
-        {"name": f.name, "source": f.name, "type": f.type, "unit": f.unit,
-         "optional": False}
-        for f in pkg.fields if f.name in
-        ("mode", "temperature", "current", "dq", "tau_est", "lost", "q")
-    ]
-    seen = set()
-    uniq_fields = []
-    for f in fields:
-        if f["name"] in seen:
+    # 电机自身的字段：只从 MotorState 取。同名跨结构体时必须按结构体挑：
+    # `temperature` 在 IMUState 里也有，`mode` 在 SportModeState 里也有。
+    uniq_fields: list[dict] = []
+    for name in ("mode", "temperature", "dq", "tau_est", "lost", "q"):
+        f = _field(pkg, name, "MotorState")
+        if f is not None:
+            uniq_fields.append(f)
+
+    # `current` 是**特例，必须写明白**：厂商 MotorState IDL **没有**电机电流字段
+    # （IDL 里唯一的 current 是 BmsState 的电池总线电流，int32/ampere）。
+    # 本项目 motor-log-v2 载荷里的 current 是**采集侧派生的每关节电机电流**，
+    # 属于项目自定义协议——所以它标 assumption，且不挂任何厂商结构体。
+    uniq_fields.append({
+        "name": "current", "source": "current", "type": "float32",
+        "unit": "ampere", "optional": False, "structure": "",
+        "provenance": "assumption",
+    })
+
+    # C / 电源：BmsState 的**标量**字段。这些名字在电机载荷里不存在，可以安全并入
+    # 同一个算子（数组型字段 bq_ntc / mcu_ntc / cell_vol 进不来——见报告"需采集侧
+    # 补字段"：`_coerce` 不展平数组，窗口也只收标量）。
+    # **命名冲突（已实测踩到）**：BmsState 的 `current` 是**电池总线电流**，与载荷里
+    # 表示每关节电机电流的 `current` 同名不同义。若把总线电流也声明成 source="current"，
+    # Parser 会把**电机电流的值**（实测 95A）写进 bms_current——电压/电流类判据会全错。
+    # 因此总线电流不在此处映射，列为"需采集侧补字段"：采集侧必须用独立键名
+    # （如 `bus_current`）上报，才谈得上判据。
+    for src, std in (("soc", "bms_soc"), ("status", "bms_status"),
+                     ("cycle", "bms_cycle")):
+        f = _pick_field(pkg, src, "BmsState")
+        if f is None:
             continue
-        seen.add(f["name"])
-        uniq_fields.append(f)
+        uniq_fields.append({
+            "name": std, "source": src, "type": f.type, "unit": f.unit,
+            "optional": True,      # 电机帧里没有 BMS 字段是正常的，不能因此判缺字段
+            "structure": "BmsState", "provenance": "verified",
+        })
 
     # 从知识包取**有出处**的电机温度保护阈值（官方开源协议头）
     protect = next((s for s in pkg.numeric_specs
                     if s.key == "motor_temp_protect_c"), None)
     protect_c = protect.value if protect else None
     provenance = (
-        "IDL fields from unitree_sdk2 MotorState IDL; "
+        "IDL fields from unitree_sdk2 MotorState IDL (structure-qualified); "
         f"temperature protection threshold {protect_c}°C VERIFIED from "
         "unitree_actuator_sdk/motor_msg_GO-M8010-6.h (BSD-3-Clause, official); "
-        "75°C warning threshold is a PROJECT ASSUMPTION (no source found)"
+        "MError bit meanings VERIFIED from the same header; "
+        "per-joint motor CURRENT is NOT a MotorState IDL field — it comes from the "
+        "project log protocol (IDL only has BmsState bus current) → ASSUMPTION; "
+        "ALL other numeric thresholds (75/45/50/90 A, 0.25 °C/s, 0.95 coverage, "
+        "1.35x/1.2x/1.5x baseline ratios, 3.0 rad encoder step) are PROJECT "
+        "ASSUMPTIONS — no vendor document states any of them"
     )
 
     rules = [
@@ -71,6 +141,8 @@ def build_motor_operator(pkg) -> Operator:
             field="temperature", operator="lt", value=0.0,
             severity_hint="info",
             message="温度字段为负值（载荷或解析异常，非厂商阈值）",
+            subsystem="B",
+            provenance="assumption",      # uint8 温度技术上可为负的"无意义值"；判据是项目定的
         ),
     ]
     if protect_c is not None:
@@ -79,21 +151,153 @@ def build_motor_operator(pkg) -> Operator:
             field="temperature", operator="ge", value=float(protect_c),
             severity_hint="critical",
             message=f"电机温度达 {protect_c}°C 触发温度保护（厂商开源协议头，verified）",
+            subsystem="B",
+            provenance="verified",
         ))
 
+    # C / 电源：电量过低。BmsState.soc 是 uint8 百分比——**字段语义 verified**，
+    # 但"多少算低"厂商没写，门槛是项目假设。
+    if any(f["name"] == "bms_soc" for f in uniq_fields):
+        rules.append(DeclarativeRule(
+            rule_id="POWER_SOC_LOW",
+            field="bms_soc", operator="le", value=15.0,
+            severity_hint="warning",
+            message="电池电量 ≤15%，需尽快返航充电（字段 BmsState.soc 见 IDL；门槛为项目假设）",
+            subsystem="C",
+            provenance="assumption",
+        ))
+
+    # ------------------------------------------------------------------ DSL 规则
+    # 分组：A=关节/电机，B=热，E=通信，F=整机负载。
+    # 窗口类判据一律带 `window.samples() >= 8` 前置：一条样本算不出斜率/占比/丢包率，
+    # 不足门槛就**不判**（宁可漏报），而不是拿 1 条样本冒充"窗口"。
     dsl_rules = [
+        # ==== 原有两条：**逐字节保留**（改它们就等于改既有规则语义，不是增量）====
         {
             "rule_id": "MOTOR_TEMP_RISE_UNDER_LOAD",
+            "subsystem": "B",
             "when": ("window.mean(temperature) >= 75 and "
                      "window.mean(current) <= 1.2 * window.baseline(current)"),
             "severity_hint": "warning",
             "message": "负载未显著上升但温度持续偏高（项目假设阈值 75°C，非厂商明写）",
+            "field": "temperature",
+            "provenance": "assumption",
         },
         {
             "rule_id": "MOTOR_MODE_FLAG_SET",
+            "subsystem": "A",
             "when": "(mode & 0x04) != 0",
             "severity_hint": "critical",
-            "message": "电机 mode 第 2 位置位（位语义为项目假设，IDL 未给枚举含义）",
+            "message": ("电机 mode 第 2 位置位（MError bit2=编码器故障语义 verified 于协议头；"
+                        "本 operator 的 mode 位含义映射为项目假设）"),
+            "field": "mode",
+            "provenance": "assumption",
+        },
+
+        # ==== A / 关节电机：堵转（F1）====
+        # 判据用"**持续**饱和占比"而不是峰值：实测峰值在正常与故障间重叠（正常 max≈18A
+        # 也有尖峰），而 ≥90A 的占空比在堵转是 1.000、其余全部 0.000。
+        {
+            "rule_id": "MOTOR_STALL_SUSTAINED",
+            "subsystem": "A",
+            "when": _win("window.span() >= 5.0 and "
+                         'window.count(current, ">=", 90) >= 0.5 * window.samples()'),
+            "severity_hint": "critical",
+            "message": ("电流在 ≥5s 窗口内有一半以上时间贴近堵转电流（项目假设：90A≈堵转扭矩"
+                        "23.7N·m÷kt 0.25 的 95%；厂商文档未给电流阈值）"),
+            "field": "current",
+            "provenance": "assumption",
+        },
+
+        # ==== B / 热：热退化（F2）====
+        # 与 F5 的区别是**负载量级**，不是"温升有无"——两者都会让电流上升（见报告）。
+        {
+            "rule_id": "MOTOR_TEMP_DEGRADE",
+            "subsystem": "B",
+            "when": _win("window.mean(temperature) >= 40 and "
+                         "window.slope(temperature) >= 0.25 and "
+                         "window.mean(current) < 50"),
+            "severity_hint": "warning",
+            "message": ("温度持续爬升且电流仍在中载区间（项目假设：40°C / 0.25°C·s⁻¹ / 50A；"
+                        "厂商文档未给热退化判据）"),
+            "field": "temperature",
+            "provenance": "assumption",
+        },
+
+        # ==== E / 通信：丢包（F3，观测侧）====
+        # 窗口只收有限数值，丢包样本不留占位 → 字段有效率下降就是丢包的可观测信号。
+        {
+            "rule_id": "COMM_PACKET_LOSS",
+            "subsystem": "E",
+            "when": _win("window.coverage(temperature) < 0.95"),
+            "severity_hint": "warning",
+            "message": ("窗口内该部件温度有效率低于 95%（项目假设阈值；厂商未给丢包容忍度）"),
+            "field": "temperature",
+            "provenance": "assumption",
+        },
+
+        # ==== E / 通信：丢包（F3，固件侧）====
+        # `lost` 是 MotorState 里的丢包计数器（IDL 字段 verified）。
+        # "增长即异常"是定义性的弱判据 → 仍按项目假设标注，不冒充厂商阈值。
+        {
+            "rule_id": "MOTOR_LOST_COUNTER_RISING",
+            "subsystem": "E",
+            "when": _win("window.delta(lost) > 0"),
+            "severity_hint": "warning",
+            "message": ("电机 lost 丢包计数器在窗口内增长（字段语义 verified；"
+                        "'增长即异常'判据为项目假设）"),
+            "field": "lost",
+            "provenance": "assumption",
+        },
+
+        # ==== A / 关节电机：电流零漂/偏置（F4）====
+        # 关键区分量是 **tau_est 不跟着涨**：实测 I/base=1.46 而 tau/base=1.07，
+        # 真实负载（F5：5.56/5.67、F2：2.94/2.99）两者同步。
+        {
+            "rule_id": "MOTOR_CURRENT_BIAS",
+            "subsystem": "A",
+            # 判据用**绝对残差** I − τ/kt，不用比值。
+            # 零漂是恒定加法偏置（实测 +5A）：轻载 13A 时占 38%、重载 21A 时只占 24%，
+            # 而正常负载本身就有 13~21A 的摆动——比值门槛要么轻载时把正常波动当故障，
+            # 要么重载时漏掉。绝对残差对负载不敏感：正常时 I≈τ/kt 恒成立，偏置直接露出来。
+            # 因线上没有转速，无法区分"传感器偏置"与"库仑摩擦/铁损"，
+            # 故按物理不变量 I ≈ τ/kt 建模，只认电流与扭矩间的**恒定错位**。
+            "when": _win("window.mean(current) - window.mean(tau_est) / 0.25 >= 4.0"),
+            "severity_hint": "warning",
+            "message": ("电流与估计扭矩出现恒定错位（I − τ/kt ≥ 4A），疑似电流传感零漂"
+                        "（项目假设：kt=0.25 N·m/A 与 4A 门槛均无厂商出处）"),
+            "field": "current",
+            "provenance": "assumption",
+        },
+
+        # ==== F / 整机负载：负载骤增（F5）====
+        # 用 max(current)<90 把"持续堵转"排除在负载骤增之外（堵转是另一条规则的事）。
+        {
+            "rule_id": "MOTOR_LOAD_SPIKE",
+            "subsystem": "F",
+            "when": _win("window.mean(current) >= 50 and window.max(current) < 90 and "
+                         "window.mean(tau_est) >= 1.5 * window.baseline(tau_est)"),
+            "severity_hint": "warning",
+            "message": ("电流与估计扭矩同步大幅上升、未达堵转饱和，判定为外部负载骤增"
+                        "（项目假设：50A / 1.5×基线；厂商未给负载阈值）"),
+            "field": "tau_est",
+            "provenance": "assumption",
+        },
+
+        # ==== A / 关节电机：编码器跳变 ====
+        # max_step 的物理含义依赖采样率，所以先用 span 把采样率**锁到 ≥50Hz**：
+        # 低于这个速率，"单步 3rad"可能是真实的高角速度而不是编码器故障。
+        {
+            "rule_id": "MOTOR_ENCODER_JUMP",
+            "subsystem": "A",
+            "when": _win("window.samples() / window.span() >= 50 and "
+                         "window.max_step(q) >= 3.0"),
+            "severity_hint": "critical",
+            "message": ("≥50Hz 采样下关节角单步跳变 ≥3rad，超出关节物理角速度上限，"
+                        "疑编码器故障（项目假设阈值；更强的判据需 q 与 q_raw 对比，"
+                        "见'需采集侧补字段'清单）"),
+            "field": "q",
+            "provenance": "assumption",
         },
     ]
 
@@ -107,7 +311,8 @@ def build_motor_operator(pkg) -> Operator:
         dsl_rules=dsl_rules,
         generator_provenance=provenance,
         why_not_lower_layer=(
-            "多字段 + 窗口均值/基线比较无法用单字段阈值表达；仍未到 WASM（无需自定义协议）"
+            "多字段 + 窗口均值/斜率/计数/基线比较无法用单字段阈值表达；"
+            "仍未到 WASM（无需自定义协议）"
         ),
     )
 

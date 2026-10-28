@@ -90,19 +90,112 @@ class StatusCodeNormalizer:
 
 # ---------------------------------------------------------------- Enricher
 
+# 在线基线的三个常数（都是**项目假设**，非厂商规格）：
+#   WARMUP：前 N 个样本用简单均值建基线，之后才对外开放（少于 N 个 → 基线不可用）；
+#   TAU   ：此后按时间常数缓慢跟踪（秒）。故障窗是分钟级，TAU 取 600s 使一次
+#           60s 的故障最多把基线拖动 ~9.5%，既跟得上季节/装配漂移，又不会把故障
+#           本身学成"正常"；
+#   MAX_A：单样本对基线的最大改动比例（无事件时间时按此固定步长），作为**投毒护栏**：
+#           任何一个畸形样本最多让基线移动 10%，不会被一条 1e9 直接带跑。
+_BASELINE_WARMUP = 5
+_BASELINE_TAU_S = 600.0
+_BASELINE_MAX_ALPHA = 0.1
+
+
 @dataclass
 class Enricher:
-    """补运行工况与同工况基线。基线按 (component, condition) 维护。"""
+    """补运行工况与同工况基线。基线按 (component, field, condition) 维护。
+
+    基线来源（在线，无需离线训练）：**同设备 + 同部件 + 同工况的短时滚动基线**。
+    逐样本以时间常数 TAU 缓慢跟随，前 WARMUP 个样本用均值冷启动。
+
+    为什么不是"同型号历史窗口平均"：在线热路径拿不到其它设备的样本，跨设备平均
+    会把个体差异（装配、负载史）抹平，反而更容易误判。同部件自身的近期基线是
+    唯一在本进程内可验证、可回溯的来源。
+
+    降级语义（**规则依赖它**）：
+      - 样本数 < WARMUP → `baseline_for` 返回 None → 依赖基线的规则**不命中**；
+      - 工况缺失 → 工况记为 "unknown"，只在 unknown 工况之间互比，不跨工况借用；
+      - 非数值/NaN/Inf → 丢弃且不计入样本数（畸形输入绝不能变成基线）。
+    """
     baselines: dict[str, float] = field(default_factory=dict)   # "comp|field|condition" -> 基线
+    warmup_samples: int = _BASELINE_WARMUP
+    tau_s: float = _BASELINE_TAU_S
+    max_alpha: float = _BASELINE_MAX_ALPHA
+    # key -> [value, n, last_at_s]；与 baselines 分开，因为未满 warmup 前不对外开放。
+    _state: dict[str, list[Any]] = field(default_factory=dict)
+    rejected_samples: dict[str, int] = field(default_factory=dict)
 
     def add_baseline(self, component: str, field_name: str, condition: str, value: float) -> None:
-        self.baselines[f"{component}|{field_name}|{condition}"] = value
+        """显式登记基线（例如从离线标定/运维配置注入）。会直接开放为可用。"""
+        self.baselines[f"{component}|{field_name}|{condition}"] = float(value)
 
     def baseline_for(self, component: str, field_name: str, condition: str) -> float | None:
         return self.baselines.get(f"{component}|{field_name}|{condition}")
 
     def condition_from(self, raw: dict[str, Any]) -> str:
+        """运行工况。缺失 → "unknown"：**只在 unknown 之间互比**，不跨工况借用基线。"""
         return str(raw.get("operating_condition") or "unknown")
+
+    def observe(self, component: str, field_name: str, condition: str,
+                value: Any, at_s: float | None = None) -> float | None:
+        """把一个观测值并入滚动基线，返回当前基线（未满 warmup 时返回 None）。"""
+        x = _as_finite(value)
+        if x is None:
+            self.rejected_samples["non_numeric"] = \
+                self.rejected_samples.get("non_numeric", 0) + 1
+            return None
+        key = f"{component}|{field_name}|{condition}"
+        st = self._state.get(key)
+        if st is None:
+            st = [x, 1, at_s]
+            self._state[key] = st
+        else:
+            cur, n, last_t = st
+            if n < self.warmup_samples:
+                cur = (cur * n + x) / (n + 1)      # 冷启动：均值
+                n += 1
+            else:
+                alpha = self.max_alpha
+                if at_s is not None and last_t is not None and at_s > last_t:
+                    import math
+                    alpha = min(self.max_alpha,
+                                1.0 - math.exp(-(at_s - last_t) / max(self.tau_s, 1e-9)))
+                cur = cur + (x - cur) * alpha
+            st[0], st[1] = cur, n
+            if at_s is not None:
+                st[2] = at_s
+        if st[1] >= self.warmup_samples:
+            self.baselines[key] = float(st[0])
+            return float(st[0])
+        return None
+
+    def observe_metrics(self, component: str, metrics: dict[str, Any],
+                        condition: str, at_s: float | None = None) -> None:
+        for name, val in metrics.items():
+            if name.startswith("_"):
+                continue                      # 内部字段（如 _merror）不进基线
+            self.observe(component, name, condition, val, at_s=at_s)
+
+    def snapshot(self, component: str, conditions_for_field: dict[str, str]
+                 ) -> dict[str, float]:
+        """{field: condition} → 当前可用基线快照（拿不到的不出现在结果里）。"""
+        out: dict[str, float] = {}
+        for fld, cond in conditions_for_field.items():
+            b = self.baseline_for(component, fld, cond)
+            if b is not None:
+                out[fld] = b
+        return out
+
+
+def _as_finite(value: Any) -> float | None:
+    """严格取有限数值：bool / 字符串 / NaN / ±Inf 一律视为"不是数"。"""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    x = float(value)
+    if x != x or x in (float("inf"), float("-inf")):
+        return None
+    return x
 
 
 # ---------------------------------------------------------------- Window
@@ -139,8 +232,14 @@ class WindowBuffer:
         self._seq += 1
         seq = self._seq
         t = float(occurred_at_s) if occurred_at_s is not None else float(seq)
-        clean = {k: float(v) for k, v in metrics.items()
-                 if not isinstance(v, bool) and isinstance(v, (int, float))}
+        # 只收**有限**数值：NaN/±Inf 一律按"该样本没有这个字段"处理。
+        # 否则一个 NaN 会让整个窗口的 mean/max 变成 NaN，后续比较全部为假——
+        # 于是窗口在故障期间静默失效（既不复位也不报警），比漏报更糟。
+        clean: dict[str, float] = {}
+        for k, v in metrics.items():
+            x = _as_finite(v)
+            if x is not None:
+                clean[k] = x
         buf = self._samples.setdefault(key, [])
         entry = (t, seq, clean)
         # 有序插入：找到第一个 (t, seq) 更大的位置（乱序事件插入到正确位置）。
@@ -156,6 +255,7 @@ class WindowBuffer:
             buf.pop(0)                      # 淘汰**事件时间最早**的样本
 
     def features(self, key: str) -> WindowFeature:
+        """窗口特征（mean/slope/last/max）。见 `series()` 关于缺样本的说明。"""
         buf = self._samples.get(key, [])
         series: dict[str, list[float]] = {}
         for _t, _seq, metrics in buf:
@@ -172,6 +272,55 @@ class WindowBuffer:
         f.count = max((len(v) for v in series.values()), default=0)
         return f
 
+    def series(self, key: str) -> dict[str, list[float]]:
+        """窗口内逐字段的**有序**取值序列（供 DSL 窗口函数与丢包率计算）。
+
+        缺样本语义（关键）：`push()` 只收数值，非数值/缺失字段**不会**留下占位。
+        所以某字段长度 < 该窗口的样本总数，就意味着那几条样本该字段缺失
+        （丢包/解析不出）。DSL 的 window.mean 等仍是"有效点上的聚合"——
+        与本方法一致，不会把缺失当 0（那会把丢包伪装成"电流为零"）。
+        """
+        buf = self._samples.get(key, [])
+        out: dict[str, list[float]] = {}
+        for _t, _seq, metrics in buf:
+            for k, v in metrics.items():
+                out.setdefault(k, []).append(v)
+        return out
+
+    def sample_count(self, key: str) -> int:
+        """该窗口收到的样本条数（与字段无关），用于算"某字段的有效率"。"""
+        return len(self._samples.get(key, []))
+
+    def times(self, key: str) -> dict[str, list[float]]:
+        """field → 与 `series()[field]` 逐一对应的事件时间（秒）。
+
+        有了它，`window.slope` 才是"字段单位/秒"，不随采样率变形。
+        """
+        out: dict[str, list[float]] = {}
+        for t, _seq, metrics in self._samples.get(key, []):
+            for k in metrics:
+                out.setdefault(k, []).append(t)
+        return out
+
+
+def window_quality(series: dict[str, list[float]], samples: int,
+                   field: str) -> dict[str, Any]:
+    """窗口数据质量：该字段的有效样本数 / 总样本数 / 丢失率。
+
+    `samples` 为窗口收到的样本条数（`WindowBuffer.sample_count`）。无样本时
+    `known=False`，调用方必须据此**跳过**基于缺失率的判据——"没有数据"不等于
+    "数据全丢"，把二者混同会让启动首个事件就误报丢包。
+    """
+    if samples <= 0:
+        return {"known": False, "valid": 0, "samples": 0, "missing_rate": 0.0}
+    valid = len(series.get(field, ()))
+    return {
+        "known": True,
+        "valid": valid,
+        "samples": samples,
+        "missing_rate": max(0.0, 1.0 - valid / samples),
+    }
+
 
 def _slope(vals: list[float]) -> float:
     n = len(vals)
@@ -187,12 +336,58 @@ def _slope(vals: list[float]) -> float:
 # ---------------------------------------------------------------- Detector
 
 class Detector:
-    """执行声明式算子（ThresholdRule）。DSL 规则由 operator_factory 的 Evaluator 执行。"""
+    """执行声明式算子：单条阈值（ThresholdRule）+ 窗口/基线 DSL 规则（DslRuleSpec）。
+
+    语义分层（这是"纯增量、无回归"的关键）：
+      - 单条阈值规则只看**本条** metrics，与改造前逐字节等价；
+      - DSL 规则需要窗口序列（`series`）与同工况基线（`baseline`）。任一缺失时该规则
+        **不命中**，而不是猜——见 `_detect_dsl` 的降级说明。
+    """
 
     def __init__(self, config: DetectorConfig):
         self.config = config
+        self._compiled: list[Any] | None = None
+        self._compile_error: str | None = None
 
-    def detect(self, metrics: dict[str, Any]) -> list[dict[str, Any]]:
+    # -- DSL 规则编译（惰性、只做一次；编译失败不拖垮单条阈值路径）--
+    def _dsl_compiled(self) -> list[Any]:
+        if self._compiled is not None or self._compile_error is not None:
+            return self._compiled or []
+        specs = list(getattr(self.config, "dsl_rules", ()) or ())
+        if not specs:
+            self._compiled = []
+            return self._compiled
+        try:
+            from ..operator_factory.dsl import compile_rule
+            declared = [f.name for f in self.config.fields]
+            self._compiled = [
+                compile_rule(
+                    {"rule_id": s.rule_id, "when": s.when,
+                     "severity_hint": s.severity_hint, "message": s.message},
+                    declared,
+                )
+                for s in specs
+            ]
+        except Exception as e:      # 编译失败：记下来、DSL 一律不命中
+            self._compile_error = f"{type(e).__name__}: {e}"
+            self._compiled = []
+        return self._compiled
+
+    @property
+    def dsl_compile_error(self) -> str | None:
+        return self._compile_error
+
+    def detect(self, metrics: dict[str, Any], *,
+               series: dict[str, list[float]] | None = None,
+               baseline: dict[str, float] | None = None,
+               samples: int = 0,
+               times: dict[str, list[float]] | None = None,
+               ) -> list[dict[str, Any]]:
+        """对一条事件跑全部规则。
+
+        `series`/`baseline`/`samples`/`times` 是可选窗口上下文：不传时**只**跑单条
+        阈值规则（与改造前完全一致），故旧调用点零回归。
+        """
         hits: list[dict[str, Any]] = []
         for rule in self.config.rules:
             if rule.field not in metrics:
@@ -209,9 +404,88 @@ class Detector:
                     "threshold": rule.value,
                     "severity_hint": rule.severity_hint,
                     "message": rule.message,
+                    "provenance": getattr(rule, "provenance", ""),
+                    "subsystem": getattr(rule, "subsystem", ""),
                     "operator_id": self.config.operator_id,
                 })
+        hits.extend(self._detect_dsl(metrics, series, baseline, samples, times))
         return hits
+
+    def _detect_dsl(self, metrics: dict[str, Any],
+                    series: dict[str, list[float]] | None,
+                    baseline: dict[str, float] | None,
+                    samples: int,
+                    times: dict[str, list[float]] | None = None,
+                    ) -> list[dict[str, Any]]:
+        specs = list(getattr(self.config, "dsl_rules", ()) or ())
+        compiled = self._dsl_compiled()
+        if not specs or not compiled:
+            return []
+
+        from ..operator_factory.dsl import WindowContext, evaluate
+
+        # 降级语义（**关键**）：没有窗口序列就没有趋势/计数可算，DSL 规则一律不命中。
+        # 不去"用当前这一条 metrics 冒充窗口"——那会让 window.slope 恒为 0，
+        # 从而把"数据不足"静默判成"趋势正常"。基线缺失则交给 DSL 的 missing 语义：
+        # window.baseline(x) 求值为 None，任何与它比较的规则在求值期抛 TypeError
+        # → evaluate() 视为不命中。即"没基线 = 不命中"，绝不退化成"基线=0"而误报。
+        if not series:
+            return []
+        window = WindowContext(series=series, baseline=dict(baseline or {}),
+                               samples=samples, times=dict(times or {}))
+
+        hits: list[dict[str, Any]] = []
+        # strict=True：两者由同一次编译产出，长度不等说明编译环节出了问题，
+        # 静默截断会少跑规则且没人发现。
+        for spec, rule in zip(specs, compiled, strict=True):
+            if not evaluate(rule, metrics, window):
+                continue
+            field = spec.field or _first_field_ref(rule)
+            hits.append({
+                "rule_id": rule.rule_id,
+                "field": field,
+                "value": _witness(metrics, series, baseline, field),
+                "operator": "dsl",
+                "threshold": rule.source,
+                "severity_hint": rule.severity_hint,
+                "message": rule.message,
+                "provenance": getattr(spec, "provenance", ""),
+                "subsystem": getattr(spec, "subsystem", ""),
+                "operator_id": self.config.operator_id,
+            })
+        return hits
+
+
+def _first_field_ref(rule: Any) -> str:
+    """取表达式里第一个字段引用，作为证据归因字段（无则空串）。"""
+    from ..operator_factory.dsl import Call, FieldRef
+
+    stack = [rule.ast]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, FieldRef):
+            return node.name
+        if isinstance(node, Call):
+            stack.extend(node.args)
+        for attr in ("left", "right", "operand"):
+            child = getattr(node, attr, None)
+            if child is not None:
+                stack.append(child)
+    return ""
+
+
+def _witness(metrics: dict[str, Any], series: dict[str, list[float]],
+             baseline: dict[str, float] | None, field: str) -> Any:
+    """命中时写进证据的观测值：优先本条 metrics，其次窗口末值。
+
+    DSL 规则命中往往说明"窗口累积出的事"，单条 metrics 可能恰好缺该字段；
+    退到窗口末值，避免候选里出现 value=None 这种不可核对的证据。
+    """
+    if field in metrics and isinstance(metrics[field], (int, float)) \
+            and not isinstance(metrics[field], bool):
+        return metrics[field]
+    vals = series.get(field) or []
+    return vals[-1] if vals else None
 
 
 def _cmp(op: str, a: float, b: float) -> bool:

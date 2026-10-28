@@ -13,10 +13,11 @@ from ..alerting.saas import SaaSTestAdapter
 from ..alerting.service import AlertReportingService
 from ..data_plane.pipeline import DataPlane, build_demo_resolver
 from ..mujoco_sim.mujoco_eval import MujocoDeterministicProvider
+from ..operator_factory.detector_config import detector_config_from_operator
 from ..operator_factory.knowledge import build_knowledge_package
 from ..operator_factory.p1_demo import build_motor_operator
 from ..paths import vendor_docs_dir
-from ..schemas.operator_config import DetectorConfig, FieldSpec, ThresholdRule
+from ..schemas.operator_config import DetectorConfig
 from ..tools.investigation import InvestigationTools
 from .bridge import CandidateEvidenceBridge
 
@@ -63,14 +64,8 @@ class E2EResult:
 def _detector_config() -> DetectorConfig:
     pkg = build_knowledge_package(vendor_docs_dir() / "unitree" / "cleaned")
     op = build_motor_operator(pkg)
-    return DetectorConfig(
-        operator_id=op.operator_id, operator_type="parser+detector",
-        component="joint_motor.front_left_hip",
-        input_schema="raw-log-envelope-v1", output_schema="normalized-telemetry-v1",
-        fields=[FieldSpec(**f) for f in op.fields],
-        rules=[ThresholdRule(r.rule_id, r.field, r.operator, r.value,
-                             r.severity_hint, r.message) for r in op.rules],
-    )
+    # 共享转换（含 dsl_rules）：离线回放验证过的规则必须与在线跑的完全一致。
+    return detector_config_from_operator(op)
 
 
 class _CandidateAwareProvider(MujocoDeterministicProvider):

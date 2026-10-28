@@ -24,6 +24,7 @@ from data_dog.data_plane.resolver import (
     CompatibilityResolver,
     OperatorBinding,
 )
+from data_dog.operator_factory.detector_config import detector_config_from_operator
 from data_dog.operator_factory.knowledge import build_knowledge_package
 from data_dog.operator_factory.p1_demo import build_motor_operator
 from data_dog.schemas.operator_config import DetectorConfig, FieldSpec, ThresholdRule
@@ -47,14 +48,9 @@ def _raw(event_id="e1", **kw):
 def detector_config() -> DetectorConfig:
     pkg = build_knowledge_package(CLEANED)
     op = build_motor_operator(pkg)
-    return DetectorConfig(
-        operator_id=op.operator_id, operator_type="parser+detector",
-        component="joint_motor.front_left_hip",
-        input_schema="raw-log-envelope-v1", output_schema="normalized-telemetry-v1",
-        fields=[FieldSpec(**f) for f in op.fields],
-        rules=[ThresholdRule(r.rule_id, r.field, r.operator, r.value,
-                             r.severity_hint, r.message) for r in op.rules],
-    )
+    # 与线上用**同一个**转换：测试若自建一份，就会在"丢了 dsl_rules"这种缺陷上
+    # 一路绿灯，把线上能力缺失伪装成通过。
+    return detector_config_from_operator(op)
 
 
 # ---------------------------------------------------------------- 网关

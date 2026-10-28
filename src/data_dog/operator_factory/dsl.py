@@ -13,7 +13,9 @@
   运算符：or and not == != < <= > >= + - * / % & |（按 dsl_spec §3.1 优先级）
   函数  ：abs min max floor ceil round clamp bit popcount present missing
           crc16 crc32 checksum8
-  窗口  ：window.mean/max/min/last/first/sum/std/slope/delta/baseline/count/p50/p95
+  窗口  ：window.mean/max/min/last/first/sum/std/slope/delta/max_step/
+          baseline/count/p50/p95/coverage
+  元信息：window.samples() / window.span()（窗口自身，无字段参数）
   括号分组。
 
 未落地（显式声明，避免"假装支持"）：to_celsius 等**单位换算函数**（需算子声明单位表，留待
@@ -144,8 +146,11 @@ BUILTIN_FUNCS = {
 }
 WINDOW_FUNCS = {
     "mean", "max", "min", "last", "first", "sum", "std", "slope",
-    "delta", "baseline", "count", "p50", "p95",
+    "delta", "baseline", "count", "p50", "p95", "coverage", "max_step",
 }
+# 零参数的窗口函数：取的是**窗口本身**的元信息，不是某个字段的聚合。
+# 单独成集，因为解析器的"第一个参数须是字段名"规则对它们不适用。
+WINDOW_META_FUNCS = {"samples", "span"}
 
 
 class Parser:
@@ -252,8 +257,13 @@ class Parser:
         self.expect(")")
         if is_window:
             func = name.split(".", 1)[1] if "." in name else ""
-            if func not in WINDOW_FUNCS:
+            if func not in WINDOW_FUNCS and func not in WINDOW_META_FUNCS:
                 raise DSLError(f"未知窗口函数 {func!r}（闭集白名单见 dsl_spec §3.5）")
+            if func in WINDOW_META_FUNCS:
+                # window.samples() / window.span()：窗口元信息，无字段参数。
+                if args:
+                    raise DSLError(f"window.{func}() 不接受参数")
+                return Call("window." + func, args)
             if not args or not isinstance(args[0], FieldRef):
                 raise DSLError(f"window.{func}(...) 第一个参数须是字段名")
             return Call("window." + func, args)
@@ -282,14 +292,56 @@ def _duration_to_seconds(s: str) -> float:
 
 @dataclass
 class WindowContext:
-    """窗口聚合只依赖事件时间序列（确定性）。缺失字段 → None，按 missing() 语义处理。"""
+    """窗口聚合只依赖事件时间序列（确定性）。缺失字段 → None，按 missing() 语义处理。
+
+    `samples`：该窗口收到的**样本条数**（与字段无关）。为 0 表示"不知道"，此时
+    `window.coverage` 返回 None（→ 涉及它的规则求值期失败 → 不命中），而不是把
+    "一个样本都没收到"当成"覆盖率 0 / 全丢"去误报丢包。
+
+    `times`：field → 与 `series[field]` 等长的**事件时间**（秒）。给了就用真实时间算
+    `slope`（单位 = 字段单位/秒，与采样率无关）；没给则退回按样本序号（等价于 1Hz）。
+    这是 dsl_spec §3.4「窗口聚合只依赖事件时间」的落地——不这么做，同一个斜率阈值
+    在 10Hz 与 100Hz 下含义完全不同。
+    """
     series: dict[str, list[float]] = field(default_factory=dict)
     baseline: dict[str, float] = field(default_factory=dict)
+    samples: int = 0
+    times: dict[str, list[float]] = field(default_factory=dict)
 
     def _vals(self, name: str) -> list[float] | None:
         return self.series.get(name)
 
+    def meta(self, func: str) -> Any:
+        """窗口自身元信息（无字段参数）。
+
+        - `samples`：窗口收到的样本条数（`<=0` 表示不知道 → None）。
+        - `span`：窗口的事件时间跨度（秒）。**需要 `times` 或各序列等长可推断**；
+          拿不到事件时间时返回 None，绝不用"样本条数"冒充秒数——否则同一个
+          阈值在 10Hz 与 100Hz 下含义差 10 倍。
+        """
+        if func == "samples":
+            return self.samples if self.samples > 0 else None
+        if func == "span":
+            xs: list[float] = []
+            for fld, vals in self.series.items():
+                t = self.times.get(fld)
+                if t and len(t) == len(vals):
+                    xs = t
+                    break
+            if len(xs) < 2:
+                return None
+            return max(xs) - min(xs)
+        raise DSLError(f"未知窗口元信息: {func}")
+
     def agg(self, func: str, field_name: str, extra: tuple = ()) -> Any:
+        if func == "coverage":
+            # 该字段在窗口里的**有效率** = 有效点数 / 窗口样本数。
+            # 丢包/解析不出的样本不会在 series 里留下占位（见 chain.WindowBuffer），
+            # 所以"有效率下降"正是丢包的可观测信号。
+            # 无样本（samples<=0）→ None（不知道），绝不当成 0 去误报。
+            if self.samples <= 0:
+                return None
+            return len(self.series.get(field_name) or ()) / self.samples
         vals = self._vals(field_name)
         if vals is None or not vals:
             return None
@@ -307,6 +359,14 @@ class WindowContext:
             return vals[-1]
         if func == "delta":
             return vals[-1] - vals[0]
+        if func == "max_step":
+            # 相邻样本的最大**绝对**跳变：编码器跳变/信号突跳的可观测信号。
+            # 与 slope 不同，它对单点毛刺敏感而对面上的缓升不敏感——正是要区分
+            # "编码器坏了（一跳多半圈）"和"温度在慢慢爬"。
+            if len(vals) < 2:
+                return 0.0
+            # 相邻对，长度天然差 1，strict 必须为 False。
+            return max(abs(b - a) for a, b in zip(vals, vals[1:], strict=False))
         if func == "std":
             mu = sum(vals) / len(vals)
             return (sum((v - mu) ** 2 for v in vals) / len(vals)) ** 0.5
@@ -314,10 +374,14 @@ class WindowContext:
             n = len(vals)
             if n < 2:
                 return 0.0
-            mean_x = (n - 1) / 2
+            xs = self.times.get(field_name)
+            if xs is None or len(xs) != n:
+                xs = list(range(n))     # 无事件时间 → 按序号（等价 1Hz，旧行为）
+            mean_x = sum(xs) / n
             mu_y = sum(vals) / n
-            num = sum((i - mean_x) * (v - mu_y) for i, v in enumerate(vals))
-            den = sum((i - mean_x) ** 2 for i in range(n))
+            # 上面已保证 len(xs) == n == len(vals)，不等就是 bug，不该静默截断。
+            num = sum((x - mean_x) * (v - mu_y) for x, v in zip(xs, vals, strict=True))
+            den = sum((x - mean_x) ** 2 for x in xs)
             return num / den if den else 0.0
         if func == "baseline":
             return self.baseline.get(field_name)
@@ -422,10 +486,31 @@ class Evaluator:
         name = node.name
         if name in ("present", "missing"):
             return "bool"
+        if name == "window.count":
+            return self._check_count(node)
         for a in node.args:
             t = self.check(a)
             if t not in ("num", "any"):
                 raise DSLError(f"{name} 的参数需为数值，得到 {t}")
+        return "num"
+
+    def _check_count(self, node: Call) -> str:
+        """window.count(field, op, value)：第 2 参是**字符串比较符**，不是数值。
+
+        特判原因：通用循环要求所有参数为数值，会让 window.count 在**编译期**就被拒，
+        于是"持续饱和/持续高温"这类占比判据根本写不出来（实测踩到）。
+        """
+        self.check(node.args[0]) if node.args else None
+        if len(node.args) != 3:
+            raise DSLError("window.count(field, op, value) 需要 3 个参数")
+        op_node = node.args[1]
+        if not isinstance(op_node, Str):
+            raise DSLError("window.count 第 2 个参数须是字符串比较符，如 \">=\"")
+        if op_node.value not in (">", "<", ">=", "<=", "==", "!="):
+            raise DSLError(f"window.count 的比较符非法: {op_node.value!r}")
+        t = self.check(node.args[2])
+        if t not in ("num", "any"):
+            raise DSLError(f"window.count 的比较值需为数值，得到 {t}")
         return "num"
 
     # -- 求值（自建 AST 解释器：不触碰任何动态代码执行原语）--
@@ -501,9 +586,11 @@ class Evaluator:
             return has if name == "present" else (not has)
         if name.startswith("window."):
             func = name.split(".", 1)[1]
-            if func not in WINDOW_FUNCS:
+            if func not in WINDOW_FUNCS and func not in WINDOW_META_FUNCS:
                 raise DSLError(f"未知窗口函数 {func!r}")
             self._tick()  # 单个大聚合调用前再查一次，防超长窗口拖死
+            if func in WINDOW_META_FUNCS:
+                return self.window.meta(func)
             fld = node.args[0].name
             extra = tuple(self.eval_node(a) for a in node.args[1:])
             return self.window.agg(func, fld, extra)
