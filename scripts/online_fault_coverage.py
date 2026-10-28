@@ -37,6 +37,26 @@ from data_dog.state.memory import InMemoryStateStore  # noqa: E402
 from data_dog.synth.generator import FAULT_DEFS, SynthGenConfig, generate_sample  # noqa: E402
 
 DT = 0.1                 # 10Hz —— 与现场日志同量级，也让 window.span() 有真实秒数
+
+# ---- 量纲适配：synth 的电流用电机轴 kt，检测规则用关节侧 kt ----
+# 见 `_emit` 的说明。两个常数各自的出处：
+#   KT_SYNTH = synth/generator.DEFAULT_PARAMS["kt"]（=0.25，电机轴）
+#   KT_JOINT = rig.KT_JOINT（=MOTOR_PARAMS["kt"] × GEAR_RATIO ≈1.5825，关节侧）
+from data_dog.go2_sim.rig import KT_JOINT  # noqa: E402
+from data_dog.synth.generator import DEFAULT_PARAMS as _SYNTH_PARAMS  # noqa: E402
+
+KT_SYNTH = _SYNTH_PARAMS["kt"]
+
+# 各故障下的关节角速度（rad/s）。这份数据源没有动力学，只能按故障类型给约定值；
+# 取值的依据是 go2_sim（MuJoCo）实测，见 `_emit` 说明第 2 条。
+DQ_BY_FAULT: dict[str, float] = {
+    "normal": 0.4,
+    "F1_stall": 0.02,          # 堵转：关节被卡住，几乎不转
+    "F2_temp_rise": 0.4,
+    "F3_packet_loss": 0.4,
+    "F4_current_bias": 0.4,
+    "F5_load_spike": 0.4,
+}
 # 120 秒是 synth 数据集的既有口径（`FAULT_START_FRAC=0.4`，故障窗 48s~108s），
 # 此前所有标定数字也按这个时长取。改短会让 F2 这类慢热故障来不及升温——那是
 # 改了标尺，不是改了被测对象。
@@ -115,23 +135,47 @@ def _make_plane():
     return dp, recorded, clock
 
 
-def _emit(dp, clock, sample, t_off: float) -> None:
-    """把一条合成样本逐点喂进去；丢包点用"字段缺失"表达，不是填 0。"""
+def _emit(dp, clock, sample, t_off: float, fault: str | None = None) -> None:
+    """把一条合成样本逐点喂进去；丢包点用"字段缺失"表达，不是填 0。
+
+    ⚠ 两处**数据源与量纲的适配**，都是为了匹配检测侧已修正的单位制：
+
+    1. **电流换算到关节侧 kt**。`synth/generator.py` 用的是电机轴 kt=0.25
+       （`DEFAULT_PARAMS`），电流因此被放大 6.33 倍（实测 F1 堵转 95A）。
+       检测规则已按关节侧 kt=1.5825 重写，直接喂旧电流会让**每一条**
+       残差判据都错到十万八千里——实测 normal 也报 CURRENT_BIAS。
+       这里用**保残差换算**（偏置是物理量，不随 kt 改变）：
+           residual = I_old − τ/0.25        （τ 本来就是关节扭矩，不动）
+           I_new    = τ/1.5825 + residual
+       实测换算后残差：normal/F1/F2/F3/F5 恒 0.312，F4 恒 5.312 —— 正是
+       规则要的分隔（门槛 4.0）。**不改 synth 本体**：它还被 visual_eval、
+       mujoco_sim/conditions 消费，且 R/Rth/Cth 是配套 0.25 标定的。
+
+    2. **dq 按故障给真实值**。原脚本把 dq 写死成 0.4，于是
+       `MOTOR_STALL_SUSTAINED` 的"关节不转"判据永远不成立、F1 100% 漏检。
+       堵转的物理定义就是关节被卡住，dq 必须是接近 0 的数。这份数据源
+       没有真实动力学，只能按故障类型给约定值——这是**合成数据的边界**，
+       不是判据的近似：取值来自 go2_sim（MuJoCo）实测（F1 堵转 mean|dq|≤0.008，
+       其余姿态 0.02~2.79），这里取保守的 0.02 / 0.4。
+    """
+    dq = DQ_BY_FAULT.get(fault or "normal", DQ_BY_FAULT["normal"])
     for t in range(sample.n_steps):
         t_s = t_off + t * DT
         clock.now = T0.timestamp() + t_s          # 限流按事件时间记账
         cur, tem, tor = sample.current[t, 0], sample.temperature[t, 0], sample.torque[t, 0]
         missing = (cur != cur) or (tem != tem) or (tor != tor)
-        body = {"mode": 0, "dq": 0.4, "q": 0.0, "lost": 0}
+        body = {"mode": 0, "dq": dq, "q": 0.0, "lost": 0}
         if not missing:
-            body.update(current=float(cur), temperature=float(tem), tau_est=float(tor))
+            i_new = float(tor) / KT_JOINT + (float(cur) - float(tor) / KT_SYNTH)
+            body.update(current=i_new, temperature=float(tem), tau_est=float(tor))
         dp.process_one(_raw(t, t_s, body), AUTH)
 
 
 def probe(fault: str | None, seed: int) -> dict:
     dp, rec, clock = _make_plane()
-    _emit(dp, clock, _sample(None, 1000 + seed, WARMUP_SECONDS), -WARMUP_SECONDS)
-    _emit(dp, clock, _sample(fault, seed), 0.0)
+    _emit(dp, clock, _sample(None, 1000 + seed, WARMUP_SECONDS), -WARMUP_SECONDS,
+          fault=None)
+    _emit(dp, clock, _sample(fault, seed), 0.0, fault=fault)
 
     # recorded 与"进入检测器的每一条"一一对应；故障窗 [40%,90%)
     warm = int(round(WARMUP_SECONDS / DT))

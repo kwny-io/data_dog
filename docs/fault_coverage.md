@@ -1,8 +1,9 @@
 # 在线故障覆盖矩阵（按子系统）
 
 > 规则定义：`src/data_dog/operator_factory/p1_demo.py`
-> 在线实测：`python scripts/online_fault_coverage.py`（走真实 `DataPlane.process_one`）
-> 黄金用例：`python -m data_dog.operator_factory.p1_demo`（22 条，正例+反例）
+> 在线实测（合成器）：`python scripts/online_fault_coverage.py`
+> 在线实测（MuJoCo 仿真）：`python scripts/go2_sim_coverage.py`
+> 黄金用例：`python -m data_dog.operator_factory.p1_demo`（23 条，正例+反例）
 > 字段出处：`vendor_docs/unitree/cleaned/`（IDL 与协议头）
 
 ## 先看结论
@@ -18,52 +19,149 @@
 3. **链路两头各缺一半**——仿真侧还没把非电机子系统发进信封，检测侧也还没声明
    IMU/整机算子字段。这是**未开工**，不是做不了；见 §"摄取边界 3"。
 4. **字段能进来、但物理上分不开**——见 §"分不开的情况"，硬做只会造出互相抢报的假规则。
+5. **物理上根本没有那个信号**——静止姿态不发热，所以"散热变差"在站立/趴卧上测不出来；
+   整包丢包不进窗口，所以字段级覆盖率判据看不见它。见 §"两个数据源的边界"。
 
-## 改前 / 改后对照（同一批数据，同一套链路）
+## ⚠ 两套数据源的结果不同，不要混着引用
 
-把改前的提交（`9ae5469`）检出到临时 worktree，用**同一个探针脚本**喂同样的合成数据，
-量的是"故障窗内有多少帧报出了规则"。方法：`git worktree add --detach <tmp> 9ae5469`，
-探针按 `inspect.signature` 判断 `detect` 是否收窗口，两版共用同一份调用代码。
+本项目的在线实测有两个数据源，**它们对同一类故障的建模强度本身就不同**，
+所以同一套规则的命中率必须分开报，合成一个数字是误导：
 
-| 故障 | 改前窗内触发率 | 改前命中规则 | 改后窗内触发率 | 改后命中规则 |
-|---|---|---|---|---|
-| normal | 0.0% | （无） | 0.0% | （无） |
-| F1_stall | **70.0%** | TEMP_PROTECT | **95.2%** | STALL_SUSTAINED + TEMP_PROTECT |
-| F2_temp_rise | **0.0%** | （无） | **51.9%** | TEMP_DEGRADE |
-| F3_packet_loss | **0.0%** | （无） | **97.1%** | COMM_PACKET_LOSS |
-| F4_current_bias | **0.0%** | （无） | **92.6%** | CURRENT_BIAS |
-| F5_load_spike | **42.1%** | TEMP_PROTECT | **93.3%** | LOAD_SPIKE + TEMP_PROTECT |
+| | `synth/generator.py` | `go2_sim`（MuJoCo） |
+|---|---|---|
+| 性质 | 纯扭矩 + 一阶热模型，**没有动力学** | 接触动力学 + 电池/热/通信子系统 |
+| `dq` | 不产出，按故障类型约定（见脚本注释） | 真实解算 |
+| τ 符号 | 全正（负载单向） | **正负交替**（步态摆动） |
+| 用途 | 规则逻辑的回归基线 | **演示真正跑的那条链** |
 
-两条要说清楚：
+**为什么必须两边都测**：`synth` 上全绿的规则，在 `go2_sim` 上曾 100% 误报——
+因为 `synth` 的 τ 全为正，`mean|τ|` 与有符号均值几乎相等，那个"绝对值 vs 有符号"
+的口径错配在 `synth` 上根本暴露不出来。只在 `synth` 上标定 = 只测了一半。
 
-1. **F1/F5 改前不是"完全检不出"，是"检出了但报错原因"**。改前只有 `temperature ≥ 90°C`
-   一条有效判据，堵转/重载把温度烧过 90°C 后靠温度报出来——报的是"过热"，
-   不是"堵转"。运维看到的是 B 子系统告警，会去查散热，不会去查电机。改后 A/F 各自的
-   规则先报出来，温度告警退为并发现象。
-2. **F2/F3/F4 改前是真的一点都检不出**（0.0%）。这三类的信号全在窗口统计量里——
-   温度斜率、窗口覆盖率、电流与扭矩的残差——单点阈值判据看不见。改前
-   `Detector.detect(metrics)` 的签名里就没有窗口，所以参数再怎么调都不可能命中。
+## 规则 × 子系统（`synth` 数据源）
 
-## 规则 × 子系统
+5 个 seed（0–4），120s，故障窗 40%~90%，判定看**命中哪条规则**。
 
 | 子系统 | rule_id | 判据 | 阈值出处 | 在线实测 |
 |---|---|---|---|---|
-| A 关节/电机 | `MOTOR_STALL_SUSTAINED` | ≥5s 窗口内 ≥50% 时间 I≥90A | 假设 | F1 **95.2%**，5.9s 报出 |
-| A 关节/电机 | `MOTOR_CURRENT_BIAS` | `mean(I) − mean(τ)/0.25 ≥ 4A` | 假设 | F4 **92.7%**，7.3s 报出 |
+| A 关节/电机 | `MOTOR_STALL_SUSTAINED` | ≥5s 窗口内 ≥50% 时间 I≥14.5A **且** 50% 时间 \|dq\|<0.05 | 假设 | F1 **99.8%**，3.1s 报出 |
+| A 关节/电机 | `MOTOR_CURRENT_BIAS` | `mean(I) − mean_abs(τ)/1.5825 ≥ 4A` | 假设 | F4 **97.6%**，4.0s 报出 |
 | A 关节/电机 | `MOTOR_ENCODER_JUMP` | 采样率≥50Hz 且单步 \|Δq\|≥3.0rad | 假设 | 仅 fixture |
 | A 关节/电机 | `MOTOR_MODE_FLAG_SET` | `(mode & 0x04) != 0` | 假设（位语义 verified） | 仅 fixture |
 | B 热 | `MOTOR_TEMP_PROTECT` | `temperature ≥ 90°C` | **verified** | 随 F1/F5 连带命中 |
-| B 热 | `MOTOR_TEMP_DEGRADE` | `mean T≥40 且 slope≥0.25 且 mean I<50` | 假设 | F2 **51.8%**，31.5s 报出 |
+| B 热 | `MOTOR_TEMP_DEGRADE` | `mean T≥40 且 slope≥0.25 且 mean I<7.9` | 假设 | F2 **98.9%**，3.5s 报出 |
 | B 热 | `MOTOR_TEMP_RISE_UNDER_LOAD` | `mean T≥75 且 mean I ≤1.2×基线` | 假设 | 仅 fixture |
 | B 热 | `FIELD_SANITY_TEMP_INVALID` | `temperature < 0` | 假设 | 仅 fixture |
 | C 电源 | `POWER_SOC_LOW` | `bms_soc ≤ 15%` | 假设（字段 verified） | 仅 fixture |
 | E 通信 | `COMM_PACKET_LOSS` | 窗口覆盖率 < 95% | 假设 | F3 **97.0%**，3.9s 报出 |
 | E 通信 | `MOTOR_LOST_COUNTER_RISING` | 窗口内 `Δlost > 0` | 假设 | 仅 fixture |
-| F 整机/步态 | `MOTOR_LOAD_SPIKE` | `mean I≥50 且 max I<90 且 mean τ ≥1.5×基线` | 假设 | F5 **93.3%**，7.0s 报出 |
+| F 整机/步态 | `MOTOR_LOAD_SPIKE` | `mean I≥1.4 且 I≥14.5A 占比<50% 且 mean_abs(τ) ≥1.5×baseline_abs(τ)，且排除热退化画像` | 假设 | F5 **99.6%**，3.2s 报出 |
+
+**normal 在 5 个 seed 上全部 0 命中**（此前 seed=0 有 1.7% 误报 LOAD_SPIKE，已随
+`baseline_abs` 修正归零）。
 
 "仅 fixture" = 该项目前只用黄金用例验证了判据逻辑，**没有**进在线端到端实测——
 因为项目自带的合成器（`synth/generator.py`）只注入 F1~F5 五类故障，没有编码器跳变、
 SOC 掉电、lost 计数器这几类的物理注入器。这类规则要么补注入器，要么等真机数据。
+
+## 规则 × 姿态（`go2_sim` 数据源，40s，seed 7）
+
+这是演示真正跑的那条链。**表里"—"不都是规则缺陷，逐条注明性质。**
+
+| 姿态 | F1 堵转 | F2 热退化 | F3 丢包 | F4 电流偏置 | F5 负载骤增 |
+|---|---|---|---|---|---|
+| stand | ✅ STALL | ❌ 数据边界 | ❌ 摄取缺口 | ✅ CURRENT_BIAS | ✅ LOAD_SPIKE |
+| run | ✅ STALL | ✅ TEMP_DEGRADE | ❌ 摄取缺口 | ✅ CURRENT_BIAS | ⚠ 报成 TEMP_RISE_UNDER_LOAD |
+| prone | ✅ STALL | ❌ 数据边界 | ❌ 摄取缺口 | ✅ CURRENT_BIAS | ❌ 数据边界 |
+
+**`normal` 在三种姿态上全部 0 命中**——这是这张表最重要的一行。
+
+各项说明：
+
+- **F2 在 stand / prone 完全无信号**：实测温度 60 秒只从 25°C 爬到 26°C（stand），
+  prone 一步不动。静止姿态电机几乎不发热，`rth` 变大也没有热量可憋。
+  **不是规则漏，是物理上没有那个信号。** 60s 长跑结论相同。
+- **F1 会连带报 `MOTOR_LOAD_SPIKE`**（stand 302 帧里 29 帧、prone 26 帧）：堵转时
+  `mean_abs(τ)` 确实相对基线大幅上升，F 子系统的判据在物理上成立。两规则并列上报，
+  下游按子系统聚合时应以 A（堵转，`critical`）为准。
+- **F3 三种姿态全部漏**：`go2_sim` 的 F3 是**整包丢弃**（`envelope()` 返回 None，
+  实测 11.5% 的包没进网关），而 `COMM_PACKET_LOSS` 判的是
+  `coverage(temperature) < 0.95`——字段级缺失率。包没进窗口，`samples` 也不增加，
+  覆盖率恒为 1.0。**这是检测链的真实缺口，不是数据边界**：包级丢包目前不可观测，
+  需要在网关侧加丢包计数（未开工）。
+- **F5 在 prone 无信号**：`go2_sim` 的 F5 是往机身施加 −60N 下压，趴卧时关节已在
+  最低位、无处可让，`mean|τ|` 从 0.39 只到 0.41。同样是物理边界。
+- **F5 在 run 报成 `TEMP_RISE_UNDER_LOAD`**：F5 的 `on_step` 把产热乘 4
+  （`extra = 1+3·sev`），奔跑时会烧到高温，于是"高温 + 电流未显著上升"这条先成立
+  （40s 下 149 帧报 `TEMP_RISE_UNDER_LOAD`、192 帧报 `TEMP_DEGRADE`，后者末帧仍在）。
+  **这是真实的物理耦合**（重载确实会过热），不是误报，但子系统归因偏了 B 而非 F。
+
+## 三条修过的口径错误（都用实测数字说话）
+
+三条是**同一类错**：把"有符号量"当"绝对量"用。这类错有个共同特征——
+**在合成器上测不出来**（合成器的量恒为正），只在真实步态（正负交替）上暴露。
+
+### 1. 堵转判据里的 `dq` 没取绝对值
+
+`MOTOR_STALL_SUSTAINED` 的第二个条件原写作
+`window.count(dq, "<", 0.05) >= 0.5 * window.samples()`。`dq` 是**有符号角速度**，
+反向转动（`dq = −2.8 rad/s`）同样满足 `< 0.05`，于是"转得飞快"被算成"没转"。
+
+实测（seed 7，30 帧窗，只看故障窗 240 帧）：
+
+| 姿态 | 情形 | `dq<0.05` 占比 | `\|dq\|<0.05` 占比 | I≥14.5 占比 |
+|---|---|---|---|---|
+| run | normal | **46.2%** | 0.8% | 0.0% |
+| run | F5 负载骤增 | 41.2% | 1.2% | 15.8% |
+| run | F1 堵转 | 96.7% | 95.4% | 99.2% |
+| stand / prone | normal | 100% | 100% | 0.0% |
+
+奔跑正常只差 **3.8 个百分点**就没到 50% 门槛——换个步态频率或 seed 就会跨过去，
+正常奔跑会被报成堵转。取 `|dq|` 后同一组数据是 0.8%，余量 49 个点。
+
+修法：DSL 新增 `window.count_abs(field, op, value)`（与 `mean_abs`/`baseline_abs`
+同族），规则改用 `count_abs(dq, "<", 0.05)`。新增回归用例
+`fixtures/stall_saturated_but_reversing.json`：电流 100% 饱和、`dq` 恒 −2.8，
+**旧写法 100% 误报，新写法 0%**——这条用例就是为了让这个 bug 不会再悄悄回来。
+
+### 2. kt 用错了轴（电机轴 vs 关节侧）
+
+`synth` 的 `DEFAULT_PARAMS["kt"]=0.25` 是**电机轴**扭矩常数；规则的电流残差判据
+必须用**关节侧** `KT_JOINT = 0.25 × 6.33 ≈ 1.5825`（见 `go2_sim/rig.py` 的推导）。
+用错轴会让电流整体偏大 6.33 倍，**每一条**残差判据都错到十万八千里——
+实测 `normal` 也报 CURRENT_BIAS（3000/3000 帧）。
+
+`online_fault_coverage.py` 用**保残差换算**修掉了（不改 `synth` 本体：`R/Rth/Cth`
+是配套 0.25 标定的，改 kt 会破坏热模型）：
+
+```
+residual = I_old − τ/0.25        # 偏置是安培量，不随 kt 变
+I_new    = τ/1.5825 + residual
+```
+
+### 3. `mean_abs(τ)` 配了**有符号**基线
+
+规则写的是 `mean_abs(tau_est) >= 1.5 * window.baseline(tau_est)`：左边是 |τ| 的均值，
+右边是**有符号** τ 的 EMA。步态摆动时 τ 正负对称振荡，有符号均值被正负抵消，
+于是比值里混进一个**与负载无关的恒定倍数**：
+
+| 姿态 | 有符号基线 | `mean|τ|` | 旧比值 | 新比值（`baseline_abs`） |
+|---|---|---|---|---|
+| 奔跑 normal | 4.81 | 9.14 | **1.90（恒误报）** | 1.01 |
+| 趴卧 normal | **−0.66** | 0.39 | −0.59（恒不成立） | 0.59 |
+| 站立 F5 | 1.47 | 2.72 | 1.85 | 1.85（真实负载） |
+
+奔跑的比值从 t=0.5s 起就是 1.90 且**不随时间变化**——它不是负载，是口径差。
+修法：`Enricher` 同时维护 `|x|` 的 EMA（键 `field|abs`），DSL 加 `window.baseline_abs()`，
+规则改用 `baseline_abs`。**不能只在规则侧取 `abs(baseline)`**：趴卧基线是负数，
+取绝对值只会把"恒不成立"翻成"恒成立"，两种都是错的。
+
+### 附带修掉的一个静默失败
+
+`Enricher.snapshot()` 原先只按 `metrics` 里出现的字段名查基线，不会带出 `|abs` 键，
+于是 `baseline_abs()` 恒为 None → 规则在求值期失败 → **静默不命中**（不报错、不出结果）。
+表现是 F5 的触发率从 99.8% 掉到 42.1%、末帧什么都报不出来。
+`snapshot()` 现在同时带出 `<field>|abs`。
 
 ## 摄取边界（实测确认，不是推测）
 
@@ -140,24 +238,51 @@ F4 的残差 `I−τ/kt` 恒为 +5A，F2 的残差 ≈0。但只要现场出现"
 （比如爬长坡），残差和温度会同时满足两条规则——此时报出的规则集合是并集，
 需要下游按子系统聚合判断，不能指望规则本身互斥。
 
-**验证过的一点**：正常样本 1230 条全程零命中；五类故障各自只命中本子系统规则
-（F1/F5 额外连带 `MOTOR_TEMP_PROTECT`，这是真实的物理耦合——堵转确实会过热）。
+**F5 负载骤增 vs B 热剖面**：`go2_sim` 的 F5 注入同时把产热乘 4，所以奔跑姿态下
+60 秒就烧到 77°C，"高温 + 电流未显著上升"这条（`MOTOR_TEMP_RISE_UNDER_LOAD`）
+会先成立，报出的子系统是 B 而不是 F。**这是真实的物理耦合**（重载确实会过热），
+不是误报，但归因会偏。反过来 `MOTOR_LOAD_SPIKE` 里显式加了一条排除：
+
+```
+not (mean(temperature) >= 40 and slope(temperature) >= 0.25 and mean(current) < 7.9)
+```
+
+即"温度已经在明显爬升、而电流没到负载量级"时让给 B 子系统，避免两条规则对同一现象
+抢报。这条排除是**经验性的**，依据是 F2 的实测画像（`docs` 里的五类故障参数表），
+不是厂商给的分界，标为 `assumption`。
+
+**验证过的一点**：`synth` 的 5 个 seed 上 `normal` 全程零命中（改前 seed=0 有 1.7% 误报）；
+`go2_sim` 的 stand/run/prone 三种姿态上 `normal` 也全部零命中。五类故障各自只命中
+本子系统规则（F1/F5 额外连带温度规则，见上）。
 
 ## 降级语义（缺数据时不误报）
 
 三条，都在代码里显式写了，不是隐含行为：
 
 1. **样本不足**：窗口内 <8 条样本，一切窗口判据不命中（`_win()` 统一加前置条件）。
-2. **基线缺失**：`window.baseline()` 返回 None，与之比较的规则在求值期抛错 →
-   `evaluate()` 视为不命中。**绝不退化成"基线=0"**（那会把每条正常读数判成异常）。
+2. **基线缺失**：`window.baseline()` / `baseline_abs()` 返回 None，与之比较的规则
+   在求值期抛 `DSLError` → `evaluate()` 视为不命中。**绝不退化成"基线=0"**
+   （那会把每条正常读数判成异常），也**绝不回退到另一个口径的基线**
+   （`baseline_abs()` 不会去读有符号基线——那正是要被修掉的错配）。
 3. **窗口缺失**：`series` 为空时所有 DSL 规则直接跳过，不拿单条 metrics 冒充窗口。
 
 实测：拿 `load_spike_positive` 的正例，有基线时命中、无基线时**不命中**且不抛异常。
 
+**⚠ 这条设计的反面**：降级"静默不命中"有代价——如果**基线键名本身写错**或没被带出来，
+规则不会报错，只是永远不出结果，看起来和"正常"一模一样。`snapshot()` 漏带 `|abs`
+键就是这么藏住的（F5 触发率从 99.8% 掉到 42.1% 才被发现，根因查了一轮）。
+所以新增口径时必须同时验证**正例命中**与**反例不命中**，只看"没报错"不算通过。
+
 ## 复现
 
 ```bash
-python -m data_dog.operator_factory.p1_demo          # 22 条黄金用例
-python scripts/online_fault_coverage.py              # 在线链 5 类故障实测
+python -m data_dog.operator_factory.p1_demo          # 23 条黄金用例
+python scripts/online_fault_coverage.py              # 合成器：5 类故障 × 5 seed
 python scripts/online_fault_coverage.py --json       # 机器可读
+python scripts/go2_sim_coverage.py                   # MuJoCo：3 姿态 × 6 情形
+python scripts/go2_sim_coverage.py --seconds 60 --seed 7 --postures run,prone
 ```
+
+`go2_sim_coverage.py` 单独跑比较慢（MuJoCo 要真解算，3 姿态 × 6 情形约 2 分钟），
+建议后台跑。它默认 40s、seed 7；上表的数字就是这组参数。
+

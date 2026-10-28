@@ -139,12 +139,29 @@ class Enricher:
 
     def observe(self, component: str, field_name: str, condition: str,
                 value: Any, at_s: float | None = None) -> float | None:
-        """把一个观测值并入滚动基线，返回当前基线（未满 warmup 时返回 None）。"""
+        """把一个观测值并入滚动基线，返回当前基线（未满 warmup 时返回 None）。
+
+        **两个基线同时维护**：`x` 的有符号均值，与 `|x|` 的均值（键加 `|abs` 后缀）。
+
+        为什么要两个：扭矩是**有符号**的。步态摆动时 τ 正负对称振荡，有符号均值
+        会被正负抵消掉（go2_sim 奔跑实测基线 4.88，而 mean|τ| 是 9.14），于是
+        「mean|τ| ≥ 1.5 × 基线」在**正常奔跑**时恒成立、比值 1.9 —— 用有符号基线
+        去比绝对值型统计量，差的就是这个恒定的抵消倍数，与负载无关。
+        规则用 `mean_abs(x)` 就必须配 `baseline_abs(x)`，两边同一口径。
+
+        有符号基线保留不动：既有规则 `MOTOR_TEMP_RISE_UNDER_LOAD` 用的是
+        `mean(current) <= 1.2 * baseline(current)`，电流无符号，两者本来就一致。
+        """
         x = _as_finite(value)
         if x is None:
             self.rejected_samples["non_numeric"] = \
                 self.rejected_samples.get("non_numeric", 0) + 1
             return None
+        self._observe_one(component, f"{field_name}|abs", condition, abs(x), at_s)
+        return self._observe_one(component, field_name, condition, x, at_s)
+
+    def _observe_one(self, component: str, field_name: str, condition: str,
+                     x: float, at_s: float | None) -> float | None:
         key = f"{component}|{field_name}|{condition}"
         st = self._state.get(key)
         if st is None:
@@ -179,12 +196,18 @@ class Enricher:
 
     def snapshot(self, component: str, conditions_for_field: dict[str, str]
                  ) -> dict[str, float]:
-        """{field: condition} → 当前可用基线快照（拿不到的不出现在结果里）。"""
+        """{field: condition} → 当前可用基线快照（拿不到的不出现在结果里）。
+
+        **同时带上 `<field>|abs`**：`observe` 为每个字段维护了两个口径，但这里
+        只按 metrics 里出现的字段名查——不显式带出 `|abs`，`baseline_abs()` 就
+        永远拿到 None，用它的规则会**静默不命中**（不报错，只是不出结果）。
+        """
         out: dict[str, float] = {}
         for fld, cond in conditions_for_field.items():
-            b = self.baseline_for(component, fld, cond)
-            if b is not None:
-                out[fld] = b
+            for key in (fld, f"{fld}|abs"):
+                b = self.baseline_for(component, key, cond)
+                if b is not None:
+                    out[key] = b
         return out
 
 

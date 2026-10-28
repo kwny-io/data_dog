@@ -121,6 +121,7 @@ dsl_rules:                 # 第 2 层：受限 DSL（本规范）
 | 函数 | 语义 |
 |---|---|
 | `window.mean(field)` | 窗口均值 |
+| `window.mean_abs(field)` | 窗口内**绝对值**的均值（`mean(\|x\|)`，不是 `\|mean(x)\|`；正负交替的序列上两者差别很大） |
 | `window.max(field)` / `window.min(field)` | 窗口极值 |
 | `window.last(field)` / `window.first(field)` | 窗口首末值 |
 | `window.sum(field)` | 窗口求和 |
@@ -128,8 +129,20 @@ dsl_rules:                 # 第 2 层：受限 DSL（本规范）
 | `window.p95(field)` / `window.p50(field)` | 分位数 |
 | `window.slope(field)` | 窗口内线性斜率（趋势） |
 | `window.count(field, op, value)` | 满足条件的样本数，如 `window.count(temperature, ">", 75)` |
+| `window.count_abs(field, op, value)` | **对 `\|x\|` 计数**，如 `window.count_abs(dq, "<", 0.05)`；判"大小"时对有符号量必须用这个 |
 | `window.baseline(field)` | **同工况基线值**（来自 Enricher 的基线快照） |
+| `window.baseline_abs(field)` | 与 `mean_abs` 配对的基线（`\|x\|` 的滚动均值）；取不到返回 None，**不回退**到有符号基线 |
 | `window.delta(field)` | 窗口末值 − 首值 |
+
+**口径配对规则（重要）**：统计量和基线必须同口径。判"大小/幅度"时用
+`mean_abs` / `count_abs` / `max_step` 配 `baseline_abs`；判"净偏移/趋势"时用
+`mean` / `delta` / `slope` 配 `baseline`。**混用会产生与量无关的恒定倍数或恒定
+成立条件**——实测踩过两次：
+
+- `mean_abs(tau_est) >= 1.5 * window.baseline(tau_est)`：τ 在步态中正负交替，
+  有符号基线被抵消，奔跑时比值恒为 1.90（与负载无关），正常工况 100% 误报。
+- `window.count(dq, "<", 0.05)`：`dq` 是**有符号角速度**，反向转动同样满足
+  `< 0.05`。实测奔跑正常有符号占比 46.2%，距 50% 门槛只差 3.8 个点。
 
 **确定性要求**：窗口聚合必须只依赖**事件时间**（`occurred_at`），**禁止**用挂钟时间（§10.3 `clocks: event-time-only`）。
 

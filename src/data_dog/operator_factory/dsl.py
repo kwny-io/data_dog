@@ -14,7 +14,7 @@
   函数  ：abs min max floor ceil round clamp bit popcount present missing
           crc16 crc32 checksum8
   窗口  ：window.mean/max/min/last/first/sum/std/slope/delta/max_step/
-          baseline/count/p50/p95/coverage
+          baseline/count/p50/p95/coverage/mean_abs/baseline_abs/count_abs
   元信息：window.samples() / window.span()（窗口自身，无字段参数）
   括号分组。
 
@@ -147,6 +147,7 @@ BUILTIN_FUNCS = {
 WINDOW_FUNCS = {
     "mean", "max", "min", "last", "first", "sum", "std", "slope",
     "delta", "baseline", "count", "p50", "p95", "coverage", "max_step",
+    "mean_abs", "baseline_abs", "count_abs",
 }
 # 零参数的窗口函数：取的是**窗口本身**的元信息，不是某个字段的聚合。
 # 单独成集，因为解析器的"第一个参数须是字段名"规则对它们不适用。
@@ -347,6 +348,11 @@ class WindowContext:
             return None
         if func == "mean":
             return sum(vals) / len(vals)
+        if func == "mean_abs":
+            # |x| 的窗口均值。**不是 abs(mean(x))**——后者在正负交替的序列上
+            # 会因相互抵消而趋近 0。力矩 `tau_est` 在步态中 44% 的样本为负，
+            # 只有先取绝对值再平均，才能和恒非负的 `current` 比较。
+            return sum(abs(v) for v in vals) / len(vals)
         if func == "max":
             return max(vals)
         if func == "min":
@@ -385,14 +391,18 @@ class WindowContext:
             return num / den if den else 0.0
         if func == "baseline":
             return self.baseline.get(field_name)
+        if func == "baseline_abs":
+            # 与 `mean_abs(field)` 配对的基线：`|x|` 的滚动均值，取不到就返回 None
+            # （→ 规则不命中），绝不回退到有符号基线——那正是要被修掉的错配。
+            return self.baseline.get(f"{field_name}|abs")
         if func in ("p50", "p95"):
             q = 0.50 if func == "p50" else 0.95
             s = sorted(vals)
             idx = min(len(s) - 1, int(round(q * (len(s) - 1))))
             return s[idx]
-        if func == "count":
+        if func in ("count", "count_abs"):
             if len(extra) != 2:
-                raise DSLError("window.count(field, op, value) 需要 2 个额外参数")
+                raise DSLError(f"window.{func}(field, op, value) 需要 2 个额外参数")
             op_e, thr_e = extra
             cmp = {
                 ">": lambda a, b: a > b, "<": lambda a, b: a < b,
@@ -400,8 +410,14 @@ class WindowContext:
                 "==": lambda a, b: a == b, "!=": lambda a, b: a != b,
             }.get(op_e)
             if cmp is None:
-                raise DSLError(f"window.count 的比较符非法: {op_e!r}")
+                raise DSLError(f"window.{func} 的比较符非法: {op_e!r}")
             thr = _as_number(thr_e)
+            if func == "count_abs":
+                # 对 |x| 计数，与 `mean_abs` / `baseline_abs` 同一族。
+                # 有符号量（`dq` / `tau_est`）判"大小"必须走这个：
+                # `count(dq, "<", 0.05)` 在**反向转动**时同样成立——实测奔跑有符号
+                # 占比 46.2%，距 50% 门槛只差 3.8 个点；取 |dq| 后是 0.8%。
+                return sum(1 for v in vals if cmp(abs(v), thr))
             return sum(1 for v in vals if cmp(v, thr))
         raise DSLError(f"未知窗口函数: {func}")
 
@@ -486,7 +502,7 @@ class Evaluator:
         name = node.name
         if name in ("present", "missing"):
             return "bool"
-        if name == "window.count":
+        if name in ("window.count", "window.count_abs"):
             return self._check_count(node)
         for a in node.args:
             t = self.check(a)
@@ -495,22 +511,23 @@ class Evaluator:
         return "num"
 
     def _check_count(self, node: Call) -> str:
-        """window.count(field, op, value)：第 2 参是**字符串比较符**，不是数值。
+        """window.count / count_abs(field, op, value)：第 2 参是**字符串比较符**，不是数值。
 
         特判原因：通用循环要求所有参数为数值，会让 window.count 在**编译期**就被拒，
         于是"持续饱和/持续高温"这类占比判据根本写不出来（实测踩到）。
         """
+        fn = node.name
         self.check(node.args[0]) if node.args else None
         if len(node.args) != 3:
-            raise DSLError("window.count(field, op, value) 需要 3 个参数")
+            raise DSLError(f"{fn}(field, op, value) 需要 3 个参数")
         op_node = node.args[1]
         if not isinstance(op_node, Str):
-            raise DSLError("window.count 第 2 个参数须是字符串比较符，如 \">=\"")
+            raise DSLError(f"{fn} 第 2 个参数须是字符串比较符，如 \">=\"")
         if op_node.value not in (">", "<", ">=", "<=", "==", "!="):
-            raise DSLError(f"window.count 的比较符非法: {op_node.value!r}")
+            raise DSLError(f"{fn} 的比较符非法: {op_node.value!r}")
         t = self.check(node.args[2])
         if t not in ("num", "any"):
-            raise DSLError(f"window.count 的比较值需为数值，得到 {t}")
+            raise DSLError(f"{fn} 的比较值需为数值，得到 {t}")
         return "num"
 
     # -- 求值（自建 AST 解释器：不触碰任何动态代码执行原语）--
