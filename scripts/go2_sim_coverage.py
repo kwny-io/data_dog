@@ -33,7 +33,7 @@ from data_dog.state.memory import InMemoryStateStore  # noqa: E402
 T0 = datetime(2026, 9, 13, 10, 0, 0, tzinfo=timezone.utc)
 AUTH = {"tenant_id": "tenant-real", "device_sn": "device-go2sim-0001"}
 FAULTS = ("normal", "F1_stall", "F2_temp_rise", "F3_packet_loss",
-          "F4_current_bias", "F5_load_spike")
+          "F4_current_bias", "F5_load_spike", "F6_encoder_jump")
 POSTURES = ("stand", "run", "prone")
 
 

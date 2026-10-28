@@ -187,6 +187,62 @@ def test_fixture_replay_all_pass():
     assert summary["accuracy"] == 1.0, summary
 
 
+def test_encoder_jump_judges_q_vs_q_raw_not_step_size():
+    """编码器跳变必须判 `q` 与 `q_raw` 的偏离，不能退回 max_step。
+
+    同一组 q 序列、同样的单步跳变量，只改 q_raw 就该翻转判定：
+    - q_raw 跟着 q 走（两者贴合）→ 机构真的在动 → **不命中**
+    - q_raw 不动（只有 q 偏了）    → 编码器通道坏了 → **命中**
+
+    这条测试守住两件已实测过的事：
+    1. 判据对**采样率**不敏感（旧判据要求 ≥50Hz，go2_sim 只投 10Hz，恒不成立）
+    2. 判据看的是两个通道的**差**，而不是"一步跳了多少"
+    """
+    pkg = build_knowledge_package(CLEANED)
+    op = build_motor_operator(pkg)
+
+    # 60 点、20Hz 的事件时间（旧判据的 samples/span 只有 20 → 必然不成立）
+    q = [i * 0.08 for i in range(60)]
+    times = [i / 20.0 for i in range(60)]
+    base = {"temperature": 35.0, "current": 12.0, "tau_est": 3.0,
+            "mode": 0, "dq": 0.4, "lost": 0}
+
+    def run(q_raw):
+        ev = dict(base, q=q[-1], q_raw=q_raw[-1])
+        w = WindowContext(
+            series=dict(base_series, q=q, q_raw=q_raw),
+            baseline={}, samples=60, times={"q": times, "q_raw": times},
+        )
+        return set(op.run(ev, w))
+
+    base_series = {"temperature": [35.0] * 60, "current": [12.0] * 60,
+                   "tau_est": [3.0] * 60, "mode": [0.0] * 60,
+                   "dq": [0.4] * 60, "lost": [0.0] * 60}
+
+    # 贴合：raw 与 q 只差量化噪声 → 机构真在动
+    tight = [v + 0.001 * ((i % 3) - 1) for i, v in enumerate(q)]
+    assert "MOTOR_ENCODER_JUMP" not in run(tight)
+
+    # 偏离 0.18rad（go2_sim F6 的注入量）→ 编码器通道故障
+    assert "MOTOR_ENCODER_JUMP" in run([v - 0.18 for v in q])
+
+
+def test_encoder_jump_degrades_without_q_raw():
+    """缺 `q_raw` 时**不命中**，且不崩——不能退回 max_step 去猜。"""
+    pkg = build_knowledge_package(CLEANED)
+    op = build_motor_operator(pkg)
+    q = [i * 0.08 for i in range(60)]
+    ev = {"temperature": 35.0, "current": 12.0, "tau_est": 3.0,
+          "mode": 0, "dq": 0.4, "lost": 0, "q": q[-1]}
+    w = WindowContext(
+        series={"q": q, "temperature": [35.0] * 60, "current": [12.0] * 60,
+                "tau_est": [3.0] * 60, "mode": [0.0] * 60,
+                "dq": [0.4] * 60, "lost": [0.0] * 60},
+        baseline={}, samples=60, times={"q": [i / 20.0 for i in range(60)]},
+    )
+    assert "MOTOR_ENCODER_JUMP" not in set(op.run(ev, w))
+
+
 def test_fixture_detects_wrong_expectation():
     """反例：故意把期望写错，回放必须报 fail（证明回放真的在判定）。"""
     pkg = build_knowledge_package(CLEANED)

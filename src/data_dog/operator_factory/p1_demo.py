@@ -82,7 +82,7 @@ def build_motor_operator(pkg) -> Operator:
     # 电机自身的字段：只从 MotorState 取。同名跨结构体时必须按结构体挑：
     # `temperature` 在 IMUState 里也有，`mode` 在 SportModeState 里也有。
     uniq_fields: list[dict] = []
-    for name in ("mode", "temperature", "dq", "tau_est", "lost", "q"):
+    for name in ("mode", "temperature", "dq", "tau_est", "lost", "q", "q_raw"):
         f = _field(pkg, name, "MotorState")
         if f is not None:
             uniq_fields.append(f)
@@ -416,18 +416,36 @@ def build_motor_operator(pkg) -> Operator:
             "provenance": "assumption",
         },
 
-        # ==== A / 关节电机：编码器跳变 ====
-        # max_step 的物理含义依赖采样率，所以先用 span 把采样率**锁到 ≥50Hz**：
-        # 低于这个速率，"单步 3rad"可能是真实的高角速度而不是编码器故障。
+        # ==== A / 关节电机：编码器跳变（F6）====
+        # 判据是 **`q` 与 `q_raw` 的偏离**，不是 max_step。
+        #
+        # 为什么换掉 max_step：`max_step(q)` 的含义**随采样率变化**——10Hz 下正常
+        # 摆动一步就能超过 0.3rad，而 100Hz 下同样速度只有 0.03rad。旧判据因此
+        # 必须先锁 `samples/span >= 50Hz`，而 go2_sim 按 publish_hz=10 投递，
+        # 这条前置条件**恒不成立**（实测 F6 注入下 samples/span≈10），规则永不出手。
+        # 更根本的是"单步跳多少 rad 算异常"本身要按关节和力矩另行标定。
+        #
+        # 为什么偏离更好：编码器故障的**定义性**特征是"报出来的角度与码盘原始值对不上"
+        # （go2_sim/rig.py 的 F6 就是把 q 加 0.18 而 raw 不动）。这个量是**同一时刻
+        # 两个通道的差**，与采样率无关，也不需要知道关节的物理角速度上限。
+        #
+        # 阈值 0.01 rad 的来处（全部为**项目假设**，厂商未给编码器偏差容限）：
+        # 实测 go2_sim 60s、seed=7、60 点滑窗 @10Hz 的 abs(mean(q)-mean(q_raw))：
+        #     正常      max 0.00038（q 无噪声，raw = q + N(0, 0.0015) 的均值≈0）
+        #     F6 sev=0.1 min 0.01771（注入 0.018 rad，最小档）
+        #     F6 sev=1.0     0.1797
+        # 0.01 落在两者之间：距正常侧 26×，距最弱故障侧 1.8×。
+        # **诚实边界**：0.0015 rad 的量化噪声是仿真器给的，真机码盘噪声量级未知；
+        # 真机接入后必须用实采数据重定这个数，不能沿用。
         {
             "rule_id": "MOTOR_ENCODER_JUMP",
             "subsystem": "A",
-            "when": _win("window.samples() / window.span() >= 50 and "
-                         "window.max_step(q) >= 3.0"),
+            "when": _win("abs(window.mean(q) - window.mean(q_raw)) >= 0.01"),
             "severity_hint": "critical",
-            "message": ("≥50Hz 采样下关节角单步跳变 ≥3rad，超出关节物理角速度上限，"
-                        "疑编码器故障（项目假设阈值；更强的判据需 q 与 q_raw 对比，"
-                        "见'需采集侧补字段'清单）"),
+            "message": ("关节角 q 与编码器原始值 q_raw 的窗口均值偏离 ≥0.01rad，"
+                        "判定为编码器通道故障而非机构真的偏了（项目假设阈值："
+                        "仿真实测正常 ≤0.00038、最弱故障 ≥0.0177，仿真噪声量级 0.0015rad；"
+                        "真机需用实采数据重定）"),
             "field": "q",
             "provenance": "assumption",
         },

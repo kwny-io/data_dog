@@ -46,7 +46,7 @@
 |---|---|---|---|---|
 | A 关节/电机 | `MOTOR_STALL_SUSTAINED` | ≥5s 窗口内 ≥50% 时间 I≥14.5A **且** 50% 时间 \|dq\|<0.05 | 假设 | F1 **99.8%**，3.1s 报出 |
 | A 关节/电机 | `MOTOR_CURRENT_BIAS` | `mean(I) − mean_abs(τ)/1.5825 ≥ 4A` | 假设 | F4 **97.6%**，4.0s 报出 |
-| A 关节/电机 | `MOTOR_ENCODER_JUMP` | 采样率≥50Hz 且单步 \|Δq\|≥3.0rad | 假设 | 仅 fixture |
+| A 关节/电机 | `MOTOR_ENCODER_JUMP` | `\|mean(q) − mean(q_raw)\| ≥ 0.01rad` | 假设 | F6 **99.4%**，0.3s 报出；`go2_sim` 三姿态全中 |
 | A 关节/电机 | `MOTOR_MODE_FLAG_SET` | `(mode & 0x04) != 0` | 假设（位语义 verified） | 仅 fixture |
 | B 热 | `MOTOR_TEMP_PROTECT` | `temperature ≥ 90°C` | **verified** | 随 F1/F5 连带命中 |
 | B 热 | `MOTOR_TEMP_DEGRADE` | `mean T≥40 且 slope≥0.25 且 mean I<7.9` | 假设 | F2 **98.9%**，3.5s 报出 |
@@ -61,19 +61,26 @@
 **normal 在 5 个 seed 上全部 0 命中**（此前 seed=0 有 1.7% 误报 LOAD_SPIKE，已随
 `baseline_abs` 修正归零）。
 
+`MOTOR_ENCODER_JUMP` 的 F6 数字取自 `go2_sim`（40s、seed=7、sev=1.0、故障自 5s 起），
+与同表其他行（`synth`）**不同源**，不可直接横向比较；`go2_sim` 的 F6 注入量固定为
+`q += 0.18×sev`，命中率随 sev 变。
+
 "仅 fixture" = 该项目前只用黄金用例验证了判据逻辑，**没有**进在线端到端实测——
-因为项目自带的合成器（`synth/generator.py`）只注入 F1~F5 五类故障，没有编码器跳变、
-SOC 掉电、lost 计数器这几类的物理注入器。这类规则要么补注入器，要么等真机数据。
+因为 `synth/generator.py` 只注入 F1~F5 五类故障，没有 SOC 掉电、lost 计数器这类物理注入器。
+这类规则要么补注入器，要么等真机数据。
+
+**`MOTOR_ENCODER_JUMP` 已不再属于这一类**：`go2_sim` 的 `F6_encoder_jump` 就是它的物理注入器，
+已跑通端到端（三种姿态各 330/332 帧命中，`q_raw` 在 Parser 侧逐帧都取到了）。
 
 ## 规则 × 姿态（`go2_sim` 数据源，40s，seed 7）
 
 这是演示真正跑的那条链。**表里"—"不都是规则缺陷，逐条注明性质。**
 
-| 姿态 | F1 堵转 | F2 热退化 | F3 丢包 | F4 电流偏置 | F5 负载骤增 |
-|---|---|---|---|---|---|
-| stand | ✅ STALL | ❌ 数据边界 | ✅ PACKET_LOSS | ✅ CURRENT_BIAS | ✅ LOAD_SPIKE |
-| run | ✅ STALL | ✅ TEMP_DEGRADE | ✅ PACKET_LOSS | ✅ CURRENT_BIAS | ⚠ 报成 TEMP_RISE_UNDER_LOAD |
-| prone | ✅ STALL | ❌ 数据边界 | ✅ PACKET_LOSS | ✅ CURRENT_BIAS | ❌ 数据边界 |
+| 姿态 | F1 堵转 | F2 热退化 | F3 丢包 | F4 电流偏置 | F5 负载骤增 | F6 编码器跳变 |
+|---|---|---|---|---|---|---|
+| stand | ✅ STALL | ❌ 数据边界 | ✅ PACKET_LOSS | ✅ CURRENT_BIAS | ✅ LOAD_SPIKE | ✅ ENCODER_JUMP |
+| run | ✅ STALL | ✅ TEMP_DEGRADE | ✅ PACKET_LOSS | ✅ CURRENT_BIAS | ⚠ 报成 TEMP_RISE_UNDER_LOAD | ✅ ENCODER_JUMP |
+| prone | ✅ STALL | ❌ 数据边界 | ✅ PACKET_LOSS | ✅ CURRENT_BIAS | ❌ 数据边界 | ✅ ENCODER_JUMP |
 
 **`normal` 在三种姿态上全部 0 命中**——这是这张表最重要的一行。
 
@@ -86,6 +93,12 @@ SOC 掉电、lost 计数器这几类的物理注入器。这类规则要么补�
   `mean_abs(τ)` 确实相对基线大幅上升，F 子系统的判据在物理上成立。两规则并列上报，
   下游按子系统聚合时应以 A（堵转，`critical`）为准。
 - **F3 三种姿态全部检出**（曾三姿态全漏，已修，见下节）。
+- **F6 三种姿态全部检出**（330/332，末帧仍命中）。旧判据是"采样率 ≥50Hz 且单步
+  |Δq| ≥3rad"，在 `go2_sim` 上**恒假**：仿真按 `publish_hz=10` 投递（`samples/span≈10`），
+  前置条件就过不了；注入量也只有 0.18rad，远低于 3.0。改成判 `q` 与 `q_raw` 的
+  窗口均值偏离后，与采样率无关。**该数字与同表其他行不同源**（见上节脚注）。
+- **F6 的判据依赖 `q_raw`**：载荷缺 `q_raw` 时规则按降级语义**不命中**，不退回
+  `max_step` 去猜——"不知道"不能报成"正常"，也不能报成"故障"。
 - **F5 在 prone 无信号**：`go2_sim` 的 F5 是往机身施加 −60N 下压，趴卧时关节已在
   最低位、无处可让，`mean|τ|` 从 0.39 只到 0.41。同样是物理边界。
 - **F5 在 run 报成 `TEMP_RISE_UNDER_LOAD`**：F5 的 `on_step` 把产热乘 4
