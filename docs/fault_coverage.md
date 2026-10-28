@@ -48,22 +48,30 @@
 
 | 子系统 | rule_id | 判据 | 阈值出处 | 在线实测 |
 |---|---|---|---|---|
-| A 关节/电机 | `MOTOR_STALL_SUSTAINED` | ≥5s 窗口内 ≥50% 时间 I≥90A | 假设 | F1 **95.2%**，5.9s 报出 |
-| A 关节/电机 | `MOTOR_CURRENT_BIAS` | `mean(I) − mean(τ)/0.25 ≥ 4A` | 假设 | F4 **92.7%**，7.3s 报出 |
-| A 关节/电机 | `MOTOR_ENCODER_JUMP` | 采样率≥50Hz 且单步 \|Δq\|≥3.0rad | 假设 | 仅 fixture |
+| A 关节/电机 | `MOTOR_STALL_SUSTAINED` | ≥5s 窗口内 ≥50% 时间 I≥90A | 假设 | F1 **95.2%**，5.9s 报出 ᔆ |
+| A 关节/电机 | `MOTOR_CURRENT_BIAS` | `mean(I) − mean(τ)/0.25 ≥ 4A` | 假设 | F4 **92.7%**，7.3s 报出 ᔆ |
+| A 关节/电机 | `MOTOR_ENCODER_JUMP` | `\|mean(q) − mean(q_raw)\| ≥ 0.01rad` | 假设 | F6 **55~65%**，10.4~13.4s 报出 ᴳ |
 | A 关节/电机 | `MOTOR_MODE_FLAG_SET` | `(mode & 0x04) != 0` | 假设（位语义 verified） | 仅 fixture |
-| B 热 | `MOTOR_TEMP_PROTECT` | `temperature ≥ 90°C` | **verified** | 随 F1/F5 连带命中 |
-| B 热 | `MOTOR_TEMP_DEGRADE` | `mean T≥40 且 slope≥0.25 且 mean I<50` | 假设 | F2 **51.8%**，31.5s 报出 |
+| B 热 | `MOTOR_TEMP_PROTECT` | `temperature ≥ 90°C` | **verified** | 随 F1/F5 连带命中 ᔆ |
+| B 热 | `MOTOR_TEMP_DEGRADE` | `mean T≥40 且 slope≥0.25 且 mean I<50` | 假设 | F2 **51.8%**，31.5s 报出 ᔆ |
 | B 热 | `MOTOR_TEMP_RISE_UNDER_LOAD` | `mean T≥75 且 mean I ≤1.2×基线` | 假设 | 仅 fixture |
 | B 热 | `FIELD_SANITY_TEMP_INVALID` | `temperature < 0` | 假设 | 仅 fixture |
 | C 电源 | `POWER_SOC_LOW` | `bms_soc ≤ 15%` | 假设（字段 verified） | 仅 fixture |
-| E 通信 | `COMM_PACKET_LOSS` | 窗口覆盖率 < 95% | 假设 | F3 **97.0%**，3.9s 报出 |
+| E 通信 | `COMM_PACKET_LOSS` | 窗口覆盖率 < 95% | 假设 | F3 **97.0%**，3.9s 报出 ᔆ |
 | E 通信 | `MOTOR_LOST_COUNTER_RISING` | 窗口内 `Δlost > 0` | 假设 | 仅 fixture |
-| F 整机/步态 | `MOTOR_LOAD_SPIKE` | `mean I≥50 且 max I<90 且 mean τ ≥1.5×基线` | 假设 | F5 **93.3%**，7.0s 报出 |
+| F 整机/步态 | `MOTOR_LOAD_SPIKE` | `mean I≥50 且 max I<90 且 mean τ ≥1.5×基线` | 假设 | F5 **93.3%**，7.0s 报出 ᔆ |
+
+**数据源标记（两个合成器的数字不能混着看）**：
+- ᔆ = `synth/generator.py`，120s、10Hz、故障窗 [40%,90%)、5 个 seed。`scripts/online_fault_coverage.py` 可复现。
+- ᴳ = `go2_sim`（MuJoCo），30s、10Hz 投递、`fault_start=10s`、seed=7，快进式 `step()` 不回放墙钟。
+  命中率随 severity 变：sev=0.1 为 55%、sev=1.0 为 65%；stand/run/prone 三种姿态结果一致。
 
 "仅 fixture" = 该项目前只用黄金用例验证了判据逻辑，**没有**进在线端到端实测——
-因为项目自带的合成器（`synth/generator.py`）只注入 F1~F5 五类故障，没有编码器跳变、
-SOC 掉电、lost 计数器这几类的物理注入器。这类规则要么补注入器，要么等真机数据。
+因为 `synth/generator.py` 只注入 F1~F5 五类故障，没有 SOC 掉电、lost 计数器这类物理注入器。
+这类规则要么补注入器，要么等真机数据。
+
+**`MOTOR_ENCODER_JUMP` 已不再属于这一类**：`go2_sim` 的 `F6_encoder_jump` 就是它的物理注入器，
+已按上面的 ᴳ 口径跑通端到端（`q_raw` 在 Parser 侧实测 300/300 帧都取到了）。
 
 ## 摄取边界（实测确认，不是推测）
 
