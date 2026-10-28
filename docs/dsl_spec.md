@@ -133,6 +133,28 @@ dsl_rules:                 # 第 2 层：受限 DSL（本规范）
 | `window.baseline(field)` | **同工况基线值**（来自 Enricher 的基线快照） |
 | `window.baseline_abs(field)` | 与 `mean_abs` 配对的基线（`\|x\|` 的滚动均值）；取不到返回 None，**不回退**到有符号基线 |
 | `window.delta(field)` | 窗口末值 − 首值 |
+| `window.samples()` | 窗口内**网关收到**的样本条数 |
+| `window.span()` | 窗口的时间跨度（秒），按事件时间；不足两条返回 None |
+| `window.packet_coverage()` | **包级**到达率 = 到达 / 应到（按设备序列号空洞算）；不知道时返回 None |
+| `window.packets_lost()` | 窗口内丢失的**整包**个数；不知道时返回 None |
+
+**`samples` 与 `packet_coverage` 是两个量，不能互相替代**（这三个零参函数
+走的是 `WINDOW_META_FUNCS` 分支，不接字段名）：
+
+- `window.samples()` 答"网关收到了几条"——整包丢失时它跟着变少，**看不见丢失本身**；
+- `window.packet_coverage()` 答"设备发了几条、到了几条"——只有它看得见整包丢失。
+
+字段级覆盖率 `window.coverage(field)` 对整包丢失**结构上不可见**：包没进网关，
+`push()` 没被调用，分子分母一起缩水，比值恒为 1.0。判丢包必须用包级：
+
+```yaml
+when: "window.packet_coverage() < 0.95"                      # 包没到
+when: "window.coverage(temperature) < 0.95 and window.packet_coverage() >= 0.95"   # 包到了但字段残缺
+```
+
+**降级语义**：窗口内不足两条、或任一条缺序列号 → 两个包级函数都返回 None，
+判据按"数据不足"不命中。**"不知道"不得报成 1.0**，否则"没给序列号"会被
+伪装成"没丢包"。序列号回跳（设备重启归零）不算丢包。
 
 **口径配对规则（重要）**：统计量和基线必须同口径。判"大小/幅度"时用
 `mean_abs` / `count_abs` / `max_step` 配 `baseline_abs`；判"净偏移/趋势"时用

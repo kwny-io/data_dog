@@ -3,7 +3,7 @@
 > 规则定义：`src/data_dog/operator_factory/p1_demo.py`
 > 在线实测（合成器）：`python scripts/online_fault_coverage.py`
 > 在线实测（MuJoCo 仿真）：`python scripts/go2_sim_coverage.py`
-> 黄金用例：`python -m data_dog.operator_factory.p1_demo`（23 条，正例+反例）
+> 黄金用例：`python -m data_dog.operator_factory.p1_demo`（25 条，正例+反例）
 > 字段出处：`vendor_docs/unitree/cleaned/`（IDL 与协议头）
 
 ## 先看结论
@@ -19,8 +19,8 @@
 3. **链路两头各缺一半**——仿真侧还没把非电机子系统发进信封，检测侧也还没声明
    IMU/整机算子字段。这是**未开工**，不是做不了；见 §"摄取边界 3"。
 4. **字段能进来、但物理上分不开**——见 §"分不开的情况"，硬做只会造出互相抢报的假规则。
-5. **物理上根本没有那个信号**——静止姿态不发热，所以"散热变差"在站立/趴卧上测不出来；
-   整包丢包不进窗口，所以字段级覆盖率判据看不见它。见 §"两个数据源的边界"。
+5. **物理上根本没有那个信号**——静止姿态不发热，所以"散热变差"在站立/趴卧上测不出来。
+   （整包丢包曾属此类，现已用包级判据解决，见 §"F3 为什么以前测不出来"。）
 
 ## ⚠ 两套数据源的结果不同，不要混着引用
 
@@ -53,7 +53,8 @@
 | B 热 | `MOTOR_TEMP_RISE_UNDER_LOAD` | `mean T≥75 且 mean I ≤1.2×基线` | 假设 | 仅 fixture |
 | B 热 | `FIELD_SANITY_TEMP_INVALID` | `temperature < 0` | 假设 | 仅 fixture |
 | C 电源 | `POWER_SOC_LOW` | `bms_soc ≤ 15%` | 假设（字段 verified） | 仅 fixture |
-| E 通信 | `COMM_PACKET_LOSS` | 窗口覆盖率 < 95% | 假设 | F3 **97.0%**，3.9s 报出 |
+| E 通信 | `COMM_PACKET_LOSS` | **包级**到达率 < 95%（设备序列号空洞） | 假设 | F3 **97.0%**，3.9s 报出；`go2_sim` 三姿态全中 |
+| E 通信 | `COMM_FIELD_INCOMPLETE` | 包都到了，但字段有效率 < 95% | 假设 | 仅 fixture |
 | E 通信 | `MOTOR_LOST_COUNTER_RISING` | 窗口内 `Δlost > 0` | 假设 | 仅 fixture |
 | F 整机/步态 | `MOTOR_LOAD_SPIKE` | `mean I≥1.4 且 I≥14.5A 占比<50% 且 mean_abs(τ) ≥1.5×baseline_abs(τ)，且排除热退化画像` | 假设 | F5 **99.6%**，3.2s 报出 |
 
@@ -70,9 +71,9 @@ SOC 掉电、lost 计数器这几类的物理注入器。这类规则要么补�
 
 | 姿态 | F1 堵转 | F2 热退化 | F3 丢包 | F4 电流偏置 | F5 负载骤增 |
 |---|---|---|---|---|---|
-| stand | ✅ STALL | ❌ 数据边界 | ❌ 摄取缺口 | ✅ CURRENT_BIAS | ✅ LOAD_SPIKE |
-| run | ✅ STALL | ✅ TEMP_DEGRADE | ❌ 摄取缺口 | ✅ CURRENT_BIAS | ⚠ 报成 TEMP_RISE_UNDER_LOAD |
-| prone | ✅ STALL | ❌ 数据边界 | ❌ 摄取缺口 | ✅ CURRENT_BIAS | ❌ 数据边界 |
+| stand | ✅ STALL | ❌ 数据边界 | ✅ PACKET_LOSS | ✅ CURRENT_BIAS | ✅ LOAD_SPIKE |
+| run | ✅ STALL | ✅ TEMP_DEGRADE | ✅ PACKET_LOSS | ✅ CURRENT_BIAS | ⚠ 报成 TEMP_RISE_UNDER_LOAD |
+| prone | ✅ STALL | ❌ 数据边界 | ✅ PACKET_LOSS | ✅ CURRENT_BIAS | ❌ 数据边界 |
 
 **`normal` 在三种姿态上全部 0 命中**——这是这张表最重要的一行。
 
@@ -84,17 +85,65 @@ SOC 掉电、lost 计数器这几类的物理注入器。这类规则要么补�
 - **F1 会连带报 `MOTOR_LOAD_SPIKE`**（stand 302 帧里 29 帧、prone 26 帧）：堵转时
   `mean_abs(τ)` 确实相对基线大幅上升，F 子系统的判据在物理上成立。两规则并列上报，
   下游按子系统聚合时应以 A（堵转，`critical`）为准。
-- **F3 三种姿态全部漏**：`go2_sim` 的 F3 是**整包丢弃**（`envelope()` 返回 None，
-  实测 11.5% 的包没进网关），而 `COMM_PACKET_LOSS` 判的是
-  `coverage(temperature) < 0.95`——字段级缺失率。包没进窗口，`samples` 也不增加，
-  覆盖率恒为 1.0。**这是检测链的真实缺口，不是数据边界**：包级丢包目前不可观测，
-  需要在网关侧加丢包计数（未开工）。
+- **F3 三种姿态全部检出**（曾三姿态全漏，已修，见下节）。
 - **F5 在 prone 无信号**：`go2_sim` 的 F5 是往机身施加 −60N 下压，趴卧时关节已在
   最低位、无处可让，`mean|τ|` 从 0.39 只到 0.41。同样是物理边界。
 - **F5 在 run 报成 `TEMP_RISE_UNDER_LOAD`**：F5 的 `on_step` 把产热乘 4
   （`extra = 1+3·sev`），奔跑时会烧到高温，于是"高温 + 电流未显著上升"这条先成立
   （40s 下 149 帧报 `TEMP_RISE_UNDER_LOAD`、192 帧报 `TEMP_DEGRADE`，后者末帧仍在）。
   **这是真实的物理耦合**（重载确实会过热），不是误报，但子系统归因偏了 B 而非 F。
+
+## F3 为什么以前测不出来（包级 vs 字段级）
+
+先说结论：**整包丢失对字段级覆盖率结构上不可见。** 这不是阈值调得不够松，
+是判据本身看不见这类现象。
+
+`window.coverage(field)` 的算法是 `len(series[field]) / samples`，而 `samples` 是
+**网关收了多少条**。整包丢失时：
+
+- 包根本没进网关 → `push()` 没被调用 → `samples` 少加一；
+- 这个字段自然也没进 `series` → 分子少加一。
+
+**分子分母一起缩水，比值恒为 1.0。** 实测 `go2_sim` 40s 的 F3 故障窗整包丢了 16%
+（332 帧丢 53 帧），字段级覆盖率全程 1.0，`COMM_PACKET_LOSS` 一次都没命中过。
+
+唯一能揭示丢包的信息是**设备序列号**：`RawLogEnvelope.sequence` 由设备单调递增，
+网关收到 3、5 就说明 4 丢了。判据改成包级：
+
+```
+expected = 1 + Σ max(1, b − a)        # a、b 为相邻两个到达的序列号
+coverage = arrived / expected
+```
+
+两个坑，都已用测试钉住：
+
+1. **不能写 `Σ max(0, b − a − 1)`**。求和 `b−a` 本身会望远镜式抵消成
+   `last − first`，再减 1 就少算了每段的第一包。实测该写法把 60/80 算成 20/20
+   （覆盖率 1.0，报不出来），正确写法是 60/79。
+2. **序列号回跳不能算丢包**。设备重启会把序列号归零（40 → 1），
+   若按 `b − a` 直接减，会读成"一次丢了 39 包"，每次重启都误报。
+   `b − a ≤ 0` 一律按 1 算，即"这是紧接着的一条"。
+
+`samples` 与 `packets` 是**两个量，不能混**：前者答"网关收到几条"，
+后者答"设备发了几条、到了几条"。旧规则把前者当后者用，就是这次的根因。
+
+修完的完整链路实测（`go2_sim`，40s，seed 7，故障自 5s 注入）：
+
+| 姿态 | 情形 | 末帧判定 | 事件数 | 命中 |
+|---|---|---|---|---|
+| stand / run / prone | normal | — | 332 | 无 |
+| stand / run / prone | F3 丢包 | `COMM_PACKET_LOSS` | 279 | ×236，末帧仍在 ✓ |
+
+同时新增两条规则分工（**不是重复**）：
+
+- `COMM_PACKET_LOSS` —— 包没到；
+- `COMM_FIELD_INCOMPLETE` —— 包到了，但某个字段没解出来（载荷残缺或解析失败）。
+
+两条互斥触发，`COMM_FIELD_INCOMPLETE` 额外要求 `packet_coverage() >= 0.95`。
+
+**这个缺陷已进问题台账**——它是本项目第三个"判据结构上盲"的例子
+（前两个是 `dq` 未取绝对值、`mean_abs(τ)` 配有符号基线），共同特征是
+**在旧数据源上永远测不出来**，只能靠换一个数据源或换一个观测量才暴露。
 
 ## 三条修过的口径错误（都用实测数字说话）
 
@@ -265,6 +314,11 @@ not (mean(temperature) >= 40 and slope(temperature) >= 0.25 and mean(current) < 
    （那会把每条正常读数判成异常），也**绝不回退到另一个口径的基线**
    （`baseline_abs()` 不会去读有符号基线——那正是要被修掉的错配）。
 3. **窗口缺失**：`series` 为空时所有 DSL 规则直接跳过，不拿单条 metrics 冒充窗口。
+4. **包级统计不足**：`window.packet_coverage()` / `packets_lost()` 在
+   "窗口内不足两条"或"任一条缺序列号"时返回 None → 判据不命中。
+   **"不知道"绝不能报成 1.0**——那会把"没给序列号"伪装成"没丢包"。
+   这正是旧 fixture 一度白过（而不是真过）的原因：它们没写 `sequences`，
+   规则静默跳过，看起来像"反例通过"。现在几条相关 fixture 都补了真实序列号。
 
 实测：拿 `load_spike_positive` 的正例，有基线时命中、无基线时**不命中**且不抛异常。
 
@@ -276,7 +330,7 @@ not (mean(temperature) >= 40 and slope(temperature) >= 0.25 and mean(current) < 
 ## 复现
 
 ```bash
-python -m data_dog.operator_factory.p1_demo          # 23 条黄金用例
+python -m data_dog.operator_factory.p1_demo          # 25 条黄金用例
 python scripts/online_fault_coverage.py              # 合成器：5 类故障 × 5 seed
 python scripts/online_fault_coverage.py --json       # 机器可读
 python scripts/go2_sim_coverage.py                   # MuJoCo：3 姿态 × 6 情形

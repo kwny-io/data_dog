@@ -15,7 +15,8 @@
           crc16 crc32 checksum8
   窗口  ：window.mean/max/min/last/first/sum/std/slope/delta/max_step/
           baseline/count/p50/p95/coverage/mean_abs/baseline_abs/count_abs
-  元信息：window.samples() / window.span()（窗口自身，无字段参数）
+  元信息：window.samples() / window.span() /
+          window.packet_coverage() / window.packets_lost()（窗口自身，无字段参数）
   括号分组。
 
 未落地（显式声明，避免"假装支持"）：to_celsius 等**单位换算函数**（需算子声明单位表，留待
@@ -151,7 +152,7 @@ WINDOW_FUNCS = {
 }
 # 零参数的窗口函数：取的是**窗口本身**的元信息，不是某个字段的聚合。
 # 单独成集，因为解析器的"第一个参数须是字段名"规则对它们不适用。
-WINDOW_META_FUNCS = {"samples", "span"}
+WINDOW_META_FUNCS = {"samples", "span", "packet_coverage", "packets_lost"}
 
 
 class Parser:
@@ -289,6 +290,41 @@ def _duration_to_seconds(s: str) -> float:
     return v / 1000.0 if unit == "ms" else v * 60.0 if unit == "m" else v
 
 
+# ---------------------------------------------------------------- 包级到达率
+
+def packet_coverage_of(seqs: Sequence[int | None]) -> dict[str, Any]:
+    """按**设备序列号**的连续性算包级到达率。
+
+    放在这里（而不是 `data_plane.chain`）是分层决定的：在线窗口与离线 fixture
+    都要用同一份算法，而 `data_plane` 已经单向依赖本模块（`Detector` 调 `evaluate`）。
+    反向放会造出 `data_plane ↔ operator_factory` 的循环导入，`test_layering` 会红。
+
+    **为什么不能靠字段级覆盖率**：`len(series[f]) / samples`，整包丢失时包没进网关，
+    `push()` 没被调用、`samples` 也不增加，分子分母一起缩水 → 恒为 1.0。
+    唯一能揭示丢包的是设备序列号：收到 3、5 就说明 4 丢了。
+
+    `expected` 的算法：每相邻一对算"这一段应该发生几包"，正常 +1，有缺口时
+    `b - a` 就是应发数（如 3→5 表示中间该有 4，共 2 包）。
+    **不能写成 `max(0, b-a-1)` 再求和**：`Σ(b-a)` 会望远镜式抵消成 `last-first`，
+    再减 1 就少算每段的第一包——实测该写法把 60/80 算成 20/20（覆盖率 1.0，报不出来）。
+
+    返回 `known=False` 的情形（调用方必须跳过判据）：
+      - 不足两条（一条算不出"相邻差"）；
+      - 任一条缺序列号（不知道就别说，别把"没给"当成"没丢"）。
+    """
+    if len(seqs) < 2 or any(s is None for s in seqs):
+        return {"known": False, "expected": 0, "arrived": 0, "lost": 0,
+                "coverage": None, "samples": len(seqs)}
+    arrived = len(seqs)
+    # 每一步"应该发生几包"：正常 +1；有缺口时 b-a 就是这一段应发的包数
+    # （如 3→5 说明中间该有 4，共 2 包）。b-a<=0（回跳/重复/重启归零）按 1 算，
+    # 即"这是紧接着的一条"，不把它当成丢包——设备重启是常态，误报代价高。
+    expected = 1 + sum(max(1, b - a) for a, b in zip(seqs, seqs[1:], strict=False))
+    lost = expected - arrived
+    return {"known": True, "expected": expected, "arrived": arrived,
+            "lost": lost, "coverage": arrived / expected, "samples": arrived}
+
+
 # ---------------------------------------------------------------- 窗口上下文
 
 @dataclass
@@ -303,11 +339,21 @@ class WindowContext:
     `slope`（单位 = 字段单位/秒，与采样率无关）；没给则退回按样本序号（等价于 1Hz）。
     这是 dsl_spec §3.4「窗口聚合只依赖事件时间」的落地——不这么做，同一个斜率阈值
     在 10Hz 与 100Hz 下含义完全不同。
+
+    `packets`：**包级**到达情况（`WindowBuffer.packet_coverage` 的返回值），
+    形如 `{"known": True, "expected": 62, "arrived": 53, "lost": 9, "coverage": .85}`。
+    与 `samples` 是两个不同的量，不能互相替代：
+      - `samples` = 网关**收到**几条 → 整包丢失时它也跟着变小，看不出缺口；
+      - `packets` = 设备**发出**几条、实际到了几条（按序列号连续性算）。
+    `window.coverage(field)` 用的是前者，因此对整包丢失结构上不可见；
+    判包级丢包必须用 `window.packet_coverage()`。`known=False` 时它返回 None
+    （"不知道"），与 `coverage` 同一降级语义。
     """
     series: dict[str, list[float]] = field(default_factory=dict)
     baseline: dict[str, float] = field(default_factory=dict)
     samples: int = 0
     times: dict[str, list[float]] = field(default_factory=dict)
+    packets: dict[str, Any] = field(default_factory=dict)
 
     def _vals(self, name: str) -> list[float] | None:
         return self.series.get(name)
@@ -319,9 +365,20 @@ class WindowContext:
         - `span`：窗口的事件时间跨度（秒）。**需要 `times` 或各序列等长可推断**；
           拿不到事件时间时返回 None，绝不用"样本条数"冒充秒数——否则同一个
           阈值在 10Hz 与 100Hz 下含义差 10 倍。
+        - `packet_coverage`：包级到达率 = 实到 / 应有（按设备序列号空洞算）。
+          `known=False`（序列号不足/缺失）→ None，绝不返回 1.0 冒充"没丢包"。
+        - `packets_lost`：窗口内**整包丢失**的条数。同上，不知道 → None。
         """
         if func == "samples":
             return self.samples if self.samples > 0 else None
+        if func == "packet_coverage":
+            if not self.packets.get("known"):
+                return None
+            return self.packets.get("coverage")
+        if func == "packets_lost":
+            if not self.packets.get("known"):
+                return None
+            return self.packets.get("lost")
         if func == "span":
             xs: list[float] = []
             for fld, vals in self.series.items():

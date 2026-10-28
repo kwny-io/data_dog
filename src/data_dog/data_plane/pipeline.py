@@ -141,8 +141,10 @@ class DataPlane:
 
         # 窗口特征（G2：传入事件时间，使窗口按事件时间有序；未启用水位线时
         # 事件时间仍被采用，乱序不会污染 mean/slope——这是纯增益，无回归）。
+        # `sequence` 一并存入：包级丢包只能靠序列号空洞发现（字段级覆盖率
+        # 对整包丢失结构上不可见，见 `WindowBuffer.packet_coverage`）。
         key = f"{env.device_sn}|{component}"
-        self.window.push(key, metrics, occurred_at_s=at_s)
+        self.window.push(key, metrics, occurred_at_s=at_s, sequence=env.sequence)
 
         norm = NormalizedTelemetryEvent(
             event_id=env.event_id, tenant_id=env.tenant_id, device_sn=env.device_sn,
@@ -167,6 +169,7 @@ class DataPlane:
                 samples=self.window.sample_count(key),
                 times=self.window.times(key),
                 baseline=baseline,
+                packets=self.window.packet_coverage(key),
             )
             if hits:
                 self.builder.add(

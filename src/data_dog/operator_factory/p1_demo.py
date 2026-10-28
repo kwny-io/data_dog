@@ -250,14 +250,42 @@ def build_motor_operator(pkg) -> Operator:
             "provenance": "assumption",
         },
 
-        # ==== E / 通信：丢包（F3，观测侧）====
-        # 窗口只收有限数值，丢包样本不留占位 → 字段有效率下降就是丢包的可观测信号。
+        # ==== E / 通信：丢包（F3，包级）====
+        # **必须判包级，不能判字段级。** 这条规则原来写的是
+        #     window.coverage(temperature) < 0.95
+        # 它对**整包丢失**结构上不可见：包根本没进网关 → `push()` 没被调用 →
+        # `sample_count` 也不增加，分子分母一起缩水 → 覆盖率恒为 1.0。
+        # go2_sim 实测 40s 里整包丢了 16%（332 帧丢 53 帧），覆盖率仍是 1.0，
+        # 规则一次都没命中过。字段级覆盖率只能看见"包到了但字段缺失"，
+        # 那和整包丢失是两回事。
+        #
+        # 改用序列号连续性：`packet_coverage()` = 实到 / 应有。
+        # 实测（go2_sim，10Hz 抽稀）：正常工况 0% 空洞，F3 故障窗内 16.0%。
+        # 门槛 0.95 保持不变（原来就是这个数，语义没变，只是换了正确的观测口径），
+        # 余量 11 个百分点。
         {
             "rule_id": "COMM_PACKET_LOSS",
             "subsystem": "E",
-            "when": _win("window.coverage(temperature) < 0.95"),
+            "when": _win("window.packet_coverage() < 0.95"),
             "severity_hint": "warning",
-            "message": ("窗口内该部件温度有效率低于 95%（项目假设阈值；厂商未给丢包容忍度）"),
+            "message": ("窗口内整包到达率低于 95%（按设备序列号空洞统计；"
+                        "项目假设阈值，厂商未给丢包容忍度）"),
+            "field": "temperature",
+            "provenance": "assumption",
+        },
+
+        # ==== E / 通信：丢包（F3，字段级）====
+        # 与上面那条**不是重复**：这条看的是"包到了、但有字段没解出来"
+        # （载荷残缺 / 解析失败 / 部分字段 NaN），包级那条看不见这种。
+        # 两者互补：整包丢失只有包级能看见，字段残缺只有字段级能看见。
+        {
+            "rule_id": "COMM_FIELD_INCOMPLETE",
+            "subsystem": "E",
+            "when": _win("window.coverage(temperature) < 0.95 and "
+                         "window.packet_coverage() >= 0.95"),
+            "severity_hint": "warning",
+            "message": ("包都到了，但窗口内温度字段有效率低于 95%"
+                        "（载荷残缺或解析失败；项目假设阈值）"),
             "field": "temperature",
             "provenance": "assumption",
         },
