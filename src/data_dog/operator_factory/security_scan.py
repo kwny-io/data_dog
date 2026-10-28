@@ -187,12 +187,31 @@ def _parse_pip_audit(raw: Any) -> list[ScanFinding]:
 
 
 def _default_pip_audit_runner(lockfile: str) -> Any:
-    """默认 SCA 执行器：跑 `pip-audit -f json`（对 lockfile 或当前环境）。"""
+    """默认 SCA 执行器：跑 `pip-audit -f json`（对 lockfile 或当前环境）。
+
+    两个必须显式处理的边界（都实测过）：
+    1. **编码**：`text=True` 默认 UTF-8，而 Windows 中文 locale 下工具输出可能是 GBK/CP936。
+       解码失败会发生在 subprocess 的读取线程里 → `proc.stdout` 变 **None**，
+       而旧代码 `json.loads(proc.stdout or "{}")` 会把它变成 `{}` → 无 finding → **status=pass**。
+       即“扫描器崩了，报告说通过”。给 `encoding+errors` 让它变成可读的乱码而不是 None，
+       再把空输出当失败抛出去（`scan_dependencies` 会转成 `skipped≠pass`）。
+    2. **退出码/空输出**：工具非 0 退出或一行没输出时，`{}` 不是“干净”，是“没扫成”。
+    """
     cmd = [sys.executable, "-m", "pip_audit", "-f", "json"]
     if lockfile:
         cmd += ["-r", lockfile]
-    proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
-    return json.loads(proc.stdout or "{}")
+    proc = subprocess.run(cmd, capture_output=True, text=True,
+                          encoding="utf-8", errors="replace", check=False)
+    out = (proc.stdout or "").strip()
+    if not out:
+        raise RuntimeError(
+            f"pip-audit 未输出任何内容（rc={proc.returncode}），无法判定依赖安全状态"
+            + ((proc.stderr or "").strip()[:200] and
+               f": {(proc.stderr or '').strip()[:200]}"))
+    try:
+        return json.loads(out)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(f"pip-audit 输出不是合法 JSON: {e}") from e
 
 
 def scan_dependencies(*, lockfile: str = "",
