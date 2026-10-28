@@ -1,10 +1,87 @@
 # 在线故障覆盖矩阵（按子系统）
 
-> 规则定义：`src/data_dog/operator_factory/p1_demo.py`
+> 规则定义：`src/data_dog/operator_factory/p1_demo.py`（电机）+
+> `src/data_dog/go2_sim/subsystem_operator.py`（电池/IMU/散热/整机）
+> 全量矩阵（真实双数据面，23 条 + normal）：`python scripts/go2_sim_matrix.py`
 > 在线实测（合成器）：`python scripts/online_fault_coverage.py`
-> 在线实测（MuJoCo 仿真）：`python scripts/go2_sim_coverage.py`
+> 在线实测（MuJoCo 电机侧）：`python scripts/go2_sim_coverage.py`
 > 黄金用例：`python -m data_dog.operator_factory.p1_demo`（25 条，正例+反例）
 > 字段出处：`vendor_docs/unitree/cleaned/`（IDL 与协议头）
+
+## 全量矩阵：23 条故障 × 真实双数据面（2026-10-29 实测）
+
+**这张表是本文档唯一的总账**，其余各节是它的展开与原理。跑法：
+
+```bash
+python scripts/go2_sim_matrix.py            # 90 仿真秒，约 3 分钟
+```
+
+工况：`posture=run`、`severity=1.0`、`thermal_scale=80`、故障自 5 秒注入、
+10Hz 投递、窗口 60 样本。链路是 `server.py` 的**真实** `_PlaneSink`——
+两条独立数据面，按信封 `component_hint` 分流（电机 → 电机算子；
+电池/IMU/散热/整机 → 子系统算子），不是绕过 resolver 的简化版。
+
+| # | 故障 | 首检(s) | 命中帧 | 命中规则 |
+|---|---|---|---|---|
+| — | **normal** | **无** | **0** | **零误报 ✅** |
+| F1 | 堵转 | 3.3 | 772 | `MOTOR_STALL_SUSTAINED` ×770, `MOTOR_LOAD_SPIKE` ×2 |
+| F2 | 散热失效 | 10.3 | 717 | `MOTOR_TEMP_DEGRADE` ×717, `MOTOR_TEMP_RISE_UNDER_LOAD` ×439, `MOTOR_TEMP_PROTECT` ×340 |
+| F3 | 通信丢包 | 5.3 | 644 | `COMM_PACKET_LOSS` ×644 |
+| F4 | 电流零漂 | 2.0 | 793 | `MOTOR_CURRENT_BIAS` ×762, `MOTOR_TAU_EST_FAIL` ×31 |
+| F5 | 负载骤增 | 0.2 | 1373 | `MOTOR_TEMP_RISE_UNDER_LOAD` ×627, `BATTERY_OVERHEAT` ×575, `MOTOR_TEMP_DEGRADE` ×192, `POWER_BUS_OVERCURRENT` ×97 |
+| F6 | 编码器跳变 | 0.3 | 808 | `MOTOR_ENCODER_JUMP` ×808 |
+| F7 | 力矩估算失效 | 3.8 | 776 | `MOTOR_TAU_EST_FAIL` ×776 |
+| F8 | 电机失联 | — | 0 | ❌ 见下 |
+| F9 | 风扇停转 | 0.1 | 1094 | `COM_FAN_STALLED` ×810, `MOTOR_TEMP_DEGRADE` ×284 |
+| F10 | 环境高温 | 4.2 | 773 | `MOTOR_TEMP_RISE_UNDER_LOAD` ×698, `MOTOR_TEMP_DEGRADE` ×204 |
+| F11 | 电量低 | 0.1 | 810 | `POWER_SOC_LOW` ×810, `POWER_BUS_VOLTAGE_LOW` ×810 |
+| F12 | 单体不均衡 | 0.1 | 810 | `BATTERY_CELL_IMBALANCE` ×810 |
+| F13 | 电池过温 | 28.0 | 542 | `BATTERY_OVERHEAT` ×542 |
+| F14 | 母线跌压 | 0.1 | 810 | `POWER_BUS_VOLTAGE_LOW` ×810 |
+| F15 | 电池过流 | 0.2 | 770 | `BATTERY_OVERHEAT` ×739, `POWER_BUS_OVERCURRENT` ×355 |
+| F16 | 陀螺零偏 | — | 0 | ❌ 缺规则（见 §3） |
+| F17 | 加速度计失效 | — | 0 | ❌ 缺规则（见 §3） |
+| F18 | 翻倒 | 3.1 | 1 | `POSTURE_FALLEN` ×1 |
+| F19 | CRC 错误 | 0.1 | 1435 | `COM_CRC_ERROR_RATE` ×810, `COMM_PACKET_LOSS` ×625 |
+| F20 | 带宽下降 | 0.1 | 810 | `COM_BANDWIDTH_LOW` ×810 |
+| F21 | 步态异常 | — | 0 | ❌ 缺规则（见 §3） |
+| F22 | 足端打滑 | — | 0 | ❌ 仿真侧信号不足（见 §4） |
+| F23 | 整机报错 | 0.1 | 810 | `SYS_ERROR_CODE_SET` ×810 |
+
+**18 / 23 条检出，`normal` 零误报。**
+
+### 表里三处需要如实说明的地方
+
+**F18 只报 1 帧，是真的。** MuJoCo 里 F18 给机身施加 55N 横向冲量，狗真的翻过去
+（`body_height` 最低 0.0644，阈值 0.10），但接触动力学随后让它**自己爬起来了**
+（几十秒内稳定在 0.155）。所以只有翻倒那一瞬间满足 `body_height < 0.10`。
+这是物理事实，不是规则抖动——真机上"摔倒又爬起来"本来就只该报一次。
+站立姿态同样会翻（最低 0.0448）；趴卧姿态最低只到 0.1069，**判不出来**，
+因为趴着本来离地就低。
+
+**F5 报的四条规则里没有 `MOTOR_LOAD_SPIKE`。** 这符合设计：F5 把产热乘 4，
+奔跑时会烧到高温，"高温 + 电流未显著上升"的排除项（§分不开的情况）主动让位给
+B 子系统。演示旁白应说"重载导致过热"，不要说"检测出负载骤增"。
+
+**F19 连带报 `COMM_PACKET_LOSS`。** CRC 错的帧在仿真侧是整帧丢弃，序列号出现空洞，
+包级判据正确地把它识别为"包没到"。两条规则并列上报是**对的**：一条说"包没到"，
+一条说"到了的包有 CRC 错"，合起来才是完整画像。
+
+### window=60 是必须的，不是调优
+
+`MOTOR_STALL_SUSTAINED` 的前置是 `window.span() >= 5.0`（事件时间秒）。
+`DataPlane` 默认窗口 30 样本，10Hz 投递下只有 **3 秒**——这条规则在演示链路上
+**恒假**。实测（F1、run、90 仿真秒）：
+
+| 窗口 | `MOTOR_STALL_SUSTAINED` | `MOTOR_LOAD_SPIKE` | 结论 |
+|---|---|---|---|
+| 30 样本（旧默认） | **0 帧** | 1 帧 | F1 被歪打正着报出，**归因错到 F 子系统** |
+| 60 样本（现配置） | **770 帧** | 2 帧 | 正确规则出手，归因 A 子系统 |
+
+已在 `server.py` 里固定 `WINDOW_SIZE = 60`（6 秒 @10Hz），并写明原因。
+**这一条不只影响演示**：任何按 10Hz 投递、窗口用默认 30 的部署，堵转规则都不会响。
+
+---
 
 ## 先看结论
 
@@ -346,10 +423,22 @@ not (mean(temperature) >= 40 and slope(temperature) >= 0.25 and mean(current) < 
 python -m data_dog.operator_factory.p1_demo          # 25 条黄金用例
 python scripts/online_fault_coverage.py              # 合成器：5 类故障 × 5 seed
 python scripts/online_fault_coverage.py --json       # 机器可读
-python scripts/go2_sim_coverage.py                   # MuJoCo：3 姿态 × 6 情形
+python scripts/go2_sim_coverage.py                   # MuJoCo 电机侧：3 姿态 × 7 情形
 python scripts/go2_sim_coverage.py --seconds 60 --seed 7 --postures run,prone
+python scripts/go2_sim_matrix.py                     # 全量：23 条 + normal，真实双数据面
+python scripts/go2_sim_matrix.py --json               # 机器可读
 ```
 
-`go2_sim_coverage.py` 单独跑比较慢（MuJoCo 要真解算，3 姿态 × 6 情形约 2 分钟），
+**跑短了会假性漏检。** 全量矩阵默认 90 仿真秒是**必要条件**，不是随便定的：
+F13 电池过温要 28 秒才越线（电池热惯性最大的一条）。`--seconds 25` 会报 17/23，
+那条差额**不是漏检**，是仿真时间不够。脚本会在汇总行下面显式提示。
+
+**`go2_sim_coverage.py` 与 `go2_sim_matrix.py` 测的不是一件事**：
+前者只装**电机**算子，用来测"电机规则在 MuJoCo 数据上灵不灵"，
+电池/散热/通信/整机那 11 类在它那里结构上不可能出候选；
+后者装的是演示真正跑的**双数据面** `_PlaneSink`，测"整套检测链路认得几类故障"。
+**要引用"覆盖率"就用后者**，前者只能引用电机那几行。
+
+`go2_sim_coverage.py` 单独跑比较慢（MuJoCo 要真解算，3 姿态 × 7 情形 = 21 次约 2 分钟），
 建议后台跑。它默认 40s、seed 7；上表的数字就是这组参数。
 

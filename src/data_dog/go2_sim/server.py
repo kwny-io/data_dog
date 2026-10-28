@@ -49,6 +49,14 @@ from .session import SPEEDS, SimEvent, SimSession
 DEMO_TENANT = "tenant-go2-demo"
 DEMO_DEVICE = "device-go2-sim-01"
 
+# 窗口样本数。**不能用 `DataPlane` 的默认值 30**，那在 10Hz 投递下只有 3 秒，
+# 而 `MOTOR_STALL_SUSTAINED` 的前置是 `window.span() >= 5.0`——窗口永远够不到
+# 5 秒，这条规则在演示链路上**恒假**。实测（F1 堵转、run、90 仿真秒）：
+# 窗口 30 时正确规则 0 命中，F1 只能靠 `MOTOR_LOAD_SPIKE` 歪打正着报出来
+# （归因到 F 子系统而非 A）；窗口 60 时 `MOTOR_STALL_SUSTAINED` 命中 770 帧。
+# 60 样本 @10Hz = 6 秒，刚好越过 5 秒门槛并留余量。
+WINDOW_SIZE = 60
+
 
 class _PlaneSink:
     """把会话产出的事件喂给 data_dog 的在线数据面。
@@ -108,7 +116,12 @@ class _PlaneSink:
             ("subsystem", build_subsystem_operator, tuple(SUBSYSTEM_SOURCES)),
         ):
             try:
-                self._planes.append((label, DataPlane(build_demo_resolver(factory())), comps))
+                self._planes.append((
+                    label,
+                    DataPlane(build_demo_resolver(factory()),
+                              window_size=WINDOW_SIZE),
+                    comps,
+                ))
             except Exception as e:          # noqa: BLE001
                 errs.append(f"{label}: {type(e).__name__}: {e}")
         if errs:
