@@ -238,8 +238,11 @@ class SimSession:
             out = Image.open(io.BytesIO(data))
             # 等比铺满再居中裁切，避免把狗拉变形
             scale = max(w / out.width, h / out.height)
+            # 同 rig._fit：`Image.Resampling.LANCZOS` 是 Pillow 9.1+ 的
+            # 正式写法，`Image.LANCZOS` 已从类型存根移除。
             mid = out.resize((max(1, round(out.width * scale)),
-                              max(1, round(out.height * scale))), Image.LANCZOS)
+                              max(1, round(out.height * scale))),
+                             Image.Resampling.LANCZOS)
             left = (mid.width - w) // 2
             top = (mid.height - h) // 2
             buf = io.BytesIO()
@@ -302,6 +305,11 @@ class SimSession:
     def _publish(self, t_last: Telemetry) -> None:
         """一个遥测点 → 一整套信封，逐条投递给下游。异常不许静默。"""
         try:
+            # 本方法只在 `self._on_event is not None` 时被调用（见调用点），
+            # 但类型上它仍是可选回调，这里先收窄一次。
+            on_event = self._on_event
+            if on_event is None:
+                return
             env = envelope(t_last, sequence=self._seq)
             batch = [env] if env is not None else []
             # 非电机子系统（电池/IMU/散热/整机）：不接进来，检测器只有
@@ -309,7 +317,7 @@ class SimSession:
             # 不是规则没写，是数据根本没离开仿真器。
             batch += subsystem_envelopes(t_last, sequence=self._seq)
             for one in batch:
-                self._on_event(SimEvent(t=float(t_last.t), env=one))
+                on_event(SimEvent(t=float(t_last.t), env=one))
                 self.stats.published += 1
         except Exception as e:                    # noqa: BLE001
             # **不许静默**：这里曾经只有一句 `dropped += 1`，什么原因都不留。
