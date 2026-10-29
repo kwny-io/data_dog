@@ -867,6 +867,31 @@ def test_telemetry_rows_uses_nanmax_over_joints() -> None:
 
 # ---------------------------------------------------------------- 控制台：路由
 
+def test_planes_use_window_size_60_not_default_30() -> None:
+    """两条数据面都必须按 60 样本建窗口，退回 `DataPlane` 默认的 30 会让规则恒假。
+
+    `MOTOR_STALL_SUSTAINED` 的前置是 `window.span() >= 5.0`。演示链路按 10Hz
+    投递，30 样本只有 **3 秒**——窗口永远够不到 5 秒，这条规则**恒假**。
+    实测（F1 堵转 / run / 90 仿真秒）：窗口 30 时正确规则 0 命中，F1 只能靠
+    `MOTOR_LOAD_SPIKE` 歪打正着报出来，归因还错到 F 子系统；窗口 60 时
+    `MOTOR_STALL_SUSTAINED` 命中 770 帧。
+
+    这是"能跑但永远不报"的那类缺陷——所有接口都 200、所有曲线都正常，
+    只有正确的那条规则不出手。所以钉在构造参数上，不靠任何端到端行为间接推。
+    """
+    from data_dog.go2_sim.server import WINDOW_SIZE
+
+    assert WINDOW_SIZE == 60, "60 样本 @10Hz = 6s，刚好越过 5s 门槛"
+    assert WINDOW_SIZE / 10.0 >= 5.0, "窗口时长必须覆盖 span>=5.0 的前置"
+
+    sink = _PlaneSink()
+    assert sink.error is None, sink.error
+    for label, plane, _comps in sink._planes:
+        assert plane.window.size == WINDOW_SIZE, (
+            f"{label} 用了 {plane.window.size} 样本窗口，规则会恒假")
+    print("PASS test_planes_use_window_size_60_not_default_30")
+
+
 def test_route_by_component_hint() -> None:
     """分流键就是 `component_hint`，写错会让故障永远检不出。"""
     sink = _PlaneSink()

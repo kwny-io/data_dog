@@ -1,9 +1,87 @@
 # 在线故障覆盖矩阵（按子系统）
 
-> 规则定义：`src/data_dog/operator_factory/p1_demo.py`
-> 在线实测：`python scripts/online_fault_coverage.py`（走真实 `DataPlane.process_one`）
-> 黄金用例：`python -m data_dog.operator_factory.p1_demo`（22 条，正例+反例）
+> 规则定义：`src/data_dog/operator_factory/p1_demo.py`（电机）+
+> `src/data_dog/go2_sim/subsystem_operator.py`（电池/IMU/散热/整机）
+> 全量矩阵（真实双数据面，23 条 + normal）：`python scripts/go2_sim_matrix.py`
+> 在线实测（合成器）：`python scripts/online_fault_coverage.py`
+> 在线实测（MuJoCo 电机侧）：`python scripts/go2_sim_coverage.py`
+> 黄金用例：`python -m data_dog.operator_factory.p1_demo`（25 条，正例+反例）
 > 字段出处：`vendor_docs/unitree/cleaned/`（IDL 与协议头）
+
+## 全量矩阵：23 条故障 × 真实双数据面（2026-10-29 实测）
+
+**这张表是本文档唯一的总账**，其余各节是它的展开与原理。跑法：
+
+```bash
+python scripts/go2_sim_matrix.py            # 90 仿真秒，约 3 分钟
+```
+
+工况：`posture=run`、`severity=1.0`、`thermal_scale=80`、故障自 5 秒注入、
+10Hz 投递、窗口 60 样本。链路是 `server.py` 的**真实** `_PlaneSink`——
+两条独立数据面，按信封 `component_hint` 分流（电机 → 电机算子；
+电池/IMU/散热/整机 → 子系统算子），不是绕过 resolver 的简化版。
+
+| # | 故障 | 首检(s) | 命中帧 | 命中规则 |
+|---|---|---|---|---|
+| — | **normal** | **无** | **0** | **零误报 ✅** |
+| F1 | 堵转 | 3.3 | 772 | `MOTOR_STALL_SUSTAINED` ×770, `MOTOR_LOAD_SPIKE` ×2 |
+| F2 | 散热失效 | 10.3 | 717 | `MOTOR_TEMP_DEGRADE` ×717, `MOTOR_TEMP_RISE_UNDER_LOAD` ×439, `MOTOR_TEMP_PROTECT` ×340 |
+| F3 | 通信丢包 | 5.3 | 644 | `COMM_PACKET_LOSS` ×644 |
+| F4 | 电流零漂 | 2.0 | 793 | `MOTOR_CURRENT_BIAS` ×762, `MOTOR_TAU_EST_FAIL` ×31 |
+| F5 | 负载骤增 | 0.2 | 1373 | `MOTOR_TEMP_RISE_UNDER_LOAD` ×627, `BATTERY_OVERHEAT` ×575, `MOTOR_TEMP_DEGRADE` ×192, `POWER_BUS_OVERCURRENT` ×97 |
+| F6 | 编码器跳变 | 0.3 | 808 | `MOTOR_ENCODER_JUMP` ×808 |
+| F7 | 力矩估算失效 | 3.8 | 776 | `MOTOR_TAU_EST_FAIL` ×776 |
+| F8 | 电机失联 | — | 0 | ❌ 见下 |
+| F9 | 风扇停转 | 0.1 | 1094 | `COM_FAN_STALLED` ×810, `MOTOR_TEMP_DEGRADE` ×284 |
+| F10 | 环境高温 | 4.2 | 773 | `MOTOR_TEMP_RISE_UNDER_LOAD` ×698, `MOTOR_TEMP_DEGRADE` ×204 |
+| F11 | 电量低 | 0.1 | 810 | `POWER_SOC_LOW` ×810, `POWER_BUS_VOLTAGE_LOW` ×810 |
+| F12 | 单体不均衡 | 0.1 | 810 | `BATTERY_CELL_IMBALANCE` ×810 |
+| F13 | 电池过温 | 28.0 | 542 | `BATTERY_OVERHEAT` ×542 |
+| F14 | 母线跌压 | 0.1 | 810 | `POWER_BUS_VOLTAGE_LOW` ×810 |
+| F15 | 电池过流 | 0.2 | 770 | `BATTERY_OVERHEAT` ×739, `POWER_BUS_OVERCURRENT` ×355 |
+| F16 | 陀螺零偏 | — | 0 | ❌ 缺规则（见 §3） |
+| F17 | 加速度计失效 | — | 0 | ❌ 缺规则（见 §3） |
+| F18 | 翻倒 | 3.1 | 1 | `POSTURE_FALLEN` ×1 |
+| F19 | CRC 错误 | 0.1 | 1435 | `COM_CRC_ERROR_RATE` ×810, `COMM_PACKET_LOSS` ×625 |
+| F20 | 带宽下降 | 0.1 | 810 | `COM_BANDWIDTH_LOW` ×810 |
+| F21 | 步态异常 | — | 0 | ❌ 缺规则（见 §3） |
+| F22 | 足端打滑 | — | 0 | ❌ 仿真侧信号不足（见 §4） |
+| F23 | 整机报错 | 0.1 | 810 | `SYS_ERROR_CODE_SET` ×810 |
+
+**18 / 23 条检出，`normal` 零误报。**
+
+### 表里三处需要如实说明的地方
+
+**F18 只报 1 帧，是真的。** MuJoCo 里 F18 给机身施加 55N 横向冲量，狗真的翻过去
+（`body_height` 最低 0.0644，阈值 0.10），但接触动力学随后让它**自己爬起来了**
+（几十秒内稳定在 0.155）。所以只有翻倒那一瞬间满足 `body_height < 0.10`。
+这是物理事实，不是规则抖动——真机上"摔倒又爬起来"本来就只该报一次。
+站立姿态同样会翻（最低 0.0448）；趴卧姿态最低只到 0.1069，**判不出来**，
+因为趴着本来离地就低。
+
+**F5 报的四条规则里没有 `MOTOR_LOAD_SPIKE`。** 这符合设计：F5 把产热乘 4，
+奔跑时会烧到高温，"高温 + 电流未显著上升"的排除项（§分不开的情况）主动让位给
+B 子系统。演示旁白应说"重载导致过热"，不要说"检测出负载骤增"。
+
+**F19 连带报 `COMM_PACKET_LOSS`。** CRC 错的帧在仿真侧是整帧丢弃，序列号出现空洞，
+包级判据正确地把它识别为"包没到"。两条规则并列上报是**对的**：一条说"包没到"，
+一条说"到了的包有 CRC 错"，合起来才是完整画像。
+
+### window=60 是必须的，不是调优
+
+`MOTOR_STALL_SUSTAINED` 的前置是 `window.span() >= 5.0`（事件时间秒）。
+`DataPlane` 默认窗口 30 样本，10Hz 投递下只有 **3 秒**——这条规则在演示链路上
+**恒假**。实测（F1、run、90 仿真秒）：
+
+| 窗口 | `MOTOR_STALL_SUSTAINED` | `MOTOR_LOAD_SPIKE` | 结论 |
+|---|---|---|---|
+| 30 样本（旧默认） | **0 帧** | 1 帧 | F1 被歪打正着报出，**归因错到 F 子系统** |
+| 60 样本（现配置） | **770 帧** | 2 帧 | 正确规则出手，归因 A 子系统 |
+
+已在 `server.py` 里固定 `WINDOW_SIZE = 60`（6 秒 @10Hz），并写明原因。
+**这一条不只影响演示**：任何按 10Hz 投递、窗口用默认 30 的部署，堵转规则都不会响。
+
+---
 
 ## 先看结论
 
@@ -18,60 +96,211 @@
 3. **链路两头各缺一半**——仿真侧还没把非电机子系统发进信封，检测侧也还没声明
    IMU/整机算子字段。这是**未开工**，不是做不了；见 §"摄取边界 3"。
 4. **字段能进来、但物理上分不开**——见 §"分不开的情况"，硬做只会造出互相抢报的假规则。
+5. **物理上根本没有那个信号**——静止姿态不发热，所以"散热变差"在站立/趴卧上测不出来。
+   （整包丢包曾属此类，现已用包级判据解决，见 §"F3 为什么以前测不出来"。）
 
-## 改前 / 改后对照（同一批数据，同一套链路）
+## ⚠ 两套数据源的结果不同，不要混着引用
 
-把改前的提交（`9ae5469`）检出到临时 worktree，用**同一个探针脚本**喂同样的合成数据，
-量的是"故障窗内有多少帧报出了规则"。方法：`git worktree add --detach <tmp> 9ae5469`，
-探针按 `inspect.signature` 判断 `detect` 是否收窗口，两版共用同一份调用代码。
+本项目的在线实测有两个数据源，**它们对同一类故障的建模强度本身就不同**，
+所以同一套规则的命中率必须分开报，合成一个数字是误导：
 
-| 故障 | 改前窗内触发率 | 改前命中规则 | 改后窗内触发率 | 改后命中规则 |
-|---|---|---|---|---|
-| normal | 0.0% | （无） | 0.0% | （无） |
-| F1_stall | **70.0%** | TEMP_PROTECT | **95.2%** | STALL_SUSTAINED + TEMP_PROTECT |
-| F2_temp_rise | **0.0%** | （无） | **51.9%** | TEMP_DEGRADE |
-| F3_packet_loss | **0.0%** | （无） | **97.1%** | COMM_PACKET_LOSS |
-| F4_current_bias | **0.0%** | （无） | **92.6%** | CURRENT_BIAS |
-| F5_load_spike | **42.1%** | TEMP_PROTECT | **93.3%** | LOAD_SPIKE + TEMP_PROTECT |
+| | `synth/generator.py` | `go2_sim`（MuJoCo） |
+|---|---|---|
+| 性质 | 纯扭矩 + 一阶热模型，**没有动力学** | 接触动力学 + 电池/热/通信子系统 |
+| `dq` | 不产出，按故障类型约定（见脚本注释） | 真实解算 |
+| τ 符号 | 全正（负载单向） | **正负交替**（步态摆动） |
+| 用途 | 规则逻辑的回归基线 | **演示真正跑的那条链** |
 
-两条要说清楚：
+**为什么必须两边都测**：`synth` 上全绿的规则，在 `go2_sim` 上曾 100% 误报——
+因为 `synth` 的 τ 全为正，`mean|τ|` 与有符号均值几乎相等，那个"绝对值 vs 有符号"
+的口径错配在 `synth` 上根本暴露不出来。只在 `synth` 上标定 = 只测了一半。
 
-1. **F1/F5 改前不是"完全检不出"，是"检出了但报错原因"**。改前只有 `temperature ≥ 90°C`
-   一条有效判据，堵转/重载把温度烧过 90°C 后靠温度报出来——报的是"过热"，
-   不是"堵转"。运维看到的是 B 子系统告警，会去查散热，不会去查电机。改后 A/F 各自的
-   规则先报出来，温度告警退为并发现象。
-2. **F2/F3/F4 改前是真的一点都检不出**（0.0%）。这三类的信号全在窗口统计量里——
-   温度斜率、窗口覆盖率、电流与扭矩的残差——单点阈值判据看不见。改前
-   `Detector.detect(metrics)` 的签名里就没有窗口，所以参数再怎么调都不可能命中。
+## 规则 × 子系统（`synth` 数据源）
 
-## 规则 × 子系统
+5 个 seed（0–4），120s，故障窗 40%~90%，判定看**命中哪条规则**。
 
 | 子系统 | rule_id | 判据 | 阈值出处 | 在线实测 |
 |---|---|---|---|---|
-| A 关节/电机 | `MOTOR_STALL_SUSTAINED` | ≥5s 窗口内 ≥50% 时间 I≥90A | 假设 | F1 **95.2%**，5.9s 报出 ᔆ |
-| A 关节/电机 | `MOTOR_CURRENT_BIAS` | `mean(I) − mean(τ)/0.25 ≥ 4A` | 假设 | F4 **92.7%**，7.3s 报出 ᔆ |
-| A 关节/电机 | `MOTOR_ENCODER_JUMP` | `\|mean(q) − mean(q_raw)\| ≥ 0.01rad` | 假设 | F6 **55~65%**，10.4~13.4s 报出 ᴳ |
+| A 关节/电机 | `MOTOR_STALL_SUSTAINED` | ≥5s 窗口内 ≥50% 时间 I≥14.5A **且** 50% 时间 \|dq\|<0.05 | 假设 | F1 **99.8%**，3.1s 报出 |
+| A 关节/电机 | `MOTOR_CURRENT_BIAS` | `mean(I) − mean_abs(τ)/1.5825 ≥ 4A` | 假设 | F4 **97.6%**，4.0s 报出 |
+| A 关节/电机 | `MOTOR_ENCODER_JUMP` | `\|mean(q) − mean(q_raw)\| ≥ 0.01rad` | 假设 | F6 **99.4%**，0.3s 报出；`go2_sim` 三姿态全中 |
 | A 关节/电机 | `MOTOR_MODE_FLAG_SET` | `(mode & 0x04) != 0` | 假设（位语义 verified） | 仅 fixture |
-| B 热 | `MOTOR_TEMP_PROTECT` | `temperature ≥ 90°C` | **verified** | 随 F1/F5 连带命中 ᔆ |
-| B 热 | `MOTOR_TEMP_DEGRADE` | `mean T≥40 且 slope≥0.25 且 mean I<50` | 假设 | F2 **51.8%**，31.5s 报出 ᔆ |
+| B 热 | `MOTOR_TEMP_PROTECT` | `temperature ≥ 90°C` | **verified** | 随 F1/F5 连带命中 |
+| B 热 | `MOTOR_TEMP_DEGRADE` | `mean T≥40 且 slope≥0.25 且 mean I<7.9` | 假设 | F2 **98.9%**，3.5s 报出 |
 | B 热 | `MOTOR_TEMP_RISE_UNDER_LOAD` | `mean T≥75 且 mean I ≤1.2×基线` | 假设 | 仅 fixture |
 | B 热 | `FIELD_SANITY_TEMP_INVALID` | `temperature < 0` | 假设 | 仅 fixture |
 | C 电源 | `POWER_SOC_LOW` | `bms_soc ≤ 15%` | 假设（字段 verified） | 仅 fixture |
-| E 通信 | `COMM_PACKET_LOSS` | 窗口覆盖率 < 95% | 假设 | F3 **97.0%**，3.9s 报出 ᔆ |
+| E 通信 | `COMM_PACKET_LOSS` | **包级**到达率 < 95%（设备序列号空洞） | 假设 | F3 **97.0%**，3.9s 报出；`go2_sim` 三姿态全中 |
+| E 通信 | `COMM_FIELD_INCOMPLETE` | 包都到了，但字段有效率 < 95% | 假设 | 仅 fixture |
 | E 通信 | `MOTOR_LOST_COUNTER_RISING` | 窗口内 `Δlost > 0` | 假设 | 仅 fixture |
-| F 整机/步态 | `MOTOR_LOAD_SPIKE` | `mean I≥50 且 max I<90 且 mean τ ≥1.5×基线` | 假设 | F5 **93.3%**，7.0s 报出 ᔆ |
+| F 整机/步态 | `MOTOR_LOAD_SPIKE` | `mean I≥1.4 且 I≥14.5A 占比<50% 且 mean_abs(τ) ≥1.5×baseline_abs(τ)，且排除热退化画像` | 假设 | F5 **99.6%**，3.2s 报出 |
 
-**数据源标记（两个合成器的数字不能混着看）**：
-- ᔆ = `synth/generator.py`，120s、10Hz、故障窗 [40%,90%)、5 个 seed。`scripts/online_fault_coverage.py` 可复现。
-- ᴳ = `go2_sim`（MuJoCo），30s、10Hz 投递、`fault_start=10s`、seed=7，快进式 `step()` 不回放墙钟。
-  命中率随 severity 变：sev=0.1 为 55%、sev=1.0 为 65%；stand/run/prone 三种姿态结果一致。
+**normal 在 5 个 seed 上全部 0 命中**（此前 seed=0 有 1.7% 误报 LOAD_SPIKE，已随
+`baseline_abs` 修正归零）。
+
+`MOTOR_ENCODER_JUMP` 的 F6 数字取自 `go2_sim`（40s、seed=7、sev=1.0、故障自 5s 起），
+与同表其他行（`synth`）**不同源**，不可直接横向比较；`go2_sim` 的 F6 注入量固定为
+`q += 0.18×sev`，命中率随 sev 变。
 
 "仅 fixture" = 该项目前只用黄金用例验证了判据逻辑，**没有**进在线端到端实测——
 因为 `synth/generator.py` 只注入 F1~F5 五类故障，没有 SOC 掉电、lost 计数器这类物理注入器。
 这类规则要么补注入器，要么等真机数据。
 
 **`MOTOR_ENCODER_JUMP` 已不再属于这一类**：`go2_sim` 的 `F6_encoder_jump` 就是它的物理注入器，
-已按上面的 ᴳ 口径跑通端到端（`q_raw` 在 Parser 侧实测 300/300 帧都取到了）。
+已跑通端到端（三种姿态各 330/332 帧命中，`q_raw` 在 Parser 侧逐帧都取到了）。
+
+## 规则 × 姿态（`go2_sim` 数据源，40s，seed 7）
+
+这是演示真正跑的那条链。**表里"—"不都是规则缺陷，逐条注明性质。**
+
+| 姿态 | F1 堵转 | F2 热退化 | F3 丢包 | F4 电流偏置 | F5 负载骤增 | F6 编码器跳变 |
+|---|---|---|---|---|---|---|
+| stand | ✅ STALL | ❌ 数据边界 | ✅ PACKET_LOSS | ✅ CURRENT_BIAS | ✅ LOAD_SPIKE | ✅ ENCODER_JUMP |
+| run | ✅ STALL | ✅ TEMP_DEGRADE | ✅ PACKET_LOSS | ✅ CURRENT_BIAS | ⚠ 报成 TEMP_RISE_UNDER_LOAD | ✅ ENCODER_JUMP |
+| prone | ✅ STALL | ❌ 数据边界 | ✅ PACKET_LOSS | ✅ CURRENT_BIAS | ❌ 数据边界 | ✅ ENCODER_JUMP |
+
+**`normal` 在三种姿态上全部 0 命中**——这是这张表最重要的一行。
+
+各项说明：
+
+- **F2 在 stand / prone 完全无信号**：实测温度 60 秒只从 25°C 爬到 26°C（stand），
+  prone 一步不动。静止姿态电机几乎不发热，`rth` 变大也没有热量可憋。
+  **不是规则漏，是物理上没有那个信号。** 60s 长跑结论相同。
+- **F1 会连带报 `MOTOR_LOAD_SPIKE`**（stand 302 帧里 29 帧、prone 26 帧）：堵转时
+  `mean_abs(τ)` 确实相对基线大幅上升，F 子系统的判据在物理上成立。两规则并列上报，
+  下游按子系统聚合时应以 A（堵转，`critical`）为准。
+- **F3 三种姿态全部检出**（曾三姿态全漏，已修，见下节）。
+- **F6 三种姿态全部检出**（330/332，末帧仍命中）。旧判据是"采样率 ≥50Hz 且单步
+  |Δq| ≥3rad"，在 `go2_sim` 上**恒假**：仿真按 `publish_hz=10` 投递（`samples/span≈10`），
+  前置条件就过不了；注入量也只有 0.18rad，远低于 3.0。改成判 `q` 与 `q_raw` 的
+  窗口均值偏离后，与采样率无关。**该数字与同表其他行不同源**（见上节脚注）。
+- **F6 的判据依赖 `q_raw`**：载荷缺 `q_raw` 时规则按降级语义**不命中**，不退回
+  `max_step` 去猜——"不知道"不能报成"正常"，也不能报成"故障"。
+- **F5 在 prone 无信号**：`go2_sim` 的 F5 是往机身施加 −60N 下压，趴卧时关节已在
+  最低位、无处可让，`mean|τ|` 从 0.39 只到 0.41。同样是物理边界。
+- **F5 在 run 报成 `TEMP_RISE_UNDER_LOAD`**：F5 的 `on_step` 把产热乘 4
+  （`extra = 1+3·sev`），奔跑时会烧到高温，于是"高温 + 电流未显著上升"这条先成立
+  （40s 下 149 帧报 `TEMP_RISE_UNDER_LOAD`、192 帧报 `TEMP_DEGRADE`，后者末帧仍在）。
+  **这是真实的物理耦合**（重载确实会过热），不是误报，但子系统归因偏了 B 而非 F。
+
+## F3 为什么以前测不出来（包级 vs 字段级）
+
+先说结论：**整包丢失对字段级覆盖率结构上不可见。** 这不是阈值调得不够松，
+是判据本身看不见这类现象。
+
+`window.coverage(field)` 的算法是 `len(series[field]) / samples`，而 `samples` 是
+**网关收了多少条**。整包丢失时：
+
+- 包根本没进网关 → `push()` 没被调用 → `samples` 少加一；
+- 这个字段自然也没进 `series` → 分子少加一。
+
+**分子分母一起缩水，比值恒为 1.0。** 实测 `go2_sim` 40s 的 F3 故障窗整包丢了 16%
+（332 帧丢 53 帧），字段级覆盖率全程 1.0，`COMM_PACKET_LOSS` 一次都没命中过。
+
+唯一能揭示丢包的信息是**设备序列号**：`RawLogEnvelope.sequence` 由设备单调递增，
+网关收到 3、5 就说明 4 丢了。判据改成包级：
+
+```
+expected = 1 + Σ max(1, b − a)        # a、b 为相邻两个到达的序列号
+coverage = arrived / expected
+```
+
+两个坑，都已用测试钉住：
+
+1. **不能写 `Σ max(0, b − a − 1)`**。求和 `b−a` 本身会望远镜式抵消成
+   `last − first`，再减 1 就少算了每段的第一包。实测该写法把 60/80 算成 20/20
+   （覆盖率 1.0，报不出来），正确写法是 60/79。
+2. **序列号回跳不能算丢包**。设备重启会把序列号归零（40 → 1），
+   若按 `b − a` 直接减，会读成"一次丢了 39 包"，每次重启都误报。
+   `b − a ≤ 0` 一律按 1 算，即"这是紧接着的一条"。
+
+`samples` 与 `packets` 是**两个量，不能混**：前者答"网关收到几条"，
+后者答"设备发了几条、到了几条"。旧规则把前者当后者用，就是这次的根因。
+
+修完的完整链路实测（`go2_sim`，40s，seed 7，故障自 5s 注入）：
+
+| 姿态 | 情形 | 末帧判定 | 事件数 | 命中 |
+|---|---|---|---|---|
+| stand / run / prone | normal | — | 332 | 无 |
+| stand / run / prone | F3 丢包 | `COMM_PACKET_LOSS` | 279 | ×236，末帧仍在 ✓ |
+
+同时新增两条规则分工（**不是重复**）：
+
+- `COMM_PACKET_LOSS` —— 包没到；
+- `COMM_FIELD_INCOMPLETE` —— 包到了，但某个字段没解出来（载荷残缺或解析失败）。
+
+两条互斥触发，`COMM_FIELD_INCOMPLETE` 额外要求 `packet_coverage() >= 0.95`。
+
+**这个缺陷已进问题台账**——它是本项目第三个"判据结构上盲"的例子
+（前两个是 `dq` 未取绝对值、`mean_abs(τ)` 配有符号基线），共同特征是
+**在旧数据源上永远测不出来**，只能靠换一个数据源或换一个观测量才暴露。
+
+## 三条修过的口径错误（都用实测数字说话）
+
+三条是**同一类错**：把"有符号量"当"绝对量"用。这类错有个共同特征——
+**在合成器上测不出来**（合成器的量恒为正），只在真实步态（正负交替）上暴露。
+
+### 1. 堵转判据里的 `dq` 没取绝对值
+
+`MOTOR_STALL_SUSTAINED` 的第二个条件原写作
+`window.count(dq, "<", 0.05) >= 0.5 * window.samples()`。`dq` 是**有符号角速度**，
+反向转动（`dq = −2.8 rad/s`）同样满足 `< 0.05`，于是"转得飞快"被算成"没转"。
+
+实测（seed 7，30 帧窗，只看故障窗 240 帧）：
+
+| 姿态 | 情形 | `dq<0.05` 占比 | `\|dq\|<0.05` 占比 | I≥14.5 占比 |
+|---|---|---|---|---|
+| run | normal | **46.2%** | 0.8% | 0.0% |
+| run | F5 负载骤增 | 41.2% | 1.2% | 15.8% |
+| run | F1 堵转 | 96.7% | 95.4% | 99.2% |
+| stand / prone | normal | 100% | 100% | 0.0% |
+
+奔跑正常只差 **3.8 个百分点**就没到 50% 门槛——换个步态频率或 seed 就会跨过去，
+正常奔跑会被报成堵转。取 `|dq|` 后同一组数据是 0.8%，余量 49 个点。
+
+修法：DSL 新增 `window.count_abs(field, op, value)`（与 `mean_abs`/`baseline_abs`
+同族），规则改用 `count_abs(dq, "<", 0.05)`。新增回归用例
+`fixtures/stall_saturated_but_reversing.json`：电流 100% 饱和、`dq` 恒 −2.8，
+**旧写法 100% 误报，新写法 0%**——这条用例就是为了让这个 bug 不会再悄悄回来。
+
+### 2. kt 用错了轴（电机轴 vs 关节侧）
+
+`synth` 的 `DEFAULT_PARAMS["kt"]=0.25` 是**电机轴**扭矩常数；规则的电流残差判据
+必须用**关节侧** `KT_JOINT = 0.25 × 6.33 ≈ 1.5825`（见 `go2_sim/rig.py` 的推导）。
+用错轴会让电流整体偏大 6.33 倍，**每一条**残差判据都错到十万八千里——
+实测 `normal` 也报 CURRENT_BIAS（3000/3000 帧）。
+
+`online_fault_coverage.py` 用**保残差换算**修掉了（不改 `synth` 本体：`R/Rth/Cth`
+是配套 0.25 标定的，改 kt 会破坏热模型）：
+
+```
+residual = I_old − τ/0.25        # 偏置是安培量，不随 kt 变
+I_new    = τ/1.5825 + residual
+```
+
+### 3. `mean_abs(τ)` 配了**有符号**基线
+
+规则写的是 `mean_abs(tau_est) >= 1.5 * window.baseline(tau_est)`：左边是 |τ| 的均值，
+右边是**有符号** τ 的 EMA。步态摆动时 τ 正负对称振荡，有符号均值被正负抵消，
+于是比值里混进一个**与负载无关的恒定倍数**：
+
+| 姿态 | 有符号基线 | `mean|τ|` | 旧比值 | 新比值（`baseline_abs`） |
+|---|---|---|---|---|
+| 奔跑 normal | 4.81 | 9.14 | **1.90（恒误报）** | 1.01 |
+| 趴卧 normal | **−0.66** | 0.39 | −0.59（恒不成立） | 0.59 |
+| 站立 F5 | 1.47 | 2.72 | 1.85 | 1.85（真实负载） |
+
+奔跑的比值从 t=0.5s 起就是 1.90 且**不随时间变化**——它不是负载，是口径差。
+修法：`Enricher` 同时维护 `|x|` 的 EMA（键 `field|abs`），DSL 加 `window.baseline_abs()`，
+规则改用 `baseline_abs`。**不能只在规则侧取 `abs(baseline)`**：趴卧基线是负数，
+取绝对值只会把"恒不成立"翻成"恒成立"，两种都是错的。
+
+### 附带修掉的一个静默失败
+
+`Enricher.snapshot()` 原先只按 `metrics` 里出现的字段名查基线，不会带出 `|abs` 键，
+于是 `baseline_abs()` 恒为 None → 规则在求值期失败 → **静默不命中**（不报错、不出结果）。
+表现是 F5 的触发率从 99.8% 掉到 42.1%、末帧什么都报不出来。
+`snapshot()` 现在同时带出 `<field>|abs`。
 
 ## 摄取边界（实测确认，不是推测）
 
@@ -148,24 +377,68 @@ F4 的残差 `I−τ/kt` 恒为 +5A，F2 的残差 ≈0。但只要现场出现"
 （比如爬长坡），残差和温度会同时满足两条规则——此时报出的规则集合是并集，
 需要下游按子系统聚合判断，不能指望规则本身互斥。
 
-**验证过的一点**：正常样本 1230 条全程零命中；五类故障各自只命中本子系统规则
-（F1/F5 额外连带 `MOTOR_TEMP_PROTECT`，这是真实的物理耦合——堵转确实会过热）。
+**F5 负载骤增 vs B 热剖面**：`go2_sim` 的 F5 注入同时把产热乘 4，所以奔跑姿态下
+60 秒就烧到 77°C，"高温 + 电流未显著上升"这条（`MOTOR_TEMP_RISE_UNDER_LOAD`）
+会先成立，报出的子系统是 B 而不是 F。**这是真实的物理耦合**（重载确实会过热），
+不是误报，但归因会偏。反过来 `MOTOR_LOAD_SPIKE` 里显式加了一条排除：
+
+```
+not (mean(temperature) >= 40 and slope(temperature) >= 0.25 and mean(current) < 7.9)
+```
+
+即"温度已经在明显爬升、而电流没到负载量级"时让给 B 子系统，避免两条规则对同一现象
+抢报。这条排除是**经验性的**，依据是 F2 的实测画像（`docs` 里的五类故障参数表），
+不是厂商给的分界，标为 `assumption`。
+
+**验证过的一点**：`synth` 的 5 个 seed 上 `normal` 全程零命中（改前 seed=0 有 1.7% 误报）；
+`go2_sim` 的 stand/run/prone 三种姿态上 `normal` 也全部零命中。五类故障各自只命中
+本子系统规则（F1/F5 额外连带温度规则，见上）。
 
 ## 降级语义（缺数据时不误报）
 
 三条，都在代码里显式写了，不是隐含行为：
 
 1. **样本不足**：窗口内 <8 条样本，一切窗口判据不命中（`_win()` 统一加前置条件）。
-2. **基线缺失**：`window.baseline()` 返回 None，与之比较的规则在求值期抛错 →
-   `evaluate()` 视为不命中。**绝不退化成"基线=0"**（那会把每条正常读数判成异常）。
+2. **基线缺失**：`window.baseline()` / `baseline_abs()` 返回 None，与之比较的规则
+   在求值期抛 `DSLError` → `evaluate()` 视为不命中。**绝不退化成"基线=0"**
+   （那会把每条正常读数判成异常），也**绝不回退到另一个口径的基线**
+   （`baseline_abs()` 不会去读有符号基线——那正是要被修掉的错配）。
 3. **窗口缺失**：`series` 为空时所有 DSL 规则直接跳过，不拿单条 metrics 冒充窗口。
+4. **包级统计不足**：`window.packet_coverage()` / `packets_lost()` 在
+   "窗口内不足两条"或"任一条缺序列号"时返回 None → 判据不命中。
+   **"不知道"绝不能报成 1.0**——那会把"没给序列号"伪装成"没丢包"。
+   这正是旧 fixture 一度白过（而不是真过）的原因：它们没写 `sequences`，
+   规则静默跳过，看起来像"反例通过"。现在几条相关 fixture 都补了真实序列号。
 
 实测：拿 `load_spike_positive` 的正例，有基线时命中、无基线时**不命中**且不抛异常。
+
+**⚠ 这条设计的反面**：降级"静默不命中"有代价——如果**基线键名本身写错**或没被带出来，
+规则不会报错，只是永远不出结果，看起来和"正常"一模一样。`snapshot()` 漏带 `|abs`
+键就是这么藏住的（F5 触发率从 99.8% 掉到 42.1% 才被发现，根因查了一轮）。
+所以新增口径时必须同时验证**正例命中**与**反例不命中**，只看"没报错"不算通过。
 
 ## 复现
 
 ```bash
-python -m data_dog.operator_factory.p1_demo          # 22 条黄金用例
-python scripts/online_fault_coverage.py              # 在线链 5 类故障实测
+python -m data_dog.operator_factory.p1_demo          # 25 条黄金用例
+python scripts/online_fault_coverage.py              # 合成器：5 类故障 × 5 seed
 python scripts/online_fault_coverage.py --json       # 机器可读
+python scripts/go2_sim_coverage.py                   # MuJoCo 电机侧：3 姿态 × 7 情形
+python scripts/go2_sim_coverage.py --seconds 60 --seed 7 --postures run,prone
+python scripts/go2_sim_matrix.py                     # 全量：23 条 + normal，真实双数据面
+python scripts/go2_sim_matrix.py --json               # 机器可读
 ```
+
+**跑短了会假性漏检。** 全量矩阵默认 90 仿真秒是**必要条件**，不是随便定的：
+F13 电池过温要 28 秒才越线（电池热惯性最大的一条）。`--seconds 25` 会报 17/23，
+那条差额**不是漏检**，是仿真时间不够。脚本会在汇总行下面显式提示。
+
+**`go2_sim_coverage.py` 与 `go2_sim_matrix.py` 测的不是一件事**：
+前者只装**电机**算子，用来测"电机规则在 MuJoCo 数据上灵不灵"，
+电池/散热/通信/整机那 11 类在它那里结构上不可能出候选；
+后者装的是演示真正跑的**双数据面** `_PlaneSink`，测"整套检测链路认得几类故障"。
+**要引用"覆盖率"就用后者**，前者只能引用电机那几行。
+
+`go2_sim_coverage.py` 单独跑比较慢（MuJoCo 要真解算，3 姿态 × 7 情形 = 21 次约 2 分钟），
+建议后台跑。它默认 40s、seed 7；上表的数字就是这组参数。
+

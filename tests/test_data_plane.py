@@ -156,6 +156,79 @@ def test_window_features():
     assert f.slope["temperature"] > 0
 
 
+# ---------------------------------------------------------------- 包级丢包
+
+def test_packet_coverage_counts_sequence_holes():
+    """整包丢失只能靠序列号空洞看见——字段级覆盖率对此恒为 1.0。"""
+    w = WindowBuffer(size=100)
+    # 设备发了 1..80，网关只收到 60 条（每 4 个丢 1 个）
+    for s in (x for x in range(1, 81) if x % 4 != 0):
+        w.push("k", {"temperature": 30.0}, sequence=s)
+    assert w.sample_count("k") == 60
+    # 字段级：每个到的包都带温度 → 覆盖率 1.0，**完全看不出丢了包**
+    series = w.series("k")
+    assert len(series["temperature"]) / w.sample_count("k") == 1.0
+    # 包级：按序列号算才看得见
+    pc = w.packet_coverage("k")
+    assert pc["known"] is True
+    assert pc["arrived"] == 60 and pc["lost"] == 19
+    assert pc["coverage"] == pytest.approx(60 / 79)
+
+
+def test_packet_coverage_unknown_without_sequences():
+    """没给序列号 → known=False（"不知道"），而不是 1.0（"没丢"）。"""
+    w = WindowBuffer(size=10)
+    for v in (1, 2, 3):
+        w.push("k", {"temperature": v})          # 不带 sequence
+    pc = w.packet_coverage("k")
+    assert pc["known"] is False and pc["coverage"] is None
+
+
+def test_packet_coverage_sequence_reset_is_not_loss():
+    """设备重启把序列号归零，不能算成丢了 39 个包（否则每次重启都报故障）。"""
+    w = WindowBuffer(size=100)
+    for s in list(range(1, 41)) + list(range(1, 41)):
+        w.push("k", {"temperature": 30.0}, sequence=s)
+    pc = w.packet_coverage("k")
+    assert pc["known"] is True and pc["lost"] == 0
+    assert pc["coverage"] == 1.0
+
+
+_NORMAL_BODY = json.dumps({"mode": 0, "dq": 0.4, "q": 0.0, "lost": 0,
+                           "current": 3.0, "temperature": 32, "tau_est": 4.0})
+
+
+def _run_sequences(detector_config, sequences) -> set[str]:
+    """把一串设备序列号喂进**真实的** DataPlane，返回候选里出现过的规则。"""
+    dp = DataPlane(build_demo_resolver(detector_config), window_size=120)
+    for s in sequences:
+        dp.process_one(_raw(f"e{s}", sequence=s, payload_inline=_NORMAL_BODY), AUTH)
+    return {r for c in dp.builder.build() for r in c.rule_matches}
+
+
+def test_comm_packet_loss_fires_end_to_end_on_sequence_holes(detector_config):
+    """端到端：信封层丢包 → 候选里出现 COMM_PACKET_LOSS。
+
+    这是本次修的核心缺陷的回归护栏。以前 `COMM_PACKET_LOSS` 判的是
+    `window.coverage(temperature)`——整包丢失时分子分母一起缩水，覆盖率恒为 1.0，
+    go2_sim 实测 40s 丢 16% 的包，规则一次都没命中过。现在判包级。
+    这里走的是**真实链路**（网关 → 解析 → 窗口 → 检测器 → 候选），
+    任何一环把 `sequence` 弄丢，这条都会红。
+    """
+    # 设备发了 1..60，网关只收到 3/4（每 4 个丢 1 个 → 包级覆盖率 0.75）
+    rules = _run_sequences(detector_config, (x for x in range(1, 61) if x % 4 != 0))
+    assert "COMM_PACKET_LOSS" in rules
+    # 字段级覆盖率仍应看到"包都完整"：每个到的包温度都在
+    assert "COMM_FIELD_INCOMPLETE" not in rules
+
+
+def test_comm_packet_loss_silent_when_all_packets_arrive(detector_config):
+    """序列号连续 → 不报丢包（反例，防"永远为真"）。"""
+    rules = _run_sequences(detector_config, range(1, 61))
+    assert "COMM_PACKET_LOSS" not in rules
+    assert "COMM_FIELD_INCOMPLETE" not in rules
+
+
 # ---------------------------------------------------------------- 候选构建
 
 def test_candidate_merge_and_severity():

@@ -16,7 +16,14 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .dsl import CompiledRule, DSLError, WindowContext, compile_rule, evaluate
+from .dsl import (
+    CompiledRule,
+    DSLError,
+    WindowContext,
+    compile_rule,
+    evaluate,
+    packet_coverage_of,
+)
 
 # ---------------------------------------------------------------- 声明式检测（复用现有 engine 语义）
 
@@ -133,11 +140,28 @@ class Fixture:
         # times：field → 与 series[field] 等长的事件时间（秒）。**不给就没有**
         # ——`window.span()` 会返回 None，依赖它的规则按"数据不足"不命中。
         # 这样 fixture 不会在"没写时间"的情况下悄悄用样本序号冒充秒数。
+        #
+        # baseline 的 `|x|` 口径：fixture 里只写有符号基线（`tau_est`），这里按
+        # `Enricher` 同样的规则派生 `<field>|abs`。**不能指望 fixture 作者记得写两遍**
+        # ——漏写会让 `baseline_abs()` 返回 None、规则静默不命中，那时候 fixture
+        # 会以"该命中却没命"的形式失败，看不出根因。派生的前提是有符号基线非负；
+        # 负数时 `abs()` 才是对的，所以一律取 abs。
+        baseline = dict(self.window.get("baseline", {}))
+        for fld, val in list(baseline.items()):
+            if "|" in fld or not isinstance(val, (int, float)):
+                continue
+            baseline.setdefault(f"{fld}|abs", abs(float(val)))
+        # `sequences`：窗口内**实际到达**的设备序列号（升序或按到达顺序均可）。
+        # 包级丢包判据（`window.packet_coverage()`）只能从它算——fixture 若只写
+        # `samples`/`series`，表达的是"到了几条"，表达不了"设备发了几条"，
+        # 于是整包丢失在离线回放里同样不可见。不写则 `known=False`（不知道），
+        # 与在线侧"没给序列号"一致，判据按降级语义不命中。
         return WindowContext(
             series=series,
-            baseline=self.window.get("baseline", {}),
+            baseline=baseline,
             samples=int(samples),
             times=dict(self.window.get("times") or {}),
+            packets=packet_coverage_of(self.window.get("sequences") or []),
         )
 
 

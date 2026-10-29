@@ -15,6 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from ..operator_factory.dsl import packet_coverage_of
 from ..schemas.operator_config import DetectorConfig, FieldSpec
 
 # ---------------------------------------------------------------- Parser
@@ -139,12 +140,29 @@ class Enricher:
 
     def observe(self, component: str, field_name: str, condition: str,
                 value: Any, at_s: float | None = None) -> float | None:
-        """把一个观测值并入滚动基线，返回当前基线（未满 warmup 时返回 None）。"""
+        """把一个观测值并入滚动基线，返回当前基线（未满 warmup 时返回 None）。
+
+        **两个基线同时维护**：`x` 的有符号均值，与 `|x|` 的均值（键加 `|abs` 后缀）。
+
+        为什么要两个：扭矩是**有符号**的。步态摆动时 τ 正负对称振荡，有符号均值
+        会被正负抵消掉（go2_sim 奔跑实测基线 4.88，而 mean|τ| 是 9.14），于是
+        「mean|τ| ≥ 1.5 × 基线」在**正常奔跑**时恒成立、比值 1.9 —— 用有符号基线
+        去比绝对值型统计量，差的就是这个恒定的抵消倍数，与负载无关。
+        规则用 `mean_abs(x)` 就必须配 `baseline_abs(x)`，两边同一口径。
+
+        有符号基线保留不动：既有规则 `MOTOR_TEMP_RISE_UNDER_LOAD` 用的是
+        `mean(current) <= 1.2 * baseline(current)`，电流无符号，两者本来就一致。
+        """
         x = _as_finite(value)
         if x is None:
             self.rejected_samples["non_numeric"] = \
                 self.rejected_samples.get("non_numeric", 0) + 1
             return None
+        self._observe_one(component, f"{field_name}|abs", condition, abs(x), at_s)
+        return self._observe_one(component, field_name, condition, x, at_s)
+
+    def _observe_one(self, component: str, field_name: str, condition: str,
+                     x: float, at_s: float | None) -> float | None:
         key = f"{component}|{field_name}|{condition}"
         st = self._state.get(key)
         if st is None:
@@ -179,12 +197,18 @@ class Enricher:
 
     def snapshot(self, component: str, conditions_for_field: dict[str, str]
                  ) -> dict[str, float]:
-        """{field: condition} → 当前可用基线快照（拿不到的不出现在结果里）。"""
+        """{field: condition} → 当前可用基线快照（拿不到的不出现在结果里）。
+
+        **同时带上 `<field>|abs`**：`observe` 为每个字段维护了两个口径，但这里
+        只按 metrics 里出现的字段名查——不显式带出 `|abs`，`baseline_abs()` 就
+        永远拿到 None，用它的规则会**静默不命中**（不报错，只是不出结果）。
+        """
         out: dict[str, float] = {}
         for fld, cond in conditions_for_field.items():
-            b = self.baseline_for(component, fld, cond)
-            if b is not None:
-                out[fld] = b
+            for key in (fld, f"{fld}|abs"):
+                b = self.baseline_for(component, key, cond)
+                if b is not None:
+                    out[key] = b
         return out
 
 
@@ -225,10 +249,20 @@ class WindowBuffer:
         self.size = size
         # key → 有序样本列表 [(t, seq, metrics_dict), ...]
         self._samples: dict[str, list[tuple[float, int, dict[str, float]]]] = {}
+        # key → 与 `_samples` **逐条平行**的**设备序列号**（信封的 `sequence`）。
+        # 独立于样本存，是因为 `_samples` 的元组第 2 位是窗口**内部**自增序号
+        # （只用于同事件时间下的稳定排序），与设备序列号不是一回事。
+        self._seqnums: dict[str, list[int | None]] = {}
         self._seq = 0
 
     def push(self, key: str, metrics: dict[str, Any],
-             occurred_at_s: float | None = None) -> None:
+             occurred_at_s: float | None = None,
+             sequence: int | None = None) -> None:
+        """压入一条样本。
+
+        `sequence`：信封上的**设备序列号**（`RawLogEnvelope.sequence`）。给了才能
+        统计**包级**丢包（见 `packet_coverage`）；不给则包级判据一律"不知道"。
+        """
         self._seq += 1
         seq = self._seq
         t = float(occurred_at_s) if occurred_at_s is not None else float(seq)
@@ -251,8 +285,13 @@ class WindowBuffer:
             else:
                 hi = mid
         buf.insert(lo, entry)
+        # 设备序列号必须插在**同一个位置**——它与样本按下标一一对应，
+        # 错位一位就会把"相邻两个序列号"算成别人的，丢包率随之全错。
+        seqbuf = self._seqnums.setdefault(key, [])
+        seqbuf.insert(lo, int(sequence) if sequence is not None else None)
         if len(buf) > self.size:
             buf.pop(0)                      # 淘汰**事件时间最早**的样本
+            seqbuf.pop(0)
 
     def features(self, key: str) -> WindowFeature:
         """窗口特征（mean/slope/last/max）。见 `series()` 关于缺样本的说明。"""
@@ -290,6 +329,13 @@ class WindowBuffer:
     def sample_count(self, key: str) -> int:
         """该窗口收到的样本条数（与字段无关），用于算"某字段的有效率"。"""
         return len(self._samples.get(key, []))
+
+    def packet_coverage(self, key: str) -> dict[str, Any]:
+        """窗口内的**包级**到达率 —— 用设备序列号的连续性算，不靠字段缺失率。
+
+        见 `packet_coverage_of`（真正的算法在那里，离线 fixture 复用同一份）。
+        """
+        return packet_coverage_of(self._seqnums.get(key) or [])
 
     def times(self, key: str) -> dict[str, list[float]]:
         """field → 与 `series()[field]` 逐一对应的事件时间（秒）。
@@ -382,11 +428,16 @@ class Detector:
                baseline: dict[str, float] | None = None,
                samples: int = 0,
                times: dict[str, list[float]] | None = None,
+               packets: dict[str, Any] | None = None,
                ) -> list[dict[str, Any]]:
         """对一条事件跑全部规则。
 
         `series`/`baseline`/`samples`/`times` 是可选窗口上下文：不传时**只**跑单条
         阈值规则（与改造前完全一致），故旧调用点零回归。
+
+        `packets`：窗口的**包级**到达情况（`WindowBuffer.packet_coverage`）。
+        与 `samples` 分开传，因为二者是不同的量：`samples` 是"网关收了几条"，
+        `packets` 是"设备发了几条、到了几条"。整包丢失时前者完全看不出来。
         """
         hits: list[dict[str, Any]] = []
         for rule in self.config.rules:
@@ -408,7 +459,7 @@ class Detector:
                     "subsystem": getattr(rule, "subsystem", ""),
                     "operator_id": self.config.operator_id,
                 })
-        hits.extend(self._detect_dsl(metrics, series, baseline, samples, times))
+        hits.extend(self._detect_dsl(metrics, series, baseline, samples, times, packets))
         return hits
 
     def _detect_dsl(self, metrics: dict[str, Any],
@@ -416,6 +467,7 @@ class Detector:
                     baseline: dict[str, float] | None,
                     samples: int,
                     times: dict[str, list[float]] | None = None,
+                    packets: dict[str, Any] | None = None,
                     ) -> list[dict[str, Any]]:
         specs = list(getattr(self.config, "dsl_rules", ()) or ())
         compiled = self._dsl_compiled()
@@ -432,7 +484,8 @@ class Detector:
         if not series:
             return []
         window = WindowContext(series=series, baseline=dict(baseline or {}),
-                               samples=samples, times=dict(times or {}))
+                               samples=samples, times=dict(times or {}),
+                               packets=dict(packets or {}))
 
         hits: list[dict[str, Any]] = []
         # strict=True：两者由同一次编译产出，长度不等说明编译环节出了问题，
