@@ -116,7 +116,9 @@
      definition, the wide one gives it height. This is the single shadow in the
      whole system; hover only deepens it. */
   --glow: 0 1px 2px rgba(0, 0, 0, 0.04), 0 8px 28px rgba(0, 0, 0, 0.07);
-  --glow-ring: rgba(0, 102, 224, 0.28); /* the accent wash under a live edge */
+  /* hover deepens the same neutral shadow; no accent tint, so a hovering card
+     never reads as "selected" — that meaning is reserved for the nav and chips */
+  --shadow-lift: rgba(0, 0, 0, 0.16);
 
   /* Motion tokens. Every animation in the app reads from these, so the whole
      console moves at one tempo instead of each effect inventing its own.
@@ -174,7 +176,7 @@
   /* On black there is no shadow to read; depth comes from the card being
      lighter than the page. The ring is what gives an edge definition instead. */
   --glow: 0 0 0 0.5px rgba(255, 255, 255, 0.08), 0 8px 28px rgba(0, 0, 0, 0.55);
-  --glow-ring: rgba(61, 155, 255, 0.45);
+  --shadow-lift: rgba(0, 0, 0, 0.8);
 }
 
 /* Expose the tokens to Tailwind utilities: bg-panel, text-ink, border-rule… */
@@ -372,9 +374,7 @@ html.lenis body {
 }
 
 .lift:hover {
-  box-shadow:
-    var(--glow),
-    0 14px 40px -18px var(--glow-ring);
+  box-shadow: var(--glow), 0 14px 40px -18px var(--shadow-lift);
 }
 
 /* ------------------------------------------------- section ornament (分区) *
