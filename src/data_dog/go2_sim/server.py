@@ -39,6 +39,7 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import HTMLResponse, Response
 from pydantic import BaseModel
 
+from .dds_bridge import DdsTelemetryPublisher
 from .faults import FAULT_LIBRARY, fault_by_key
 from .mqtt_pub import MqttTelemetryPublisher
 from .postures import POSTURES
@@ -273,10 +274,10 @@ def create_app(*, config: SimConfig | None = None,
                publish_hz: float = 10.0,
                mqtt_host: str | None = None, mqtt_port: int = 1883,
                mqtt_qos: int = 1,
+               dds: bool = False, dds_domain: int = 0,
+               dds_interface: str | None = None,
                frame_hz: float = 5.0) -> FastAPI:
     app = FastAPI(title="Go2 仿真控制台", version="0.1.0")
-    session = SimSession(config or SimConfig(posture="stand", fault="normal"),
-                         publish_hz=publish_hz, frame_hz=frame_hz)
     sink = _PlaneSink()
     # MQTT 是可选的第二条出口：不配 host 就只走进程内数据面。
     # 两者**同时**投递而不是二选一——演示时页面上看候选、同时能用另一个
@@ -285,6 +286,44 @@ def create_app(*, config: SimConfig | None = None,
         host=mqtt_host, port=mqtt_port, tenant_id=DEMO_TENANT,
         device_sn=DEMO_DEVICE, qos=mqtt_qos,
         enabled=bool(mqtt_host)) if mqtt_host else None
+    # DDS 是第三条出口：**真机协议**，把语义数据组装成一整个 `LowState_`
+    # 走 `rt/lowstate`。它与 MQTT 不是一回事——MQTT 发的是本项目自己的
+    # raw-log 信封，DDS 发的是厂商 IDL 定义、真机控制器认的帧。
+    #
+    # 没装 `data-dog[dds]` 时构造出的是**空对象**（`connected=False` +
+    # `last_error` 说明装法），不抛异常：演示不能因为一个可选出口缺依赖
+    # 就起不来。页面上如实显示"未就绪"而不是假装在发。
+    dds_pub = DdsTelemetryPublisher(
+        topic="rt/lowstate", domain=dds_domain, interface=dds_interface,
+        enabled=bool(dds)) if dds else None
+
+    # 样本级钩子：**每个遥测点一次**，整帧入口。
+    # 不能挂在 `_deliver` 上——那里一个遥测点被调 5 次（电机 + 4 个子系统
+    # 各一条信封），会把同一帧 LowState_ 发五遍。见 `SimSession.__init__`。
+    #
+    # 频率诚实说明：本条路径的 `publish_hz` 默认 10Hz（见 `SimSession`：
+    # 物理 100Hz、投递抽样），而**真机 `rt/lowstate` 是 500Hz**。所以这里发的是
+    # "内容正确、频率低于真机"的帧，够证明协议与字段对齐，不够做时序类判据。
+    # 要 500Hz 得把 `--publish-hz` 调上去，并同步调高下游限流——那是部署决策。
+    def _sample_hook(pub: DdsTelemetryPublisher):
+        # `tick` 必须是**单调连续**的帧计数，不能用仿真时刻。
+        #
+        # `/api/reset` 会把仿真时钟归零（`SimSession.reconfigure` 里
+        # `_reset_clock` 重置 `t_wall0`），用 `t.t` 当 tick 就会让
+        # 50 → 0 倒退。真机上 `LowState_.tick` 是低层控制器的连续计数，
+        # 倒退等于告诉收端"设备重启过"，而这里只是换了个姿态。
+        # 所以用一个只在本钩子内递增的计数器：跨 reset 不归零。
+        counter = {"n": 0}
+
+        def hook(t: Any) -> None:
+            counter["n"] += 1
+            pub.publish_telemetry(t, tick=counter["n"])
+        return hook
+
+    session = SimSession(config or SimConfig(posture="stand", fault="normal"),
+                         on_sample=(_sample_hook(dds_pub) if dds_pub is not None
+                                    else None),
+                         publish_hz=publish_hz, frame_hz=frame_hz)
 
     def _deliver(ev: SimEvent) -> None:
         sink.push(ev)
@@ -295,6 +334,7 @@ def create_app(*, config: SimConfig | None = None,
     app.state.session = session
     app.state.sink = sink
     app.state.mqtt = mqtt
+    app.state.dds = dds_pub
 
     @app.on_event("startup")
     def _startup() -> None:                 # pragma: no cover - 由 uvicorn 触发
@@ -305,6 +345,8 @@ def create_app(*, config: SimConfig | None = None,
         session.stop()
         if mqtt is not None:
             mqtt.close()
+        if dds_pub is not None:
+            dds_pub.close()
 
     # ------------------------------------------------------------ 读取
     @app.get("/api/state")
@@ -317,6 +359,8 @@ def create_app(*, config: SimConfig | None = None,
         snap["data_plane"] = sink.stats()
         snap["frame"] = session.frame_state()
         snap["mqtt"] = mqtt.state() if mqtt is not None else {"enabled": False}
+        snap["dds"] = (dds_pub.state() if dds_pub is not None
+                       else {"enabled": False})
         snap["server_time"] = datetime.now(timezone.utc).isoformat()
         return snap
 
@@ -410,6 +454,11 @@ def main(argv: list[str] | None = None) -> int:
                     help="MQTT broker 地址；不给则不发 MQTT")
     ap.add_argument("--mqtt-port", type=int, default=1883)
     ap.add_argument("--mqtt-qos", type=int, default=1, choices=(0, 1))
+    ap.add_argument("--dds", action="store_true",
+                    help="同时发真机 LowState_ 帧到 DDS rt/lowstate（需 data-dog[dds]）")
+    ap.add_argument("--dds-domain", type=int, default=0)
+    ap.add_argument("--dds-interface", default=None,
+                    help="DDS 网卡名（多网卡时指定，避免走错）")
     args = ap.parse_args(argv)
 
     cfg = SimConfig(posture=args.posture, fault=args.fault,
@@ -417,7 +466,9 @@ def main(argv: list[str] | None = None) -> int:
     app = create_app(config=cfg, publish_hz=args.publish_hz,
                      frame_hz=args.frame_hz,
                      mqtt_host=args.mqtt_host, mqtt_port=args.mqtt_port,
-                     mqtt_qos=args.mqtt_qos)
+                     mqtt_qos=args.mqtt_qos,
+                     dds=args.dds, dds_domain=args.dds_domain,
+                     dds_interface=args.dds_interface)
     app.state.session.set_speed(args.speed)
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
     return 0

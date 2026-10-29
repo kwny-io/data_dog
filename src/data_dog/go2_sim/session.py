@@ -65,6 +65,7 @@ class SessionStats:
     # 两个**不同**的丢弃来源，必须分开数。合成一个数时 1 亿的积压丢弃和
     # 3 次投递异常看不出区别，页面上也没法解释"这些帧去哪了"。
     publish_failed: int = 0   # 下游抛异常（信封没能交出去）
+    sample_failed: int = 0    # 样本级出口（DDS）抛异常
     backlog_dropped: int = 0  # 追不上墙钟而主动放弃的仿真步（_MAX_STEPS_PER_TICK）
     started_at: float = 0.0
     wall_elapsed: float = 0.0
@@ -72,7 +73,7 @@ class SessionStats:
 
     @property
     def dropped(self) -> int:
-        return self.publish_failed + self.backlog_dropped
+        return self.publish_failed + self.sample_failed + self.backlog_dropped
 
 
 class SimSession:
@@ -85,11 +86,21 @@ class SimSession:
 
     def __init__(self, config: SimConfig, *,
                  on_event: Callable[[SimEvent], None] | None = None,
+                 on_sample: Callable[[Telemetry], None] | None = None,
                  publish_hz: float = 10.0,
                  frame_hz: float = 5.0,
                  history: int = 600) -> None:
         self.sim = Go2Sim(config)
         self._on_event = on_event
+        # **每个遥测点一次**的钩子，与 `_on_event` 的"每条信封一次"分开。
+        #
+        # 为什么必须分开：DDS 出口发的是**一整个 `LowState_` 结构**，
+        # 里面同时装着 12 个关节 + IMU + BMS + 散热。而 `_on_event` 每个
+        # 遥测点要调 5 次（电机 + 4 个子系统各一条信封），挂在那里会把
+        # 同一帧 LowState_ 发五遍——总线负载 ×5，而收端完全看不出异样
+        # （五帧一模一样）。真机上是**一个 topic 一帧**，所以钩子按
+        # "样本"计，不按"信封"计。
+        self._on_sample = on_sample
         # 投递抽样：物理仍跑 100Hz，但每秒只挑 `publish_hz` 个点发出去。
         # 每个点发 **5 条信封**（1 电机 + 电池/IMU/散热/整机 4 个子系统），
         # 所以 10Hz 投递 = 50 条/s，网关默认 200/s 有余量。
@@ -349,7 +360,22 @@ class SimSession:
         return dict(self._seq)
 
     def _publish(self, t_last: Telemetry, sequences: dict[str, int]) -> None:
-        """一个遥测点 → 一整套信封，逐条投递给下游。异常不许静默。"""
+        """一个遥测点 → 一整套信封，逐条投递给下游。异常不许静默。
+
+        先调 `_on_sample`（**一次**，整帧入口），再走逐信封投递。
+        两者**各自独立 try**：DDS 出口挂了不能连累进程内数据面和 MQTT，
+        反过来也一样——演示上一路故障不该把另外两路带走。
+        """
+        if self._on_sample is not None:
+            try:
+                self._on_sample(t_last)
+            except Exception as e:                # noqa: BLE001
+                self.stats.sample_failed += 1
+                if (self.stats.sample_failed == 1
+                        or self.stats.sample_failed % 100 == 0):
+                    self.stats.drop_reason = (
+                        f"样本出口 {type(e).__name__}: {e} "
+                        f"(共 {self.stats.sample_failed} 帧)")
         try:
             env = envelope(t_last, sequence=sequences[DEMO_COMPONENT])
             batch = [env] if env is not None else []
@@ -434,6 +460,7 @@ class SimSession:
                 "published": self.stats.published,
                 "dropped": self.stats.dropped,
                 "publish_failed": self.stats.publish_failed,
+                "sample_failed": self.stats.sample_failed,
                 "backlog_dropped": self.stats.backlog_dropped,
                 "drop_reason": self.stats.drop_reason,
                 "wall_elapsed": round(wall, 2),

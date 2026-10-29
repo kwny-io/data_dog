@@ -71,6 +71,19 @@ redis = [
 mqtt = [
     "paho-mqtt>=2.0",
 ]
+# Go2 真机协议（DDS）出口：把仿真器的语义数据组装成真正的 `LowState_` 帧发出去。
+#
+# **不进主依赖，也不进 dev**：只有要对着真机/环回跑 `go2_sim.dds_bridge` 时才需要。
+# cyclonedds 是 C 扩展，装一次几十 MB，塞进主依赖会让每次 `pip install` 和 CI
+# 都白付这个代价，而默认路径（进程内数据面 / MQTT）根本用不到它。
+#
+# **版本不要写 `==0.10.2`**（那是 unitree SDK 的 `setup.py` 钉的版本）：
+# 0.10.2 在 Windows 上没有预编译 wheel，pip 会回退源码编译并失败
+# （`Could not locate cyclonedds`）。实测 11.x 的预编译 wheel 可直接装、
+# SDK 在 11.x 上照常工作。详见 `vendor_docs/unitree/SOURCES.md`。
+dds = [
+    "cyclonedds>=0.10.2",
+]
 kafka = [
     "kafka-python>=2.0",
 ]
