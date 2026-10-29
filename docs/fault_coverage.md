@@ -10,6 +10,11 @@
 
 ## 全量矩阵：23 条故障 × 真实双数据面（2026-10-29 实测）
 
+> **2026-10-29 补记**：F8 电机失联已修好并纳入检出（18 → 19 条）。修改在
+> `rig.py`（`lost` 改成逐关节累计计数器）与 `emit.py`（`lost>0` 时保留信封、
+> 只省掉读数）。**F3 的 `COMM_PACKET_LOSS` 帧数未变**——两者靠"帧还在不在"
+> 分家，改法见 §"F8 与 F3 靠什么分家"。
+
 **这张表是本文档唯一的总账**，其余各节是它的展开与原理。跑法：
 
 ```bash
@@ -26,12 +31,12 @@ python scripts/go2_sim_matrix.py            # 90 仿真秒，约 3 分钟
 | — | **normal** | **无** | **0** | **零误报 ✅** |
 | F1 | 堵转 | 3.3 | 772 | `MOTOR_STALL_SUSTAINED` ×770, `MOTOR_LOAD_SPIKE` ×2 |
 | F2 | 散热失效 | 10.3 | 717 | `MOTOR_TEMP_DEGRADE` ×717, `MOTOR_TEMP_RISE_UNDER_LOAD` ×439, `MOTOR_TEMP_PROTECT` ×340 |
-| F3 | 通信丢包 | 5.3 | 644 | `COMM_PACKET_LOSS` ×644 |
+| F3 | 通信丢包 | 4.4 | 646 | `COMM_PACKET_LOSS` ×646 |
 | F4 | 电流零漂 | 2.0 | 793 | `MOTOR_CURRENT_BIAS` ×762, `MOTOR_TAU_EST_FAIL` ×31 |
 | F5 | 负载骤增 | 0.2 | 1373 | `MOTOR_TEMP_RISE_UNDER_LOAD` ×627, `BATTERY_OVERHEAT` ×575, `MOTOR_TEMP_DEGRADE` ×192, `POWER_BUS_OVERCURRENT` ×97 |
 | F6 | 编码器跳变 | 0.3 | 808 | `MOTOR_ENCODER_JUMP` ×808 |
 | F7 | 力矩估算失效 | 3.8 | 776 | `MOTOR_TAU_EST_FAIL` ×776 |
-| F8 | 电机失联 | — | 0 | ❌ 见下 |
+| F8 | 电机失联 | 0.1 | 810 | `MOTOR_LOST_COUNTER_RISING` ×810, `COMM_FIELD_INCOMPLETE` ×808 |
 | F9 | 风扇停转 | 0.1 | 1094 | `COM_FAN_STALLED` ×810, `MOTOR_TEMP_DEGRADE` ×284 |
 | F10 | 环境高温 | 4.2 | 773 | `MOTOR_TEMP_RISE_UNDER_LOAD` ×698, `MOTOR_TEMP_DEGRADE` ×204 |
 | F11 | 电量低 | 0.1 | 810 | `POWER_SOC_LOW` ×810, `POWER_BUS_VOLTAGE_LOW` ×810 |
@@ -42,13 +47,13 @@ python scripts/go2_sim_matrix.py            # 90 仿真秒，约 3 分钟
 | F16 | 陀螺零偏 | — | 0 | ❌ 缺规则（见 §3） |
 | F17 | 加速度计失效 | — | 0 | ❌ 缺规则（见 §3） |
 | F18 | 翻倒 | 3.1 | 1 | `POSTURE_FALLEN` ×1 |
-| F19 | CRC 错误 | 0.1 | 1435 | `COM_CRC_ERROR_RATE` ×810, `COMM_PACKET_LOSS` ×625 |
+| F19 | CRC 错误 | 0.1 | 1436 | `COM_CRC_ERROR_RATE` ×810, `COMM_PACKET_LOSS` ×626 |
 | F20 | 带宽下降 | 0.1 | 810 | `COM_BANDWIDTH_LOW` ×810 |
 | F21 | 步态异常 | — | 0 | ❌ 缺规则（见 §3） |
 | F22 | 足端打滑 | — | 0 | ❌ 仿真侧信号不足（见 §4） |
 | F23 | 整机报错 | 0.1 | 810 | `SYS_ERROR_CODE_SET` ×810 |
 
-**18 / 23 条检出，`normal` 零误报。**
+**19 / 23 条检出，`normal` 零误报。**
 
 ### 表里三处需要如实说明的地方
 
@@ -80,6 +85,35 @@ B 子系统。演示旁白应说"重载导致过热"，不要说"检测出负载
 
 已在 `server.py` 里固定 `WINDOW_SIZE = 60`（6 秒 @10Hz），并写明原因。
 **这一条不只影响演示**：任何按 10Hz 投递、窗口用默认 30 的部署，堵转规则都不会响。
+
+### F8 与 F3 靠什么分家
+
+两者在观测量上都表现为"数据没了"，但**丢失发生在链路的哪一段**完全不同，
+这一条决定了检测判据，也决定了仿真器该怎么演：
+
+| | F8 电机失联 | F3 丢包 / F19 坏帧 |
+|---|---|---|
+| 帧到没到 | **到了** | 没到 |
+| 设备自己知道吗 | **知道**（`lost` 计数器涨） | 不知道（不知道发过） |
+| 下游看到 | 信封在、读数缺、`Δlost > 0` | 序列号空洞 |
+| 判据 | `MOTOR_LOST_COUNTER_RISING` + `COMM_FIELD_INCOMPLETE` | `COMM_PACKET_LOSS` |
+
+`MOTOR_LOST_COUNTER_RISING` 判 `window.delta(lost) > 0`，也就是窗口首尾之差。
+**`lost` 必须是累计计数器（IDL 里是 `uint32`），不能是 0/1 标志位**：标志位在
+故障期间恒为 1，首尾之差恒为 0，那条规则**恒假**——这正是 F8 之前一直检不出的真正原因，
+不只是"信封被整行丢弃"。
+
+改法两处，**必须成对**：
+
+1. `rig.py`：`Telemetry.lost` 改成逐关节累计计数，只在 F8 分支 `+= 1`
+   （F3/F19 是传输途中消失，设备不知道，计数器必须不动）。
+2. `emit.py`：`payload_for` 读数为非有限值时看 `lost` 决定怎么办——
+   `lost > 0` **保留信封**、只省略非有限读数；`lost == 0` 仍然整行不发。
+
+**第二处若写成"有非有限值就发部分载荷"，F3 会一起废掉**：帧不再丢弃 →
+序列号空洞消失 → `COMM_PACKET_LOSS` 再也报不出来。那是拿 F8 换 F3，不是修复。
+`tests/test_go2_sim_pure.py` 里正反两条测试（`test_lost_counter_keeps_envelope_with_missing_readings`
+与 `test_lost_zero_still_drops_whole_frame`）就是钉这个分界的。
 
 ---
 
@@ -132,7 +166,7 @@ B 子系统。演示旁白应说"重载导致过热"，不要说"检测出负载
 | C 电源 | `POWER_SOC_LOW` | `bms_soc ≤ 15%` | 假设（字段 verified） | 仅 fixture |
 | E 通信 | `COMM_PACKET_LOSS` | **包级**到达率 < 95%（设备序列号空洞） | 假设 | F3 **97.0%**，3.9s 报出；`go2_sim` 三姿态全中 |
 | E 通信 | `COMM_FIELD_INCOMPLETE` | 包都到了，但字段有效率 < 95% | 假设 | 仅 fixture |
-| E 通信 | `MOTOR_LOST_COUNTER_RISING` | 窗口内 `Δlost > 0` | 假设 | 仅 fixture |
+| E 通信 | `MOTOR_LOST_COUNTER_RISING` | 窗口内 `Δlost > 0` | 假设 | F8 **810 帧**（90 仿真秒全量矩阵），0.1s 报出 |
 | F 整机/步态 | `MOTOR_LOAD_SPIKE` | `mean I≥1.4 且 I≥14.5A 占比<50% 且 mean_abs(τ) ≥1.5×baseline_abs(τ)，且排除热退化画像` | 假设 | F5 **99.6%**，3.2s 报出 |
 
 **normal 在 5 个 seed 上全部 0 命中**（此前 seed=0 有 1.7% 误报 LOAD_SPIKE，已随

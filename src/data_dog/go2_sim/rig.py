@@ -121,15 +121,111 @@ def _quat_to_mat(q: tuple[float, float, float, float]) -> np.ndarray:
 # 于是每采一个点要跑 5 个物理步。这个比例从模型里读，不写死。
 TELEMETRY_HZ = 100.0
 
+
+def apply_light_stage(model) -> None:
+    """把 go2 场景从"深色演播室"改成"浅色产品展示台"。
+
+    控制台走 Apple 浅色风（背景 #F5F5F7），原场景的星空顶（rgb1 0.3/0.5/0.7 →
+    rgb2 全黑）和深色棋盘地（0.2/0.3/0.4）在浅色页面里就是一块黑洞。
+    这里直接覆写模型的贴图像素，不改 XML——`mj.Model` 的 tex_data 是可变数组，
+    改完立刻生效，且下一次 `from_xml_path` 仍然是干净的。
+
+    **必须能看见狗**。第一版把天空地面一起刷到 0.95+，结果狗（mat='gray'
+    0.672/0.692/0.774 和 mat='black' 全黑）和地面糊成一片：整图均值 245、
+    狗与地面亮度差 65、画面里几乎分不出轮廓。现在地面压到 0.70~0.83 的浅灰、
+    天空留白，实测狗占画面 49%、dog/ground 亮度差 50、狗内部动态范围 184。
+
+    贴图索引不写死：按 `tex_adr` / `tex_height` / `tex_width` 现读，
+    skybox 和 groundplane 各一张。找不到就跳过——换个模型也不至于崩。
+    """
+    import numpy as _np
+
+    def _fill(tex_id: int, fn) -> None:
+        if tex_id < 0 or tex_id >= int(model.ntex):
+            return
+        h = int(model.tex_height[tex_id])
+        w = int(model.tex_width[tex_id])
+        if h <= 0 or w <= 0:
+            return
+        adr = int(model.tex_adr[tex_id])
+        rgb = fn(h, w)                       # (h, w, 3) in 0..1
+        n = h * w * 3
+        model.tex_data[adr:adr + n] = (
+            _np.clip(rgb, 0.0, 1.0).reshape(-1) * 255).astype(
+                model.tex_data.dtype)
+
+    # tex 0 = skybox（gradient），tex 1 = groundplane（checker）。
+    # 顺序是 menagerie 的约定，但校验一下 type，免得换场景时刷错贴图。
+    # mjtTexture: 0=2d 1=cube 2=skybox 3=... — 这里只认 skybox(2) 和 2d(0)。
+    sky_ids = [i for i in range(int(model.ntex))
+               if int(model.tex_type[i]) == 2]
+    gnd_ids = [i for i in range(int(model.ntex))
+               if int(model.tex_type[i]) == 0]
+
+    top = _np.array([0.99, 0.99, 1.00])
+    bot = _np.array([0.87, 0.88, 0.905])
+    for tid in sky_ids:
+        def _sky(h, w, top=top, bot=bot):
+            col = _np.linspace(bot, top, h)[:, None, :]
+            return _np.broadcast_to(col, (h, w, 3))
+        _fill(tid, _sky)
+
+    a = _np.array([0.82, 0.83, 0.845])
+    b = _np.array([0.70, 0.715, 0.735])
+    for tid in gnd_ids:
+        def _gnd(h, w, a=a, b=b):
+            # 棋盘格边长按贴图尺寸折算，换成 1024² 也还是同样的视觉密度
+            cell = max(1, int(round(min(h, w) / 12)))
+            checker = (_np.indices((h, w)).sum(0) // cell) % 2
+            return _np.where(checker[..., None] == 0, a, b)
+        _fill(tid, _gnd)
+
+    # 灯光：原值 ambient 0.3 / diffuse 0.6 是给暗场景的，浅色地面上会过曝。
+    # 收一点，让狗的黑色和灰色部件还能分出来。
+    model.vis.headlight.ambient[:] = [0.26, 0.26, 0.27]
+    model.vis.headlight.diffuse[:] = [0.44, 0.44, 0.46]
+    # 雾把远处理想化地压白，浅色下反而糊掉地平线；推远起雾距离
+    model.vis.map.fogstart = 6.0
+    model.vis.map.fogend = 24.0
+    model.vis.map.haze = 0.10
+
 # 部件名映射。算子绑定的 `component` 只是**声明值**：`CompatibilityResolver`
 # 只按 vendor/model/firmware/protocol 匹配，`component_ref` 直接取自信封的
-# `component_hint`。所以这 4 个名字都能出候选，真正决定"能不能报出来"的
+# `component_hint`。所以这些名字都能出候选，真正决定"能不能报出来"的
 # 是**物理**——见 `demo_joint()`。
+#
+# **后缀基本照抄厂商的关节名**，只有一处历史妥协：
+#
+#   MuJoCo 执行器   Unitree 官方关节名    Agent 部件名后缀
+#   *_hip           hip                   hip
+#   *_thigh         thigh                 **knee**   ← 历史妥协，见下
+#   *_calf          calf                  calf
+#
+# `thigh → knee` 不是笔误：项目早期把"承重主关节"命名为 `knee`（检测器阈值、
+# 演示部件 `front_left_knee`、`presentation.py` 的中文标签都按这个名字写），
+# 而物理上承重且温度信号可用的是 MuJoCo 的 `thigh`（`calf` 站立时电流饱和到
+# ~90A，hip 偏摆几乎不发热——实测见 `demo_joint()`）。改这个名字要动拓扑、
+# 白名单、演示文案，收益只是"名字好看"，所以保留并在 `mujoco_sim/to_sample.py`
+# 记了同一结论。第三段关节本来就有厂商名 `calf`，没有历史包袱，直接用。
+#
+# **12/12 只解决"映射"，不解决"投递"**：默认仍然只发 `DEMO_COMPONENT`
+# 一个（见 `emit.envelopes` 的两条硬理由——只有它挂了算子，且限流）。
+# 12 条全发是 12×100Hz = 1200 条/s，网关默认 200 条/s，差 6 倍。
+# 这张表扩到 12 条的意义是：**任何一个关节都能被选成演示主关节**，
+# 且 `component_row()` 对 12 个关节都成立；不代表另外 11 个在被诊断。
 _JOINT_TO_COMPONENT = {
     "FL_hip": "joint_motor.front_left_hip",
-    "FR_hip": "joint_motor.front_right_hip",
     "FL_thigh": "joint_motor.front_left_knee",
+    "FL_calf": "joint_motor.front_left_calf",
+    "FR_hip": "joint_motor.front_right_hip",
     "FR_thigh": "joint_motor.front_right_knee",
+    "FR_calf": "joint_motor.front_right_calf",
+    "RL_hip": "joint_motor.rear_left_hip",
+    "RL_thigh": "joint_motor.rear_left_knee",
+    "RL_calf": "joint_motor.rear_left_calf",
+    "RR_hip": "joint_motor.rear_right_hip",
+    "RR_thigh": "joint_motor.rear_right_knee",
+    "RR_calf": "joint_motor.rear_right_calf",
 }
 _COMPONENT_TO_JOINT = {v: k for k, v in _JOINT_TO_COMPONENT.items()}
 
@@ -198,9 +294,23 @@ class Telemetry:
     torque: np.ndarray = field(default_factory=lambda: np.zeros(12))       # tau_est
     q: np.ndarray = field(default_factory=lambda: np.zeros(12))
     dq: np.ndarray = field(default_factory=lambda: np.zeros(12))
+    # IDL `MotorState.ddq`：关节加速度。**取自 MuJoCo 的广义加速度 `qacc`**，
+    # 不是把 dq 差分出来——差分是个高通放大器，0.02 rad/s 的量化噪声除以
+    # 10ms 会变成 2 rad/s² 的假加速度，比真信号还大。
+    # 真机驱动里 ddq 是由 dq 差分+滤波得到的（所以它和 ddq_raw 才有区别），
+    # 仿真这边能给更干净的真值，就如实给：这是"物理真值"，不是"驱动读数"。
+    ddq: np.ndarray = field(default_factory=lambda: np.zeros(12))
     q_raw: np.ndarray = field(default_factory=lambda: np.zeros(12))
     dq_raw: np.ndarray = field(default_factory=lambda: np.zeros(12))
+    ddq_raw: np.ndarray = field(default_factory=lambda: np.zeros(12))
     valid: np.ndarray = field(default_factory=lambda: np.ones(12, dtype=bool))
+    # 逐关节的**累计**失联计数（IDL `MotorState.lost` 是 `uint32`，见
+    # `vendor_docs/unitree/raw/unitree_sdk2__MotorState_.idl.txt`）。
+    #
+    # **不能用 `valid` 反推成 0/1 标志位**：`MOTOR_LOST_COUNTER_RISING` 判的是
+    # `window.delta(lost) > 0`，即窗口首尾之差。标志位在故障期间恒为 1，delta
+    # 恒为 0，那条规则永不触发——F8 就是卡在这里。
+    lost: np.ndarray = field(default_factory=lambda: np.zeros(12, dtype=np.int64))
     base_pos: tuple[float, float, float] = (0.0, 0.0, 0.0)
     base_quat: tuple[float, float, float, float] = (1.0, 0.0, 0.0, 0.0)
     base_vel: float = 0.0
@@ -224,7 +334,9 @@ class Telemetry:
             "q_raw": float(self.q_raw[i]),
             "dq": float(self.dq[i]),
             "dq_raw": float(self.dq_raw[i]),
-            "lost": 0.0 if self.valid[i] else 1.0,
+            "ddq": float(self.ddq[i]),
+            "ddq_raw": float(self.ddq_raw[i]),
+            "lost": float(self.lost[i]),
         }
 
     def flat_metrics(self) -> dict[str, float]:
@@ -254,11 +366,21 @@ class Go2Sim:
         self.config = config
         self.seed = config.resolved_seed()
         self._rng = np.random.default_rng(self.seed)
+        # 传感器噪声**必须有自己的随机流**，不能和故障注入共用 `_rng`。
+        #
+        # 踩过一次：F3 丢包和 q_raw/dq_raw 的噪声抽样原来都在一个流里，每步
+        # 先抽丢包、后抽噪声。后来给 `ddq_raw` 加了一条 `normal(...)`，同一
+        # 个流就多消耗一次——**后面每一次丢包抽样全部错位**，F3 首检从 5.3s
+        # 变成 0.8s。故障行为一个字没改，数字却变了，而且 seed 固定的确定性
+        # 测试完全看不出来（它们按 seed 复现的是"错位之后"的那条序列）。
+        # 拆成两条流：字段增删只影响噪声，故障注入按自己的序列走。
+        self._rng_sensor = np.random.default_rng(self.seed ^ 0x5EED_5EED)
         self.posture: Posture = POSTURES.get(config.posture) or POSTURES["stand"]
         self.fault: FaultSpec = fault_by_key(config.fault)
 
         self._model = mujoco.MjModel.from_xml_path(
             str(model_path or DEFAULT_MODEL))
+        apply_light_stage(self._model)
         # 抬高离屏 framebuffer：go2 场景默认只有 640×480，控制台要 880×550
         # 会直接抛 ValueError（见 render_jpeg 的注解）。这是模型属性，
         # 必须在建 MjData / MjRenderer **之前**改。
@@ -319,8 +441,10 @@ class Go2Sim:
         self._thermal = ThermalState()
         self._system = SystemState()
         # 通信/整机类故障的运行计数
-        self._lost_count = 0
         self._crc_fails = 0
+        # 逐关节累计失联计数（IDL uint32）。随 `reset()` 清零——它是"上电以来的
+        # 累计丢帧数"，换一局就该从 0 起。
+        self._lost = np.zeros(12, dtype=np.int64)
         self._last: Telemetry | None = None
 
         # 时钟
@@ -370,8 +494,8 @@ class Go2Sim:
         self._imu = ImuModel(seed=self.seed + 1)
         self._thermal = ThermalState()
         self._system = SystemState()
-        self._lost_count = 0
         self._crc_fails = 0
+        self._lost = np.zeros(12, dtype=np.int64)
         self._last = None
         self._t = 0.0
         self._steps = 0
@@ -384,6 +508,7 @@ class Go2Sim:
                 self.config = config
                 self.seed = config.resolved_seed()
                 self._rng = np.random.default_rng(self.seed)
+                self._rng_sensor = np.random.default_rng(self.seed ^ 0x5EED_5EED)
                 self.posture = POSTURES.get(config.posture) or POSTURES["stand"]
                 self.fault = fault_by_key(config.fault)
             self._reset_data()
@@ -537,7 +662,11 @@ class Go2Sim:
             valid[j] = False
             for arr in obs.values():
                 arr[j] = np.nan
-            self._lost_count += 1
+            # 只有 F8 涨计数器：这是"设备仍在发、但这一路读数没了"，设备自己
+            # **知道**丢了，所以它上报的 `lost` 会涨。F3/F19 是帧在传输途中消失，
+            # 设备根本不知道发过——那种情况只能靠**序列号空洞**发现
+            # （`COMM_PACKET_LOSS`），计数器不该动。这正是两条故障的分水岭。
+            self._lost[j] += 1
         elif k == "F19_crc_error":
             # CRC 失败：帧被丢弃，等效于随机小比例丢包 + 失败率上升
             drop = self._rng.random(12) < (0.10 * sev)
@@ -610,15 +739,19 @@ class Go2Sim:
         # 否则编码器类故障（F6）没有分辨依据。
         dq_true = np.array([d.qvel[i] for i in self._dof], dtype=float)
         q_true = np.array([d.qpos[i] for i in self._qidx], dtype=float)
+        ddq_true = np.array([d.qacc[i] for i in self._dof], dtype=float)
         obs = {
             "temperature": self._T.copy(),
             "current": current.copy(),
             "tau_est": torque.copy(),
             "q": q_true.copy(),
             "dq": dq_true.copy(),
-            # raw 是编码器原始计数换算值：与滤波值差一个量化噪声量级
-            "q_raw": q_true + self._rng.normal(0, 0.0015, 12),
-            "dq_raw": dq_true + self._rng.normal(0, 0.02, 12),
+            "ddq": ddq_true.copy(),
+            # raw 是编码器原始计数换算值：与滤波值差一个量化噪声量级。
+            # 用 `_rng_sensor` 而不是 `_rng`——见构造函数里的说明。
+            "q_raw": q_true + self._rng_sensor.normal(0, 0.0015, 12),
+            "dq_raw": dq_true + self._rng_sensor.normal(0, 0.02, 12),
+            "ddq_raw": ddq_true + self._rng_sensor.normal(0, 0.5, 12),
         }
         valid = np.ones(12, dtype=bool)
         self._apply_observation_fault(active, obs, valid)
@@ -707,7 +840,8 @@ class Go2Sim:
         tel = Telemetry(
             t=self._t, temperature=t_obs, current=i_obs, torque=tau_obs,
             q=obs["q"], dq=obs["dq"], q_raw=obs["q_raw"], dq_raw=obs["dq_raw"],
-            valid=valid,
+            ddq=obs["ddq"], ddq_raw=obs["ddq_raw"],
+            valid=valid, lost=self._lost.copy(),
             base_pos=(float(pos[0]), float(pos[1]), float(pos[2])),
             base_quat=(float(pos[3]), float(pos[4]), float(pos[5]), float(pos[6])),
             base_vel=float(np.linalg.norm(d.qvel[0:2])),
@@ -810,10 +944,14 @@ class Go2Sim:
                                              width=self.OFFSCREEN_W)
                 cam = mj.MjvCamera()
                 mj.mjv_defaultCamera(cam)
-                cam.distance = 2.1
-                cam.elevation = -18
+                # 取景实测（1280×800 帧内剪影 bbox）：
+                # 1.45 / lookat z 0.34 时狗占 77% 高但腿被裁在画面外（y 到 799）；
+                # 1.70 / z 0.20 时 stand 51%、run 48%，四腿完整在 y 323..732 内。
+                # 跑姿腿张开投影更宽，所以按"最宽姿态也留边"取值，不按站姿卡满。
+                cam.distance = 1.70
+                cam.elevation = -13
                 cam.lookat[:] = [float(self._data.qpos[0]),
-                                 float(self._data.qpos[1]), 0.25]
+                                 float(self._data.qpos[1]), 0.20]
                 self._camera = cam
             # 重新取一次并断言非 None：上面 if 分支里刚赋值，但属性本身
             # 声明为 Optional，mypy 不会跨分支推断属性。
@@ -823,7 +961,7 @@ class Go2Sim:
                 raise RuntimeError("渲染器初始化失败：_renderer/_camera 仍为 None")
             # 相机跟随机身，否则狗跑出画面
             cam.lookat[:] = [float(self._data.qpos[0]),
-                             float(self._data.qpos[1]), 0.25]
+                             float(self._data.qpos[1]), 0.20]
             cam.azimuth = 130
             if threading.get_ident() != self._gl_thread:
                 raise RuntimeError(

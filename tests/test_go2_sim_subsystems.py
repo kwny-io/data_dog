@@ -199,6 +199,33 @@ def test_non_finite_value_drops_whole_envelope() -> None:
     print("PASS test_non_finite_value_drops_whole_envelope")
 
 
+def test_sequence_can_be_given_per_component() -> None:
+    """序列号能**按部件分开给**，且逐个落到对应信封上。
+
+    `WindowBuffer` 的包级丢包是 `device_sn|component` 分窗统计的
+    （`chain.py` 的 `_seqnums`），所以序列号必须按部件独立，和分窗同构。
+    传列表这条路是新加的——不钉住它，`session` 那边一旦退回共享计数器
+    就没人发现：五个子系统同频时两种写法恰好都得到 1,2,3,…，
+    直到某一路不锁步才暴露，而那时现场已经很难复现了。
+    """
+    seqs = {c: 100 + i for i, c in enumerate(SUBSYSTEM_SOURCES)}
+    envs = subsystem_envelopes(
+        FakeSysTelemetry(),
+        components=tuple(SUBSYSTEM_SOURCES),
+        sequence=[seqs[c] for c in SUBSYSTEM_SOURCES],
+    )
+    got = {e["component_hint"]: e["sequence"] for e in envs}
+    assert got == seqs, got
+    print("PASS test_sequence_can_be_given_per_component")
+
+
+def test_sequence_scalar_still_broadcasts() -> None:
+    """传单值仍广播给所有部件（回放/离线测试按这个用）。"""
+    envs = subsystem_envelopes(FakeSysTelemetry(), sequence=7)
+    assert {e["sequence"] for e in envs} == {7}
+    print("PASS test_sequence_scalar_still_broadcasts")
+
+
 # ---------------------------------------------------------------- 分流与检出
 
 def test_subsystem_events_route_to_subsystem_plane() -> None:
