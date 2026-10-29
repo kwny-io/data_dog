@@ -259,7 +259,9 @@ def _run_investigation_job(tenant_id: str, candidate_id: str,
       - 取消 → cancelled（由 worker 侧 finish_job 拒绝覆盖，这里如实返回 cancelled）
       - 失败 → failed + 有限错误码
     """
-    started = time.monotonic()
+    # 同 _execute_investigation：monotonic 在 Windows 上 16ms 起步，
+    # 会把快速任务的耗时记成 0 秒，直方图上直接失真。
+    started = time.perf_counter()
     status: str = "failed"
     report_id: str | None = None
     error_code: str | None = "execution_failed"
@@ -283,7 +285,7 @@ def _run_investigation_job(tenant_id: str, candidate_id: str,
             "error": f"{type(e).__name__}: {e}"})
         error_code = "execution_failed"
     finally:
-        metrics.investigation_job_duration_seconds.observe(time.monotonic() - started)
+        metrics.investigation_job_duration_seconds.observe(time.perf_counter() - started)
         metrics.investigation_jobs_total.labels(status=status).inc()
     return {"status": status, "report_id": report_id, "error_code": error_code,
             "report": report, "candidate_id": candidate_id, "run_log": run_log}
@@ -706,7 +708,10 @@ def _execute_investigation(tenant: str, candidate_id: str, *,
     由 JobRunner._finish 与 job 终态**同事务**写（"job 有终态 ⇔ 有运行日志"）。
     """
     trace: list[dict[str, Any]] = []
-    started = time.monotonic()
+    # 用 perf_counter 而非 monotonic：Windows 上 monotonic 分辨率只有 16ms
+    # （实测），而离线档的同步调查几十微秒就跑完 → duration_ms 真取到 0.0。
+    # 这个 0 不是"很快"，是时钟看不见，排查"慢在哪"时反而误导。
+    started = time.perf_counter()
     attempt_run_id = _make_run_id(candidate_id)
 
     def _with_log(out: dict[str, Any], *, status: str, run_id: str | None = None,
@@ -719,7 +724,7 @@ def _execute_investigation(tenant: str, candidate_id: str, *,
             kind="sync" if persist else "async", status=status, trace=trace,
             report_id=report_id, error_code=error_code, error_detail=error_detail,
             usage=usage, model=str(settings.llm_model() or ""),
-            duration_ms=(time.monotonic() - started) * 1000.0,
+            duration_ms=(time.perf_counter() - started) * 1000.0,
             disposition=disposition)
         out["run_id"] = log["run_id"]
         out["run_log"] = log
