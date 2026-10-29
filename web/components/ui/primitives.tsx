@@ -4,20 +4,18 @@ import { TONE_CLASS, type Tone } from "@/lib/domain";
 import { HScroll } from "@/components/ui/hscroll";
 
 /* ------------------------------------------------------------------ Panel *
- * A holographic plate: frosted glass over the orb field, soft rounded corners,
- * a spectrum shimmer along the top edge, and a cool halo. Hierarchy comes from
- * glow weight and the top rule, not from stacked drop shadows.
+ * Apple's grouped surface: an opaque white card on the grey page, an 18px
+ * corner, and a hairline. That is the whole treatment — no top-edge shimmer, no
+ * halo, no frosted fill. Depth in the system language comes from the surface
+ * sitting *above* the substrate, not from light bleeding out of its edges; a
+ * glow on every card is what makes an instrument look like a demo.
  *
- * The header is treated as its own stratum, not a title bar:
- *   - a short spectrum *rake* at the left edge marks the section the way a nav
- *     rail and the logo frame do — one ornament language across the console;
- *   - the header separates from the body with a hairline that fades out to the
- *     right, so it never competes with the top-edge shimmer for attention.
+ * The header keeps its hairline separator, because a card with a titled region
+ * needs to say where the title ends and the data begins.
  *
- * No pointer-tracked spotlight: a highlight following the cursor across every
- * panel made the console read as a demo rather than an instrument. The border,
- * the top rule and the hover lift carry the affordance; nothing needs to follow
- * the mouse. */
+ * No pointer-tracked spotlight either: a highlight following the cursor across
+ * every panel competed with the measurements. The border and the hover shadow
+ * carry the affordance; nothing needs to follow the mouse. */
 
 export function Panel({
   children,
@@ -25,7 +23,6 @@ export function Panel({
   title,
   subtitle,
   actions,
-  accent = true,
   lift = true,
   variant = "plate",
   aside,
@@ -39,15 +36,13 @@ export function Panel({
   /** A fixed aside, pinned to the right of the header (e.g. a status chip).
    *  Distinct from `actions`, which holds controls. */
   aside?: React.ReactNode;
-  /** Draw the spectrum shimmer along the top edge. On by default. */
-  accent?: boolean;
-  /** Warm the border + deepen the halo on hover. Off for nested/static plates. */
+  /** Deepen the card's shadow on hover. Off for nested/static cards. */
   lift?: boolean;
-  /** `plate` is the full holographic surface (glass + halo + border).
-   *  `quiet` drops all three for a thin, borderless field: a low-alpha tint and
-   *  a single hairline above the header, nothing else. Use it for panels that
-   *  are supporting detail rather than the view's focal point — ten equally-lit
-   *  plates on one screen have no hierarchy, which reads as weight, not depth. */
+  /** `plate` is the raised card (white surface + hairline + soft shadow).
+   *  `quiet` drops the surface for a recessed field on the page itself: a
+   *  hairline ring and no fill. Use it for panels that are supporting detail
+   *  rather than the view's focal point — ten equally-raised cards on one
+   *  screen have no hierarchy, which reads as weight, not depth. */
   variant?: "plate" | "quiet";
   as?: "section" | "div" | "article";
 }) {
@@ -55,26 +50,16 @@ export function Panel({
   return (
     <Tag
       className={clsx(
-        // `relative` is explicit rather than incidental: the accent span is
-        // absolutely positioned. `.glass` happens to establish a containing
-        // block via backdrop-filter, but relying on that would tie the accent's
-        // geometry to a filter detail.
         "relative overflow-hidden rounded-[var(--radius-token)]",
         quiet
-          ? "bg-panel/40 ring-1 ring-rule/40"
-          : clsx("glass glow border border-rule", lift && "lift"),
+          ? "ring-1 ring-rule"
+          : clsx("border border-rule bg-panel shadow-[var(--glow)]", lift && "lift"),
         className,
       )}
     >
-      {accent && !quiet && (
-        <span
-          aria-hidden
-          className="pointer-events-none absolute inset-x-0 top-0 z-10 h-px bg-gradient-to-r from-transparent via-spec-violet/60 to-transparent"
-        />
-      )}
       {(title || actions || aside) && (
-        <header className="relative z-[1] flex items-baseline justify-between gap-4 border-b border-rule px-4 py-2.5">
-          <div className="panel-rake min-w-0 pl-2.5">
+        <header className="flex items-baseline justify-between gap-4 border-b border-rule px-4 py-2.5">
+          <div className="min-w-0">
             {title && (
               <h2 className="text-[13px] font-semibold tracking-wide text-ink">{title}</h2>
             )}
@@ -151,7 +136,7 @@ export function MetricTile({
   }
 
   return (
-    <Panel accent={false} lift className={clsx("px-4 py-3", className)}>
+    <Panel lift className={clsx("px-4 py-3", className)}>
       {/* A reading instrument: a tone-coloured datum bar sits under the value,
           so the tile's state is legible from the bar's colour alone even before
           the number is read — the same "signal, not decoration" rule. */}
@@ -197,8 +182,7 @@ export function Badge({
         "inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-xs font-medium",
         c.text,
         c.border,
-        filled ? c.bg : "bg-panel/40",
-        filled && "shadow-[0_0_12px_-2px_currentColor]",
+        filled ? c.bg : "bg-paper-sunken",
         className,
       )}
     >
@@ -245,7 +229,7 @@ export function PendingSlot({
   return (
     <div
       className={clsx(
-        "flex flex-col gap-1.5 rounded-[var(--radius-token)] border border-dashed border-rule-strong bg-panel/30 px-3 py-2.5",
+        "flex flex-col gap-1.5 rounded-[var(--radius-token)] border border-dashed border-rule-strong bg-paper-sunken px-3 py-2.5",
         className,
       )}
       role="group"
@@ -268,7 +252,7 @@ export function PendingSlot({
         </p>
       )}
       {command && (
-        <code className="reading mt-0.5 block break-all rounded-r-[var(--radius-token)] border-l-2 border-spec-violet/50 pl-2.5 text-[11px] text-ink">
+        <code className="reading mt-0.5 block break-all rounded-r-[var(--radius-token-sm)] border-l-2 border-rule-strong pl-2.5 text-[11px] text-ink">
           {command}
         </code>
       )}
@@ -348,7 +332,7 @@ export function ErrorState({
         <button
           type="button"
           onClick={onRetry}
-          className="mt-3 inline-flex items-center rounded-[var(--radius-token)] border border-rule-strong bg-panel/60 px-3 py-1 text-xs font-medium text-ink hover:bg-paper-sunken"
+          className="mt-3 inline-flex items-center rounded-[var(--radius-token-sm)] border border-rule-strong bg-panel px-3 py-1 text-xs font-medium text-ink hover:bg-paper-sunken"
         >
           重试
         </button>
@@ -369,18 +353,17 @@ export function Button({
   size?: "sm" | "md";
 }) {
   const variants = {
-    primary:
-      "bg-spectrum text-on-primary border-transparent shadow-[0_0_22px_-6px_var(--glow-ring)] hover:brightness-110",
-    secondary: "bg-panel/50 text-ink border-rule-strong hover:bg-paper-sunken",
+    primary: "bg-primary text-on-primary border-transparent hover:bg-primary-hover",
+    secondary: "bg-panel text-ink border-rule-strong hover:bg-paper-sunken",
     ghost: "bg-transparent text-ink-muted border-transparent hover:bg-paper-sunken hover:text-ink",
-    danger: "bg-panel/50 text-critical border-critical hover:bg-critical-soft",
+    danger: "bg-panel text-critical border-critical hover:bg-critical-soft",
   } as const;
   const sizes = { sm: "px-2.5 py-1 text-xs", md: "px-3.5 py-1.5 text-sm" } as const;
   return (
     <button
       {...props}
       className={clsx(
-        "relative inline-flex items-center justify-center gap-1.5 rounded-[var(--radius-token)] border font-medium transition-all",
+        "relative inline-flex items-center justify-center gap-1.5 rounded-[var(--radius-token-sm)] border font-medium transition-colors",
         "disabled:cursor-not-allowed disabled:opacity-50",
         variants[variant],
         sizes[size],

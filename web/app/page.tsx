@@ -200,13 +200,13 @@ export default function DashboardPage() {
         <div className="flex flex-wrap gap-3 p-4">
           <Link
             href="/investigate"
-            className="inline-flex items-center gap-2 rounded-[var(--radius-token)] border border-rule-strong bg-panel/50 px-3 py-2 text-sm text-ink transition-colors hover:border-spec-violet/60"
+            className="inline-flex items-center gap-2 rounded-[var(--radius-token-sm)] border border-rule bg-panel px-3 py-2 text-sm text-ink transition-colors hover:bg-paper-sunken"
           >
             去调查台选一个候选开始调查 →
           </Link>
           <Link
             href="/alerts"
-            className="inline-flex items-center gap-2 rounded-[var(--radius-token)] border border-rule-strong bg-panel/50 px-3 py-2 text-sm text-ink transition-colors hover:border-spec-violet/60"
+            className="inline-flex items-center gap-2 rounded-[var(--radius-token-sm)] border border-rule bg-panel px-3 py-2 text-sm text-ink transition-colors hover:bg-paper-sunken"
           >
             查看告警状态机 →
           </Link>

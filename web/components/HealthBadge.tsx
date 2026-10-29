@@ -47,18 +47,18 @@ export function HealthBadge() {
   return (
     <span
       title={title}
-      className="inline-flex h-8 items-center gap-1.5 rounded-full border border-rule-strong bg-panel/50 px-2.5 text-xs text-ink-muted"
+      className="inline-flex h-8 items-center gap-1.5 rounded-full border border-rule bg-paper-sunken px-2.5 text-xs text-ink-muted"
     >
       <span
         aria-hidden
         className={
           "h-2 w-2 rounded-full " +
           (dot === "ok"
-            ? "bg-confirmed shadow-[0_0_10px_-1px_var(--confirmed)]"
+            ? "bg-confirmed"
             : dot === "warn"
-              ? "bg-warning shadow-[0_0_10px_-1px_var(--warning)]"
+              ? "bg-warning"
               : dot === "bad"
-                ? "bg-critical shadow-[0_0_10px_-1px_var(--critical)]"
+                ? "bg-critical"
                 : "bg-ink-faint animate-pulse")
         }
       />

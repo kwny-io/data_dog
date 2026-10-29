@@ -15,11 +15,16 @@ import type { AlertState } from "@/lib/api/types";
  * The alert lifecycle, drawn as the backend's real state machine.
  *
  * Read it as a signal path, not a row of pills. The six forward states are
- * stops on a single spectrum rail — the gradient runs cyan→violet→magenta, so
- * the direction of travel is legible without arrows — and each stop carries its
- * live count, because this is a distribution view: where are the alerts right
- * now. The two bypass states (suppressed / rejected) hang below the rail; they
- * are side-branches off "detected", not stops on the mainline.
+ * stops on a single hairline — one continuous rule states the ordering, and
+ * each stop carries its live count, because this is a distribution view: where
+ * are the alerts right now. The two bypass states (suppressed / rejected) hang
+ * below the rail; they are side-branches off "detected", not stops on the
+ * mainline.
+ *
+ * The rail used to be a cyan→violet→magenta gradient encoding direction. It
+ * carried no information the left-to-right ordering did not already carry, and
+ * it spent three of the page's colours on decoration; the colour on this
+ * diagram now means tone (critical / warning / …), which is data.
  *
  * Every legal transition is enumerated beneath the rail, so the picture is a
  * complete account of the backend TRANSITIONS map without a routing diagram
@@ -67,11 +72,11 @@ export function AlertStateMachine({
     <div className={className}>
       <HScroll>
         <div className="min-w-[640px] px-4 pt-5 pb-4">
-          {/* The rail: six stops along one spectrum hairline. */}
+          {/* The rail: six stops along one hairline. */}
           <div className="relative flex h-20 items-center justify-between gap-1">
             <span
               aria-hidden
-              className="pointer-events-none absolute inset-x-2 top-1/2 h-px -translate-y-1/2 bg-gradient-to-r from-spec-cyan/35 via-spec-violet/40 to-spec-magenta/35"
+              className="pointer-events-none absolute inset-x-2 top-1/2 h-px -translate-y-1/2 bg-rule-strong"
             />
             {MAINLINE.map((state) => (
               <StateStop
@@ -220,9 +225,7 @@ function StateStop({
           "flex h-6 items-center whitespace-nowrap rounded-full border px-2.5 text-xs font-semibold transition-all",
           c.border,
           c.text,
-          selected || lit
-            ? clsx(c.bg, "shadow-[0_0_12px_-3px_currentColor]")
-            : "bg-panel/60",
+          selected || lit ? c.bg : "bg-paper-sunken",
           interactive && "group-hover:brightness-110",
         )}
       >
@@ -237,7 +240,6 @@ function StateStop({
               ? clsx(c.text, "border-2 border-current bg-current")
               : "border-2 border-rule-strong bg-panel",
           )}
-          style={lit ? { boxShadow: "0 0 10px -1px currentColor" } : undefined}
         />
         {selected && <span className={clsx("absolute inset-[-3px] rounded-full border", c.border)} />}
       </span>

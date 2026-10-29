@@ -15,8 +15,10 @@ import "./globals.css";
 // 行为不对"的故障。控制台本来就是内部实时工具，SSR 的代价可以接受。
 export const dynamic = "force-dynamic";
 
-/* Fonts are declared with @font-face in globals.css and served from
- * public/fonts — see the comment there for why we self-host. */
+/* Type is the platform's own UI face (see --font-ui in globals.css). SF Pro is
+ * not licensed for the web, so the stack resolves to -apple-system on Apple
+ * hardware and to the native UI font elsewhere: authentic, and zero font bytes
+ * to ship. */
 
 const TITLE = "遥测故障调查台";
 const DESCRIPTION = "机器狗遥测异常候选调查控制台——结论挂证据，状态可追溯。";

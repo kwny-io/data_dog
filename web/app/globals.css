@@ -1,215 +1,182 @@
 @import "tailwindcss";
 
 /* ------------------------------------------------------------------ *
- * Fonts — self-hosted (public/fonts), not fetched at build or run time.
+ * Fonts — the platform's own UI face, no download at all.
  *
- * IBM Plex, chosen deliberately: it comes from a computing/industrial
- * heritage rather than being a generic UI face, and it ships a true
- * monospace sibling so sans and mono read as one family. Mono is not
- * decoration — IDs, timestamps and measurements are evidence, and the
- * mono face signals that.
+ * The Apple visual language is built on the system font: SF Pro on Apple
+ * platforms, Segoe UI on Windows, Roboto on Android. Shipping SF Pro is not
+ * licensed for the web, and shipping a lookalike would read as an imitation
+ * rather than as "this app belongs on your machine". So the stack is
+ * system-first, which is both the authentic choice and the most hermetic one
+ * possible: zero font bytes over the wire, nothing to fail offline, nothing
+ * in public/ to keep in sync.
  *
- * Self-hosting (rather than next/font/google) keeps the build hermetic and
- * the app usable offline / behind an air-gapped network, and removes a
- * runtime dependency on Google's CDN.
+ * Mono is not decoration — IDs, timestamps and measurements are evidence, and
+ * a monospace face signals that. `ui-monospace` resolves to SF Mono on Apple
+ * platforms and Cascadia/Consolas on Windows; the rest of the stack keeps
+ * older machines from falling back to a proportional face.
  * ------------------------------------------------------------------ */
 
-/* Sans: variable font, one file covering the 400–700 range. */
-@font-face {
-  font-family: "IBM Plex Sans";
-  font-style: normal;
-  font-weight: 400 700;
-  font-display: swap;
-  src: url("/fonts/IBMPlexSans.woff2") format("woff2");
-}
-
-/* Mono: static weights, one file each. */
-@font-face {
-  font-family: "IBM Plex Mono";
-  font-style: normal;
-  font-weight: 400;
-  font-display: swap;
-  src: url("/fonts/IBMPlexMono-400.woff2") format("woff2");
-}
-@font-face {
-  font-family: "IBM Plex Mono";
-  font-style: normal;
-  font-weight: 500;
-  font-display: swap;
-  src: url("/fonts/IBMPlexMono-500.woff2") format("woff2");
-}
-@font-face {
-  font-family: "IBM Plex Mono";
-  font-style: normal;
-  font-weight: 600;
-  font-display: swap;
-  src: url("/fonts/IBMPlexMono-600.woff2") format("woff2");
-}
-@font-face {
-  font-family: "IBM Plex Mono";
-  font-style: normal;
-  font-weight: 700;
-  font-display: swap;
-  src: url("/fonts/IBMPlexMono-700.woff2") format("woff2");
-}
-
 :root {
-  --font-plex-sans: "IBM Plex Sans";
-  --font-plex-mono: "IBM Plex Mono";
+  --font-ui: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI Variable Text",
+    "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei UI", "Microsoft YaHei",
+    system-ui, sans-serif;
+  --font-code: ui-monospace, "SF Mono", SFMono-Regular, "Cascadia Mono", "Segoe UI Mono",
+    Menlo, Consolas, monospace;
 }
 
 /* Theme is switched by a `.dark` class on <html> (see ThemeProvider). */
 @custom-variant dark (&:where(.dark, .dark *));
 
 /* ------------------------------------------------------------------ *
- * data_dog design tokens
+ * data_dog design tokens — Apple system components
  *
- * Visual direction: a DEEP-SPACE CONTROL CONSOLE — one pool of light behind an
- * instrument panel. The subject is industrial telemetry fault investigation, and
- * the surface should read as a measuring device that happens to be beautiful,
- * not as a product demo.
+ * Visual direction: the app should read as a native panel of the operating
+ * system it runs on. That means the vocabulary of Apple's own grouped settings
+ * screens, not a "macOS-flavoured" skin:
  *
- * The rule that governs every effect in this file: DECORATION MUST CARRY STATE.
- * Glow, glass and spectrum are still here, but each one marks something true —
- * the halo sits under a plate that has depth, the spectrum marks the single
- * primary action and the active nav rail, the rake marks a section edge. Nothing
- * moves for the sake of moving. The travelling-light effects (`.shine`,
- * `.flow-line`, `.flow-border`) and the pointer-tracked spotlight were removed
- * for exactly this reason: continuous motion with no state behind it reads as
- * showreel, and it competed with the data for attention.
+ *   - ONE grouped background (#F5F5F7), cards in pure white on top of it;
+ *   - hairlines instead of borders — separation is stated by weight, never by
+ *     a heavy stroke;
+ *   - a single shadow, wide and shallow, so a card sits ON the page rather
+ *     than floating above it;
+ *   - colour is INFORMATION, not decoration. Blue marks the one primary action
+ *     and the selected state; green/amber/red mark health. Nothing else is
+ *     tinted, and there is no gradient anywhere in the chrome.
  *
- * The one memorable device stays the "evidence rail": a from→to value drawn
- * as a dimension line. Its substrate changes (glass panel, hairline rule) but
- * its job — making "a conclusion must carry its evidence" visible — does not.
+ * This deliberately replaces the earlier deep-space console (glass over a
+ * violet orb field, cyan→violet→magenta spectrum). Every gradient that carried
+ * no state was removed rather than restyled: a spectrum used as wallpaper makes
+ * a second accent, and a second accent is what makes an interface look
+ * assembled instead of designed. The screen is meant to match `go2_sim`'s
+ * console page, which already ships this same language — one product, one
+ * surface.
  *
- * Accent is a three-stop spectrum (electric cyan → violet → magenta) used as
- * a SIGNAL, not as wallpaper. Everything structural (rules, body text, tables)
- * stays in the cool deep-space neutrals so data remains the loudest thing on
- * screen. Hierarchy on a plate-heavy page comes from CONTRAST — one hero
- * read-out bare on the substrate, supporting panels quiet — not from lighting
- * ten panels equally.
+ * The one memorable device stays the "evidence rail": a from→to value drawn as
+ * a dimension line. Its substrate changes (white card, hairline rule); its job
+ * — making "a conclusion must carry its evidence" visible — does not.
  *
- * Deliberately NOT (per brief §6): warm cream + serif + terracotta,
- * near-black + a SINGLE neon green, the newspaper-column look.
+ * Contrast is not eyeballed: every ink tier below was measured against both
+ * the page background and the card background, and clears WCAG AA (4.5:1) at
+ * its worst pairing. The numbers are in the comments so a future edit can be
+ * checked instead of re-guessed.
  * ------------------------------------------------------------------ */
 
 :root {
-  /* Light = "daylight holography": a cool bright substrate so the same glass +
-     spectrum language reads in a lab / daytime context without going dark. */
-  --paper: #eef2fb;
-  --paper-sunken: #e2e8f6;
-  --panel: #ffffff;
-  --panel-glass: rgba(255, 255, 255, 0.72); /* the frosted face over the orbs */
-  --rule: #d7dff0;
-  --rule-strong: #b3c0dd;
-  --grid: #cbd6ea;
-  --ink: #0b1526;
-  --ink-muted: #4a5772;
-  --ink-faint: #5a657f; /* was #647089 (4.5:1, no AA margin once the violet
-                           substrate lit up the glass). Now ~5.3:1, still
-                           lighter than --ink-muted. */
+  /* Grouped-list surfaces (Apple's systemGroupedBackground family). */
+  --paper: #f5f5f7; /* the page behind the cards */
+  --paper-sunken: #ededf0; /* wells, table stripes, pressed rows */
+  --panel: #ffffff; /* the card face */
+  --panel-glass: rgba(255, 255, 255, 0.78); /* frosted top bar / drawer face */
+  --rule: rgba(0, 0, 0, 0.09); /* hairline: 1px at 9% black */
+  --rule-strong: rgba(0, 0, 0, 0.16); /* the emphasised hairline */
 
-  /* Primary action colour = the spectrum's anchor (electric indigo). */
-  --primary: #4f46e5;
-  --primary-hover: #4338ca;
-  --primary-soft: #e6e4fb;
+  /* Ink. Measured on #f5f5f7 (page) / #ffffff (card). */
+  --ink: #1d1d1f; /* 15.5:1 / 16.8:1 */
+  --ink-muted: #636369; /* 5.5:1 / 6.0:1 — secondary labels */
+  --ink-faint: #6a6a70; /* 4.9:1 / 5.4:1 — the dimmest tier that still reads */
+
+  /* The single accent. System blue, darkened just far enough that white text
+     on it clears AA (5.3:1) — #0a84ff is the iOS accent but scores 3.6:1 with
+     white, so it is used for fills only on dark, never as body text here. */
+  --primary: #0066e0; /* on page 4.9:1, on soft tint 4.7:1, white on it 5.3:1 */
+  --primary-hover: #0059c2; /* white on it 6.6:1 */
+  --primary-soft: #e8f2ff;
   --on-primary: #ffffff;
 
-  /* Spectrum — the accent gradient stops. Used for glow, the primary button,
-     active nav, and small highlight rules. */
-  --spec-cyan: #06b6d4;
-  --spec-violet: #7c3aed;
-  --spec-magenta: #db2777;
-
   /* Semantics. The brief pins four named roles and says consistency beats
-     prettiness because the alert state machine is read through them. Hexes
-     keep the Streamlit-era mental model; all four clear 4.5:1 on both paper
-     and panel (see doc 38 §4.4). */
-  --critical: #dc2626;
+     prettiness because the alert state machine is read through them. Hues are
+     Apple's system red/orange/green/grays; each is the variant that clears AA
+     on both the card and its own soft tint. */
+  --critical: #d70015; /* card 5.4:1, soft tint 4.7:1 */
   --critical-soft: #fdecec;
-  --warning: #b45309;
+  --warning: #9c4a00; /* card 6.2:1, soft tint 5.5:1 */
   --warning-soft: #fdf0e2;
-  --confirmed: #047857; /* the "good/closed" slot; #059669 read 3.6:1 on the
-                           glass face — below AA for the state text it carries */
-  --confirmed-soft: #e2f6ee;
-  --suppressed: #5b6878; /* muted/void slot */
-  --suppressed-soft: #eef1f6;
+  --confirmed: #0b7a3e; /* the "good/closed" slot; card 5.4:1 */
+  --confirmed-soft: #e7f7ee;
+  --suppressed: #5c6370; /* muted/void slot */
+  --suppressed-soft: #eff1f4;
 
-  --focus: #4f46e5;
-  --radius: 10px; /* soft-rounded: the console reads as modern hardware */
+  --focus: #0066e0;
 
-  /* Blurred-orb field (see .orb / ConsoleBackground). ONE pool of light, not
-     three: the console is an instrument, and an ambient wash moving under the
-     data competes with it. A single soft violet pool in the top-left gives the
-     substrate depth without ever reading as fog. */
-  --orb-1: rgba(139, 92, 246, 0.16); /* the only orb */
-  --bg-base: radial-gradient(120% 120% at 15% 0%, #f7f6ff 0%, #ececfb 45%, #e9e7f7 100%);
+  /* Radii: cards lean on the generous 18px Apple uses for grouped containers;
+     controls (buttons, chips, inputs) take the tighter 10px, because a 18px
+     radius on a 28px-tall button collapses it into an unintended pill. */
+  --radius: 18px;
+  --radius-sm: 10px;
 
-  /* The fourth stratum (see .grain / .vignette). Grain alpha is deliberately
-     near-invisible: it exists to break up banding in the big radials, and any
-     value you can consciously "see" as noise is already too strong. */
-  --grain-opacity: 0.035;
-  --vignette: rgba(24, 26, 60, 0.10); /* cool shadow pulling the edges in */
+  /* Substrate: a vertical wash from near-white to the grouped grey. The same
+     three stops as the sim console's stage, so the two surfaces sit in one
+     family. No orbs, no grain, no grid — Apple's depth comes from the surface
+     gradient and the card shadows, and a decorative field behind a data table
+     only competes with the numbers. */
+  --bg-base: linear-gradient(180deg, #fafafc 0%, #f5f5f7 55%, #ededf0 100%);
 
-  /* Glow strengths — the halo behind glass panels and accent elements. */
-  --glow: 0 0 0 1px rgba(124, 58, 237, 0.06), 0 8px 30px -12px rgba(79, 70, 229, 0.35);
-  --glow-ring: rgba(124, 58, 237, 0.35);
+  /* Card shadow: two layers, both very shallow — the tight one gives the edge
+     definition, the wide one gives it height. This is the single shadow in the
+     whole system; hover only deepens it. */
+  --glow: 0 1px 2px rgba(0, 0, 0, 0.04), 0 8px 28px rgba(0, 0, 0, 0.07);
+  /* hover deepens the same neutral shadow; no accent tint, so a hovering card
+     never reads as "selected" — that meaning is reserved for the nav and chips */
+  --shadow-lift: rgba(0, 0, 0, 0.16);
 
   /* Motion tokens. Every animation in the app reads from these, so the whole
-     console moves at one tempo instead of each effect inventing its own. */
+     console moves at one tempo instead of each effect inventing its own.
+     Apple's own timing is faster and softer than the old console's: state
+     flips land under 150ms, structural arrivals under 400ms, and nothing
+     overshoots. */
   --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1); /* decelerating: entrances, draw-ins */
   --ease-in-out-soft: cubic-bezier(0.45, 0, 0.55, 1); /* ambient loops */
-  --dur-1: 140ms; /* state flips: hover, press */
-  --dur-2: 260ms; /* small reveals: expand, fade */
-  --dur-3: 520ms; /* structural reveals: a panel arriving */
+  --dur-1: 120ms; /* state flips: hover, press */
+  --dur-2: 220ms; /* small reveals: expand, fade */
+  --dur-3: 400ms; /* structural reveals: a panel arriving */
 }
 
 .dark {
-  --paper: #060b18; /* deep space */
-  --paper-sunken: #030711;
-  --panel: #0b1226;
-  --panel-glass: rgba(17, 26, 51, 0.55);
-  --rule: #1e2a4a;
-  --rule-strong: #33406a;
-  --grid: #162840;
-  --ink: #e6ecff;
-  --ink-muted: #9aa8cf;
-  --ink-faint: #8b95c3; /* Lifted from #6f7eab: the violet-lit substrate now
-                           shows through the glass brighter, so the faint tier
-                           was reading 3.8:1 on a lit panel — under AA. This
-                           clears ~5.1:1 while staying dimmer than --ink-muted. */
+  /* Dark is Apple's grouped dark: true black page, #1c1c1e cards, #2c2c2e for
+     wells and pressed rows. Not a navy — a tinted dark reads as "themed",
+     while neutral dark reads as the OS. */
+  --paper: #000000;
+  --paper-sunken: #1c1c1e;
+  --panel: #1c1c1e;
+  --panel-glass: rgba(28, 28, 30, 0.72);
+  --rule: rgba(255, 255, 255, 0.12);
+  --rule-strong: rgba(255, 255, 255, 0.22);
 
-  --primary: #818cf8;
-  --primary-hover: #a5b0ff;
-  --primary-soft: #1a2150;
-  --on-primary: #060b18;
+  /* Measured on #000000 (page) / #1c1c1e (card). */
+  --ink: #f5f5f7; /* 19.3:1 / 15.6:1 */
+  --ink-muted: #a1a1a6; /* 8.2:1 / 6.6:1 */
+  --ink-faint: #98989d; /* 7.3:1 / 5.9:1 */
 
-  --spec-cyan: #22d3ee;
-  --spec-violet: #a78bfa;
-  --spec-magenta: #f472b6;
+  /* System blue at its bright dark-mode value would fail AA as text on its own
+     tint (4.3:1). #3d9bff keeps the same hue one step lighter: 5.9:1 on the
+     card, 5.5:1 on the tint — and dark text on the filled button still clears
+     7.3:1. */
+  --primary: #3d9bff;
+  --primary-hover: #5ab0ff;
+  --primary-soft: #10233d;
+  --on-primary: #000000;
 
-  --critical: #fb7185;
-  --critical-soft: #2a1220;
-  --warning: #fbbf24;
-  --warning-soft: #2a2110;
-  --confirmed: #34d399;
-  --confirmed-soft: #0f2620;
-  --suppressed: #94a3b8;
-  --suppressed-soft: #161d2e;
+  --critical: #ff6961; /* card 6.0:1, tint 5.5:1 */
+  --critical-soft: #3a1a1c;
+  --warning: #ffb340; /* card 9.5:1, tint 7.6:1 */
+  --warning-soft: #3a2c14;
+  --confirmed: #30d158; /* card 8.4:1, tint 7.1:1 */
+  --confirmed-soft: #12301d;
+  --suppressed: #98989d;
+  --suppressed-soft: #2a2a2e;
 
-  --focus: #818cf8;
+  --focus: #3d9bff;
 
-  /* Night: one violet pool in the top-left, over a near-black substrate. At
-     three orbs the field read as fog and text sat on a moving wash; one pool
-     keeps the depth and hands the screen back to the data. */
-  --orb-1: rgba(139, 92, 246, 0.22); /* the only orb */
-  --bg-base: radial-gradient(130% 120% at 18% -5%, #12102c 0%, #0a0918 45%, #05060f 100%);
+  /* No substrate gradient at all on black: a wash over true black bands
+     visibly, and the cards already carry the separation. Dark mode is the
+     flattest of the two by design. */
+  --bg-base: #000000;
 
-  --grain-opacity: 0.03;
-  --vignette: rgba(2, 3, 12, 0.45); /* deeper on night so the frame has volume */
-
-  --glow: 0 0 0 1px rgba(167, 139, 250, 0.10), 0 10px 40px -14px rgba(34, 211, 238, 0.35);
-  --glow-ring: rgba(167, 139, 250, 0.45);
+  /* On black there is no shadow to read; depth comes from the card being
+     lighter than the page. The ring is what gives an edge definition instead. */
+  --glow: 0 0 0 0.5px rgba(255, 255, 255, 0.08), 0 8px 28px rgba(0, 0, 0, 0.55);
+  --shadow-lift: rgba(0, 0, 0, 0.8);
 }
 
 /* Expose the tokens to Tailwind utilities: bg-panel, text-ink, border-rule… */
@@ -220,7 +187,6 @@
   --color-panel-glass: var(--panel-glass);
   --color-rule: var(--rule);
   --color-rule-strong: var(--rule-strong);
-  --color-grid: var(--grid);
   --color-ink: var(--ink);
   --color-ink-muted: var(--ink-muted);
   --color-ink-faint: var(--ink-faint);
@@ -228,9 +194,6 @@
   --color-primary-hover: var(--primary-hover);
   --color-primary-soft: var(--primary-soft);
   --color-on-primary: var(--on-primary);
-  --color-spec-cyan: var(--spec-cyan);
-  --color-spec-violet: var(--spec-violet);
-  --color-spec-magenta: var(--spec-magenta);
   --color-critical: var(--critical);
   --color-critical-soft: var(--critical-soft);
   --color-warning: var(--warning);
@@ -241,10 +204,13 @@
   --color-suppressed-soft: var(--suppressed-soft);
   --color-focus: var(--focus);
 
-  --font-sans: var(--font-plex-sans), ui-sans-serif, system-ui, sans-serif;
-  --font-mono: var(--font-plex-mono), ui-monospace, "SFMono-Regular", monospace;
+  /* `--font-sans` / `--font-mono` feed Tailwind's own font-sans / font-mono.
+     The stack is the platform's UI face (see the font note at the top). */
+  --font-sans: var(--font-ui);
+  --font-mono: var(--font-code);
 
   --radius-token: var(--radius);
+  --radius-token-sm: var(--radius-sm);
 }
 
 /* ------------------------------------------------------------------ base */
@@ -269,85 +235,21 @@
     -webkit-font-smoothing: antialiased;
   }
 
-  /* Background: a single soft pool of light (see components/ConsoleBackground).
+  /* Background: ONE flat surface (see components/ConsoleBackground).
    *
-   *   .console-bg   — a full-bleed fixed layer, inert to the pointer, holding
-   *                   the base gradient (--bg-base).
-   *   .orb          — ONE pool, drawn as a div with a RADIAL gradient
-   *                   (colour → transparent) and blur(64px), which melts the
-   *                   hard edge into a halo. Static: no float animation. A
-   *                   console whose background drifts keeps pulling the eye off
-   *                   the numbers, and three orbs at once read as fog.
-   *   .console-bg::after — a faint grid on top, radially masked so it is
-   *                   strongest near the top-left and fades out — structure,
-   *                   not wallpaper.
-   *
-   * Everything is theme-scoped through CSS variables, so light gets a soft
-   * daylight tint and dark gets a violet-lit near-black. */
+   * The four-layer field that used to live here — orb + grain + vignette + a
+   * masked grid — is gone. Each layer was defensible on its own, but together
+   * they made the page a composed scene, and a composed scene behind a table of
+   * measurements pulls the eye away from the measurements. Apple's grouped
+   * screens use a single quiet surface and let the cards do the work; this does
+   * the same. What remains is `--bg-base`: a vertical wash in light, true black
+   * in dark. */
   .console-bg {
     position: fixed;
     inset: 0;
     z-index: -1;
-    overflow: hidden;
     pointer-events: none;
     background: var(--bg-base);
-  }
-
-  .console-bg::after {
-    content: "";
-    position: absolute;
-    inset: 0;
-    background-image:
-      linear-gradient(var(--grid) 1px, transparent 1px),
-      linear-gradient(90deg, var(--grid) 1px, transparent 1px);
-    background-size: 40px 40px;
-    opacity: 0.22;
-    -webkit-mask-image: radial-gradient(120% 100% at 12% 0%, #000 0%, rgba(0, 0, 0, 0.35) 55%, transparent 85%);
-    mask-image: radial-gradient(120% 100% at 12% 0%, #000 0%, rgba(0, 0, 0, 0.35) 55%, transparent 85%);
-  }
-
-  .orb {
-    position: absolute;
-    border-radius: 9999px;
-    filter: blur(64px);
-  }
-
-  .orb-1 {
-    top: -6rem;
-    left: -5rem;
-    width: 26rem;
-    height: 26rem;
-    background: radial-gradient(circle at center, var(--orb-1) 0%, transparent 70%);
-  }
-
-  /* The fourth stratum: grain, then an edge vignette. Both are inert spans (see
-   * ConsoleBackground) — no pseudo-elements, because the grain's element opacity
-   * would otherwise crush anything nested inside it.
-   *
-   * Grain = a tiled SVG fractal-noise tile, inlined as a data URI so it costs no
-   * request and no binary asset. Its only job is to dither the big radials: a
-   * wide low-contrast gradient on a dark base bands in visible steps, and a few
-   * percent of noise breaks those steps up. `--grain-opacity` is per-theme and
-   * kept very low — noise you can consciously see is noise that is too strong.
-   * `mix-blend-mode: overlay` keeps it from greying the substrate (it perturbs
-   * luminance instead of painting grey on top). */
-  .grain {
-    position: absolute;
-    inset: 0;
-    opacity: var(--grain-opacity);
-    mix-blend-mode: overlay;
-    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
-    background-size: 140px 140px;
-  }
-
-  /* Vignette = the frame falling off into volume. A radial that is clear through
-   * the reading area and darkens only toward the far edges, so it adds depth
-   * without dimming content. Anchored slightly high (40%) to match where the eye
-   * actually reads, so the left rail and top bar keep full contrast. */
-  .vignette {
-    position: absolute;
-    inset: 0;
-    background: radial-gradient(120% 115% at 50% 40%, transparent 48%, var(--vignette) 100%);
   }
 
   :focus-visible {
@@ -409,39 +311,32 @@ html.lenis body {
   font-variant-numeric: tabular-nums;
 }
 
-/* Glass face — the console panel. A translucent, blurred plate over the orb
-   field; theme-scoped through --panel-glass so light stays readable. */
+/* Frosted face — the top bar and the drawer. Same treatment as Apple's
+   translucent chrome: a high-alpha plate with a heavy blur and a saturation
+   lift, over content that scrolls beneath it. Only used where content really
+   does pass underneath; a card that nothing scrolls behind should be opaque
+   and cheaper to composite. */
 @utility glass {
   background: var(--panel-glass);
-  -webkit-backdrop-filter: blur(14px) saturate(140%);
-  backdrop-filter: blur(14px) saturate(140%);
+  -webkit-backdrop-filter: blur(30px) saturate(180%);
+  backdrop-filter: blur(30px) saturate(180%);
 }
 
-/* Halo behind a panel or a focused element. */
+/* The card shadow. Two shallow layers, theme-scoped (on black it becomes a
+   hairline ring instead, because a shadow cannot darken black). */
 @utility glow {
   box-shadow: var(--glow);
 }
 
-/* The spectrum as text (used sparingly — the wordmark, one hero number). */
-@utility text-spectrum {
-  background-image: linear-gradient(100deg, var(--spec-cyan), var(--spec-violet) 55%, var(--spec-magenta));
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
-}
-
-/* The spectrum as a surface (the primary button's fill). */
-@utility bg-spectrum {
-  background-image: linear-gradient(100deg, var(--spec-violet), var(--spec-magenta));
-}
-
-/* Loading placeholder: a faint plate with a spectrum sheen sweeping across. */
+/* Loading placeholder: a plain sunken well with a slow highlight sweep. No
+   tint — a shimmer in the accent colour reads as content arriving, not as an
+   absence of content. */
 @utility skeleton-shimmer {
   background: var(--paper-sunken);
   background-image: linear-gradient(
     100deg,
     transparent 20%,
-    color-mix(in srgb, var(--spec-violet) 22%, transparent) 48%,
+    color-mix(in srgb, var(--ink) 6%, transparent) 48%,
     transparent 76%
   );
   background-size: 220% 100%;
@@ -470,67 +365,44 @@ html.lenis body {
  * selection button, collapsing it to 2px × 0px — the row could not be clicked
  * in a real browser (caught by Playwright, not jsdom). */
 
-/* A panel that leans toward the pointer: its hairline border warms to the
- * spectrum on hover. The border stays a real 1px border (so layout never
- * shifts); hover only changes its colour and adds the halo. */
+/* A card that responds to the pointer the way an Apple control does: the
+ * shadow deepens a step and nothing else moves. No border colour change, no
+ * lift, no scale — the cue that it is clickable lives in the shadow's weight,
+ * which is exactly how the system's own grouped rows behave. */
 .lift {
-  transition:
-    border-color var(--dur-2) var(--ease-out-expo),
-    box-shadow var(--dur-2) var(--ease-out-expo),
-    transform var(--dur-2) var(--ease-out-expo);
+  transition: box-shadow var(--dur-2) var(--ease-out-expo);
 }
 
 .lift:hover {
-  border-color: color-mix(in srgb, var(--spec-violet) 55%, var(--rule));
-  box-shadow: var(--glow), 0 18px 50px -24px var(--glow-ring);
+  box-shadow: var(--glow), 0 14px 40px -18px var(--shadow-lift);
 }
 
 /* ------------------------------------------------- section ornament (分区) *
  *
- * A data panel reads better when its header is a distinct stratum from its
- * body. Rather than boxing every panel identically, each panel header gets:
- *   - a short spectrum rake at its left edge (a "column marker"),
- *   - a hairline that fades to the right, so the header separates from the
- *     body without a full-width rule fighting the top accent.
- * The rake is the same spectrum language as the nav rail and the logo frame,
- * so a panel header, a nav item and the wordmark all read as one system. */
-@utility panel-rake {
-  position: relative;
-}
+ * The spectrum rake is retired with the rest of the spectrum. A card header is
+ * now marked the Apple way: the title takes the primary type size, the hairline
+ * under the header does the separating, and nothing is drawn at the left edge.
+ * The `.panel-rake` utility that drew it is deleted, along with its element in
+ * primitives.tsx. */
 
-.panel-rake::before {
-  content: "";
-  position: absolute;
-  left: 0;
-  top: 50%;
-  height: 1.1em;
-  width: 3px;
-  transform: translateY(-50%);
-  border-radius: 9999px;
-  background-image: linear-gradient(180deg, var(--spec-cyan), var(--spec-violet) 60%, var(--spec-magenta));
-}
-
-/* An instrument label: mono, tabular, small — the metric's name above its
- * value. Not ALL-CAPS and not letter-spaced (both are template tells); the mono
- * face alone marks it as a field name rather than prose. */
+/* A field label: small, medium weight, in the text colour — Apple's own
+ * section labels in System Settings are plain type, not monospace. Mono is
+ * reserved for VALUES (see `.reading`), where fixed-width digits actually help
+ * a column line up. */
 @utility eyebrow {
-  font-family: var(--font-mono);
-  font-size: 11px;
+  font-family: var(--font-sans);
+  font-size: 12px;
+  font-weight: 500;
   letter-spacing: 0;
   color: var(--ink-muted);
 }
 
-/* A segment divider used INSIDE a panel body to part sub-sections. A hairline
- * with a spectrum seed at the left — structure you can read, not a rule you
- * scroll past. */
+/* A hairline used INSIDE a card body to part sub-sections. Plain: the app
+ * already separates cards from the page with a hairline, and adding a tinted
+ * seed to every divider is the kind of detail that reads as decoration. */
 @utility seg-rule {
   height: 1px;
-  background: linear-gradient(
-    90deg,
-    var(--spec-violet) 0,
-    color-mix(in srgb, var(--rule) 70%, transparent) 18%,
-    transparent 100%
-  );
+  background: var(--rule);
 }
 
 /* ---------------------------------------------------------- entrance (入场) *
@@ -576,19 +448,18 @@ html.lenis body {
 .stagger > *:nth-child(6) { animation-delay: 350ms; }
 .stagger > *:nth-child(n + 7) { animation-delay: 420ms; }
 
-/* A data row that has just changed state flashes its left rail once — the
- * "something happened here" cue. One-shot, never loops. */
+/* A data row that has just changed state tints once — the "something happened
+ * here" cue. One-shot, never loops. The accent tint (not a rail and not a
+ * glow) keeps it in the same language as a selected row. */
 .flash-in {
-  animation: flash-rail 900ms var(--ease-out-expo);
+  animation: flash-row 900ms var(--ease-out-expo);
 }
 
-@keyframes flash-rail {
+@keyframes flash-row {
   0% {
-    box-shadow: inset 3px 0 0 0 var(--spec-cyan), inset 0 0 24px -6px var(--glow-ring);
-    background-color: color-mix(in srgb, var(--spec-cyan) 12%, transparent);
+    background-color: var(--primary-soft);
   }
   100% {
-    box-shadow: inset 3px 0 0 0 transparent, inset 0 0 0 0 transparent;
     background-color: transparent;
   }
 }
@@ -623,7 +494,8 @@ html.lenis body {
   }
 }
 
-/* A datum read-out: monospace, tabular, right-aligned — instrument style. */
+/* A datum read-out: monospace, tabular. Values only — labels use the UI face,
+ * because a monospace label reads as a code field, not as a field name. */
 @utility reading {
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
@@ -632,31 +504,25 @@ html.lenis body {
 
 /* ------------------------------------------------------- interaction strata *
  *
- * The problem: with a flat blueprint palette, a clickable row and a static
- * row look identical at rest — the only cue is a hover background, which
- * keyboard and touch users never get, and which everyone else learns only by
- * guessing wrong once.
+ * The problem this solves is unchanged: with a flat palette, a clickable row
+ * and a static row look identical at rest — the only cue is a hover background,
+ * which keyboard and touch users never get, and which everyone else learns only
+ * by guessing wrong once.
  *
- * The fix is to give the three interaction planes a signature that is visible
- * WITHOUT hover, and let hover only intensify it:
+ * What changed is the marker. The spectrum rail is gone; in the Apple language
+ * a selectable row is marked by a persistent disclosure chevron plus a tinted
+ * fill when selected, and a navigation item by a filled background when
+ * active. Colour states "this is the one you chose"; the chevron states "this
+ * opens". Both are visible without hover.
  *
- *   static data   → no marker
- *   control/select→ a persistent disclosure chevron + a left tick
- *   navigation    → a persistent left rule that fills on hover/active
- *
- * `.row-tick` draws the persistent left indicator; hover strengthens it.
- */
+ * `.row-tick` / `.row-tick-active` keep their names (they are the call sites'
+ * vocabulary) but now express the tinted-fill state rather than a rail. */
 @utility row-tick {
-  border-left: 2px solid transparent;
-  border-left-color: color-mix(in srgb, var(--rule-strong) 55%, transparent);
+  background-color: transparent;
 }
 
-/* A selectable row, when active or hovered, lights its left rail with the
-   spectrum rather than a flat colour — the same "energised edge" language the
-   nav and logo use, so every live element shares one signature. */
 @utility row-tick-active {
-  border-left-color: var(--spec-cyan);
-  box-shadow: inset 0 0 24px -10px var(--glow-ring);
+  background-color: var(--primary-soft);
 }
 
 /* The disclosure chevron: always drawn, slides a hair on hover. Reduced-motion

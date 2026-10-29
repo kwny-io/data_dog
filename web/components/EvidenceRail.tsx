@@ -143,9 +143,6 @@ export function EvidenceRail({
                 left: `${Math.min(pct(from as number), pct(to as number))}%`,
                 width: `${Math.abs(pct(to as number) - pct(from as number))}%`,
                 backgroundColor: crossed ? "var(--critical)" : undefined,
-                boxShadow: crossed
-                  ? "0 0 10px -1px var(--critical)"
-                  : "0 0 10px -2px var(--glow-ring)",
               }}
             />
           )}

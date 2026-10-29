@@ -211,10 +211,6 @@ function AlertDrawer({ alert, onClose }: { alert: AlertEvent; onClose: () => voi
       />
       <div className="drawer-panel glass relative ml-auto h-full w-full max-w-xl overflow-y-auto border-l border-rule-strong">
         <header className="glass sticky top-0 flex items-center justify-between gap-3 border-b border-rule px-5 py-3">
-          <span
-            aria-hidden
-            className="pointer-events-none absolute inset-x-0 bottom-[-1px] h-px bg-gradient-to-r from-transparent via-spec-violet/50 to-transparent"
-          />
           <div>
             <div className="flex items-center gap-2">
               <AlertStateBadge state={alert.state} />
