@@ -593,7 +593,11 @@ def test_backlog_beyond_max_steps_is_dropped_not_deferred(fake_rig) -> None:
     sess.speed = 100.0
     sim.step_sleep = 0.03          # 一步进就花掉 6 个 tick 的墙钟
     sess.start()
-    assert _sleep_until(lambda: sess.stats.dropped > 0, timeout=3.0), sess.stats
+    # 等**真正要断言的条件**，不是"第一次丢"。第一个 tick 的 due 恰好卡在
+    # 50 点边界时只会丢 1 个（n=51→留 50），随后那一批步进要睡 1.5 秒才轮到
+    # 下一 tick。拿 `dropped > 0` 当条件等于在赌这个边界，CI 上随机序一抖
+    # 就挂（本地顺序跑却是绿的）。要证明的是"超额被丢弃"，就等它真的到 50。
+    assert _sleep_until(lambda: sess.stats.dropped >= 50, timeout=15.0), sess.stats
     sess.stop()
     assert sess.stats.dropped >= 50, sess.stats
     # 每 tick 步进都不超过上限（超出的被丢了，不是塞进这一批）
