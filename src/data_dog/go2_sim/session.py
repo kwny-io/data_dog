@@ -34,7 +34,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from .emit import envelope, subsystem_envelopes
+from .emit import DEMO_COMPONENT, SUBSYSTEM_SOURCES, envelope, subsystem_envelopes
 from .rig import Go2Sim, SimConfig, Telemetry
 
 # 可选倍率。上限 15x 的依据是实测**空闲机器**上的吞吐：
@@ -62,10 +62,17 @@ class SimEvent:
 class SessionStats:
     steps: int = 0
     published: int = 0
-    dropped: int = 0          # 投递失败（下游抛异常 / 跟不上）
+    # 两个**不同**的丢弃来源，必须分开数。合成一个数时 1 亿的积压丢弃和
+    # 3 次投递异常看不出区别，页面上也没法解释"这些帧去哪了"。
+    publish_failed: int = 0   # 下游抛异常（信封没能交出去）
+    backlog_dropped: int = 0  # 追不上墙钟而主动放弃的仿真步（_MAX_STEPS_PER_TICK）
     started_at: float = 0.0
     wall_elapsed: float = 0.0
     drop_reason: str | None = None   # 首个投递失败原因（不静默）
+
+    @property
+    def dropped(self) -> int:
+        return self.publish_failed + self.backlog_dropped
 
 
 class SimSession:
@@ -113,10 +120,31 @@ class SimSession:
         self._sim_lock = threading.Lock()
         # reset 时置位，让 `_run` 把墙钟/仿真时钟基准一起归零
         self._reset_clock = threading.Event()
+        # 换倍率时重锚墙钟基准（不重置仿真状态，只重置"从现在起按新倍率算"）
+        self._reanchor = threading.Event()
         self._thread: threading.Thread | None = None
         self.stats = SessionStats()
-        self._seq = 0
+        # **每个部件一条独立序列号**，不是全场共享一个计数器。
+        #
+        # 注意：改之前的那种共享计数器（每格 +1、5 个信封取同一个值）**今天
+        # 恰好也是对的**——五个部件严格同频投递，每个部件看到的都是
+        # 1,2,3,…，与拆开后的结果完全一致。这是"五个部件永远锁步"这个巧合
+        # 在撑着的，不是设计给的保证。只要有一路开始不同频——只发部分子系统、
+        # 某一路上降采样、`all_envelopes` 的 12 关节模式——共享计数器立刻
+        # 变成跨部件的步进，`COMM_PACKET_LOSS` 就会把别人的帧读成自己的空洞。
+        # 而 `WindowBuffer` 的窗口键正是 `device_sn|component`（`pipeline.py`），
+        # 它本来就是按部件分窗的，序列号按部件分开才和它同构。
+        # 真机上每条 topic 也各有自己的序列号，这里照实拆开。
+        self._seq: dict[str, int] = {}
         self._t0 = time.monotonic()
+        # 真正在推进的墙钟（暂停不算）。`actual_speed` 的分母用这个，
+        # 不能用 `_t0` 起算的总墙钟——见 snapshot() 的说明。
+        self._active_wall = 0.0
+        # (有效墙钟, 仿真时刻) 采样点，用来算**近期**实际倍率。
+        # 不能用"开天辟地以来的平均值"：从 1x 切到 15x 后，平均仍被
+        # 之前的 1x 拖着，显示 4.71x 而当下真在跑 12.9x。
+        self._rate_hist: deque[tuple[float, float]] = deque(maxlen=2400)
+        self._rate_lock = threading.Lock()
         # 环形缓冲：UI 拉取最近 N 个点的遥测（不需要自己存历史）
         self._hist: deque[Telemetry] = deque(maxlen=history)
         self._hist_lock = threading.Lock()
@@ -155,7 +183,17 @@ class SimSession:
 
     # ---------------------------------------------------------------- 控制
     def set_speed(self, speed: float) -> None:
-        self.speed = min(100.0, max(0.1, float(speed)))
+        new = min(100.0, max(0.1, float(speed)))
+        changed = abs(new - self.speed) > 1e-9
+        self.speed = new
+        if changed:
+            # **必须重锚时钟**。`_run` 里算的是
+            # `target = (now - t_wall0) * speed`；t_wall0 是旧倍率下的基准，
+            # 直接把 speed 换成 4 倍，等于宣称"这 7 秒都该按 4 倍跑过"，
+            # 立刻欠下 3×7=21 仿真秒 → 一次性丢弃 2082 个遥测步
+            # （实测就是这个数）。观感上是"一按 4x 卡一下、丢一截"。
+            # 置位后 `_run` 会用 `now - sim_done/speed` 重新起算，无欠账。
+            self._reanchor.set()
         self._wake.set()          # 立刻按新倍率重算节奏
 
     def set_paused(self, paused: bool) -> None:
@@ -195,7 +233,7 @@ class SimSession:
             self.sim.reset(merged)
             with self._hist_lock:
                 self._hist.clear()
-            self._seq = 0
+            self._seq.clear()
             self._t0 = time.monotonic()
             self._reset_clock.set()
 
@@ -299,15 +337,31 @@ class SimSession:
         idx = int(round((sim_at - sim_before) * 100.0))
         return max(0, min(n - 1, idx))
 
-    def _publish(self, t_last: Telemetry) -> None:
+    def _tick_seq(self) -> dict[str, int]:
+        """推进一个投递格：每个部件的序列号各自 +1，返回本格快照。
+
+        **丢帧也要占号。** F3 丢包 / F19 坏帧的形态就是"设备发过、下游没收到"，
+        编号必须照样前进——`payload_for` 返回 None 时整行不发，若此时编号也
+        不涨，下游看到的序列号仍然连续，`COMM_PACKET_LOSS` 永远报不出来。
+        """
+        for c in (DEMO_COMPONENT, *SUBSYSTEM_SOURCES):
+            self._seq[c] = self._seq.get(c, 0) + 1
+        return dict(self._seq)
+
+    def _publish(self, t_last: Telemetry, sequences: dict[str, int]) -> None:
         """一个遥测点 → 一整套信封，逐条投递给下游。异常不许静默。"""
         try:
-            env = envelope(t_last, sequence=self._seq)
+            env = envelope(t_last, sequence=sequences[DEMO_COMPONENT])
             batch = [env] if env is not None else []
             # 非电机子系统（电池/IMU/散热/整机）：不接进来，检测器只有
             # 关节温度一条线可看，B2/B3 那 10 条故障永远不可能被报出——
             # 不是规则没写，是数据根本没离开仿真器。
-            batch += subsystem_envelopes(t_last, sequence=self._seq)
+            # 序列号按 `SUBSYSTEM_SOURCES` 的顺序逐个给，与部件一一对应。
+            batch += subsystem_envelopes(
+                t_last,
+                components=tuple(SUBSYSTEM_SOURCES),
+                sequence=[sequences[c] for c in SUBSYSTEM_SOURCES],
+            )
             for one in batch:
                 self._on_event(SimEvent(t=float(t_last.t), env=one))
                 self.stats.published += 1
@@ -315,23 +369,60 @@ class SimSession:
             # **不许静默**：这里曾经只有一句 `dropped += 1`，什么原因都不留。
             # 结果是页面照常跑、温度照常涨、候选一直是 0，而"多少帧在哪一步
             # 消失"完全看不见——排查时只能猜。记首个原因 + 计数。
-            self.stats.dropped += 1
-            if self.stats.dropped == 1 or self.stats.dropped % 100 == 0:
+            self.stats.publish_failed += 1
+            if (self.stats.publish_failed == 1
+                    or self.stats.publish_failed % 100 == 0):
                 self.stats.drop_reason = (
-                    f"{type(e).__name__}: {e} (共 {self.stats.dropped} 帧)")
+                    f"{type(e).__name__}: {e} "
+                    f"(共 {self.stats.publish_failed} 条)")
 
     def history(self, n: int = 200) -> list[Telemetry]:
         with self._hist_lock:
             items = list(self._hist)
         return items[-max(1, n):]
 
+    _RATE_WINDOW_S = 5.0
+
+    def _recent_rate(self, active_now: float) -> float | None:
+        """最近 `_RATE_WINDOW_S` 有效墙钟秒内的实际倍率；样本不够返回 None。"""
+        with self._rate_lock:
+            hist = list(self._rate_hist)
+        if len(hist) < 2:
+            return None
+        # 从尾部往前找第一个早于 (现在 - 窗口) 的点
+        cutoff = active_now - self._RATE_WINDOW_S
+        anchor = None
+        for w, s in reversed(hist):
+            if w <= cutoff:
+                anchor = (w, s)
+                break
+        if anchor is None:
+            anchor = hist[0]
+        w0, s0 = anchor
+        w1, s1 = hist[-1]
+        if w1 - w0 < 1.0:            # 窗口太短，噪声大，不如不给
+            return None
+        return (s1 - s0) / (w1 - w0)
+
     def snapshot(self) -> dict[str, Any]:
         snap = self.sim.snapshot()
         wall = time.monotonic() - self._t0
-        # 实际倍率 = 推进的仿真时间 ÷ 墙钟。**必须如实算**：
+        # 实际倍率 = 推进的仿真时间 ÷ **有效**墙钟。**必须如实算**：
         # 请求 15x 而测到 3.2x 的情形真实存在（见 SPEEDS 的说明），
         # 把请求值当实际值显示，就是在录像里撒谎。
-        actual = (float(snap["t"]) / wall) if wall > 0.5 else None
+        #
+        # 分母**不能用 wall**：暂停期间墙钟照走、仿真停着，除以它会把
+        # 倍率越拉越低。实测暂停 5 秒后页面显示 0.49x，而恢复后真实
+        # 速率是 0.99x——一个"卡住了"的假象，而且越暂停越离谱。
+        # 这里用后台线程累计的"真正在推进的墙钟"。
+        active = self._active_wall
+        # 而且要看**近期**，不是开天辟地以来的平均：从 1x 切到 15x 后，
+        # 累计平均仍被之前的 1x 拖着（实测显示 4.71x，当下真在跑 12.9x）。
+        # 取最近 5 个"有效墙钟秒"上的两个点算增量。
+        actual = self._recent_rate(active)
+        if actual is None and active > 0.5:
+            # 冷启动兜底：用真实推进量（steps），不是目标时刻 t。
+            actual = (self.stats.steps / 100.0) / active
         snap.update({
             "speed": self.speed,
             "actual_speed": round(actual, 2) if actual is not None else None,
@@ -342,8 +433,11 @@ class SimSession:
                 "steps": self.stats.steps,
                 "published": self.stats.published,
                 "dropped": self.stats.dropped,
+                "publish_failed": self.stats.publish_failed,
+                "backlog_dropped": self.stats.backlog_dropped,
                 "drop_reason": self.stats.drop_reason,
                 "wall_elapsed": round(wall, 2),
+                "active_wall": round(active, 2),
             },
         })
         return snap
@@ -363,6 +457,9 @@ class SimSession:
     def _run(self) -> None:
         t_wall0 = time.monotonic()
         sim_done = 0.0          # 已推进的仿真时间（秒）
+        # 只有在**没暂停**的 tick 里才把墙钟增量记进 `_active_wall`。
+        # 暂停的 0.2s 等待跳过一次记账，暂停时长就不会被算进倍率分母。
+        last_tick_wall = time.monotonic()
         # 下一次投递的**墙钟**时刻（time.monotonic 绝对值）。
         #
         # 早期这里记的是仿真时刻，`next_pub += 1/publish_hz` 加的是仿真秒。
@@ -390,6 +487,10 @@ class SimSession:
                     t_wall0 = time.monotonic()
                     sim_done = 0.0
                     next_pub_wall = time.monotonic()
+                    self._active_wall = 0.0
+                    with self._rate_lock:
+                        self._rate_hist.clear()
+                    last_tick_wall = time.monotonic()
                 if self.paused:
                     # 暂停期间墙钟仍在走，必须把基准一起前移，否则恢复瞬间
                     # 会认为"欠了几十秒"，一口气补跑（看起来像跳帧）。
@@ -397,13 +498,38 @@ class SimSession:
                     self._render_if_due()
                     self._wake.wait(0.2)
                     self._wake.clear()
-                    t_wall0 = time.monotonic() - sim_done / max(self.speed, 1e-6)
+                    now = time.monotonic()
+                    # 暂停的这段**不计入**有效墙钟（倍率分母），但基准要前移
+                    last_tick_wall = now
+                    t_wall0 = now - sim_done / max(self.speed, 1e-6)
                     # 投递基准也跟着走，否则恢复瞬间会认为"欠了一整段暂停"。
-                    next_pub_wall = time.monotonic() + 1.0 / self.publish_hz
+                    next_pub_wall = now + 1.0 / self.publish_hz
                     continue
 
+                now = time.monotonic()
+                self._active_wall += max(0.0, now - last_tick_wall)
+                last_tick_wall = now
+                # 记一个 (有效墙钟, **真实**推进的仿真时间) 点，供近期倍率用。
+                #
+                # **不能用 sim_done**：那是"目标时刻"，丢积压时它照样往前走
+                # （`sim_done += lost/100`），用它算出来的是"以为自己跑多快"。
+                # 实测 15x 下这台机器实际只跑 6.28x，而 sim_done 一路让倍率
+                # 显示 14.96x——正是"把请求值当实际值"的另一种写法。
+                # 真实推进量 = 实际跑过的步数，`stats.steps` 就是这个数，
+                # 且不用每 tick 取一次 sim 快照。
+                with self._rate_lock:
+                    self._rate_hist.append(
+                        (self._active_wall, self.stats.steps / 100.0))
+
+                if self._reanchor.is_set():
+                    # 换倍率：把基准挪到"已推进的仿真时间按新倍率折算"处，
+                    # 这样 due 从 0 起算，不会因为倍率跳变而欠账。
+                    self._reanchor.clear()
+                    t_wall0 = now - sim_done / max(self.speed, 1e-6)
+                    next_pub_wall = now + 1.0 / self.publish_hz
+
                 # 本 tick 应推进到的仿真时刻
-                target = (time.monotonic() - t_wall0) * self.speed
+                target = (now - t_wall0) * self.speed
                 due = target - sim_done
                 if due > 1e-6:
                     n = int(due * 100.0)          # 100Hz 遥测点
@@ -412,7 +538,7 @@ class SimSession:
                         # 让仿真时钟与墙钟重新对齐。观感是"卡了一下"，
                         # 而不是"越来越慢、永远追不上"。
                         lost = n - self._MAX_STEPS_PER_TICK
-                        self.stats.dropped += lost
+                        self.stats.backlog_dropped += lost
                         sim_done += lost / 100.0
                         n = self._MAX_STEPS_PER_TICK
                     if n > 0:
@@ -447,8 +573,7 @@ class SimSession:
                                 next_pub_wall += 1.0 / self.publish_hz
                                 idx = self._chunk_index_at(
                                     slot_wall, sim_before, n, t_wall0)
-                                self._seq += 1
-                                self._publish(chunk[idx])
+                                self._publish(chunk[idx], self._tick_seq())
                             if next_pub_wall < now_wall - 1.0:
                                 # 长时间卡顿后别攒一堆欠账一次性补发
                                 next_pub_wall = now_wall + 1.0 / self.publish_hz

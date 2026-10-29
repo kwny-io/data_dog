@@ -65,9 +65,16 @@ class FakeTelemetry:
 
 
 def _healthy_row(**over: float) -> dict:
+    """健康读数，键集合**必须与 `Telemetry.component_row()` 完全一致**。
+
+    少一个键，`test_nan_in_any_field_skips_whole_frame` 就检查不到那条
+    路径——那个用例是按本字典的键参数化的，字典缺项等于测试缺项。
+    `ddq` / `ddq_raw` 是后来补的 IDL 字段，一并钉住。
+    """
     row = {
         "temperature": 42.4, "current": 5.73, "tau_est": 3.442,
-        "q": 0.11, "q_raw": 0.11, "dq": 1.2, "dq_raw": 1.2, "lost": 0.0,
+        "q": 0.11, "q_raw": 0.11, "dq": 1.2, "dq_raw": 1.2,
+        "ddq": 0.35, "ddq_raw": 0.34, "lost": 0.0,
     }
     row.update(over)
     return row
@@ -101,7 +108,7 @@ def test_payload_inline_is_json_string_not_object() -> None:
 
 
 def test_payload_matches_motor_state_idl_types() -> None:
-    """`temperature`/`lost` 是 IDL 的 uint8：必须是整数，不能是 42.4。"""
+    """`temperature` 是 IDL 的 uint8、`lost` 是 uint32：都必须是整数。"""
     payload = payload_for(FakeTelemetry(t=0.0, row=_healthy_row()), DEMO_COMPONENT)
     assert payload is not None
     assert isinstance(payload["temperature"], int)
@@ -110,6 +117,42 @@ def test_payload_matches_motor_state_idl_types() -> None:
     # 其余是浮点，保留 6 位
     assert payload["current"] == round(5.73, 6)
     print("PASS test_payload_matches_motor_state_idl_types")
+
+
+def test_lost_counter_keeps_envelope_with_missing_readings() -> None:
+    """F8：`lost > 0` 时**保留信封**，只省掉读数为 NaN 的字段。
+
+    这是 F8 能被检出的全部前提。改之前 `payload_for` 见任何非有限值就整行 `None`，
+    把 `lost` 递增这个**唯一证词**和读数一起丢掉；下游只看到序列号空洞，
+    与 F3 无法区分。
+    """
+    nan = float("nan")
+    row = _healthy_row(temperature=nan, current=nan, tau_est=nan, q=nan,
+                       q_raw=nan, dq=nan, dq_raw=nan, lost=17.0)
+    payload = payload_for(FakeTelemetry(t=0.0, row=row), DEMO_COMPONENT)
+    assert payload is not None, "lost>0 时不许整行丢弃——那是销毁证据"
+    assert payload["lost"] == 17, "计数器必须原样发出，它是唯一能证明设备还在发的字段"
+    assert payload["mode"] == 0
+    assert "temperature" not in payload, "丢掉的读数不能补成 0，只能缺席"
+    assert "q" not in payload
+    assert envelope(FakeTelemetry(t=0.0, row=row), sequence=1) is not None, (
+        "信封必须发出，否则下游看到的是序列号空洞（=F3 的样子）"
+    )
+    print("PASS test_lost_counter_keeps_envelope_with_missing_readings")
+
+
+def test_lost_zero_still_drops_whole_frame() -> None:
+    """F3/F19：`lost == 0` 的非有限读数仍然**整行不发**——序列号空洞是它的判据。
+
+    这条是上一条的反面。两条合成一条规则就会拿 F8 换掉 F3：
+    帧照样发出去 → `COMM_PACKET_LOSS`（窗口覆盖率 <95%）再也报不出来。
+    """
+    nan = float("nan")
+    row = _healthy_row(temperature=nan, lost=0.0)
+    assert payload_for(FakeTelemetry(t=0.0, row=row), DEMO_COMPONENT) is None, (
+        "lost=0 表示设备不知道丢过——帧在传输途中消失，必须留空洞"
+    )
+    print("PASS test_lost_zero_still_drops_whole_frame")
 
 
 def test_unknown_component_returns_none() -> None:
@@ -123,12 +166,13 @@ def test_unknown_component_returns_none() -> None:
 # ---------------------------------------------------------------- NaN（问题 #14）
 
 @pytest.mark.parametrize("bad_field", ["temperature", "current", "tau_est",
-                                       "q", "q_raw", "dq", "dq_raw", "lost"])
+                                       "q", "q_raw", "dq", "dq_raw",
+                                       "ddq", "ddq_raw", "lost"])
 def test_nan_in_any_field_skips_whole_frame(bad_field: str) -> None:
     """**任意**一个字段是 NaN，整帧跳过。
 
     回归问题 #14：F3 丢包把读数写成 NaN，`int(round(nan))` 抛 ValueError，
-    直接把发布线程打断、整个仿真会话终止。八个字段逐个钉，避免只修了
+    直接把发布线程打断、整个仿真会话终止。逐个字段钉，避免只修了
     temperature 就把别的漏掉。
     """
     row = _healthy_row(**{bad_field: float("nan")})
@@ -384,3 +428,59 @@ def test_packet_loss_produces_skipped_frames() -> None:
     assert skipped > 0, "F3 丢包没有产生任何跳过帧——NaN 没有传到信封层"
     print(f"PASS test_packet_loss_produces_skipped_frames "
           f"(sent={sent}, skipped={skipped})")
+
+
+def test_sequence_is_per_component_and_advances_on_dropped_frames() -> None:
+    """`session` 的序列号**按部件独立**，且丢掉的帧照样占号。
+
+    两个断言都是包级丢包检测的前提：
+
+    1. 每个部件各从 1 开始、各自 +1。共享一个计数器时五个部件同频投递
+       恰好也得到 1,2,3,…，所以这条断言在"同频"下分不出对错——
+       第二条才分得出。
+    2. F3 丢包里 `payload_for` 返回 None，整行不发；但编号必须照涨，
+       否则下游看到的序列号仍然连续，`COMM_PACKET_LOSS` 永远报不出来。
+       这里数的是"投递格数"，不是"发出的信封数"。
+    """
+    pytest.importorskip("mujoco")
+    from data_dog.go2_sim.emit import SUBSYSTEM_SOURCES
+    from data_dog.go2_sim.rig import Go2Sim, SimConfig
+    from data_dog.go2_sim.session import SimSession
+
+    sim = Go2Sim(SimConfig(posture="run", fault="F3_packet_loss", severity=1.0,
+                           seed=7, fault_start_s=2.0, thermal_scale=80.0))
+    seen: dict[str, list[int]] = {}
+    s = SimSession.__new__(SimSession)          # 只用到序列号那一小块状态
+    s._seq = {}
+    from data_dog.go2_sim.emit import DEMO_COMPONENT, envelope, subsystem_envelopes
+    slots = dropped_motor = 0
+    try:
+        for ch in sim.step(600):
+            slots += 1
+            seqs = s._tick_seq()
+            one = envelope(ch, sequence=seqs[DEMO_COMPONENT])
+            if one is None:
+                dropped_motor += 1
+            else:
+                seen.setdefault(DEMO_COMPONENT, []).append(one["sequence"])
+            for e in subsystem_envelopes(
+                ch, components=tuple(SUBSYSTEM_SOURCES),
+                sequence=[seqs[c] for c in SUBSYSTEM_SOURCES],
+            ):
+                seen.setdefault(e["component_hint"], []).append(e["sequence"])
+    finally:
+        sim.close()
+
+    assert dropped_motor > 0, "F3 没有丢任何电机帧，这个用例没测到该测的东西"
+    for comp, seqs in seen.items():
+        assert seqs == sorted(set(seqs)), f"{comp} 序列号不严格递增"
+        assert seqs[0] == 1, f"{comp} 应从 1 开始，实际 {seqs[0]}"
+    # 电机丢了帧 → 它最后一个号 == 投递格数（丢帧也占号），
+    # 而发出去的条数 < 格数。两者之差就是被丢掉的帧。
+    assert seen[DEMO_COMPONENT][-1] == slots, (
+        f"电机末号 {seen[DEMO_COMPONENT][-1]} != 投递格数 {slots}——"
+        "丢帧没有占号，下游会看到连续序列，COMM_PACKET_LOSS 永远不触发")
+    assert len(seen[DEMO_COMPONENT]) == slots - dropped_motor
+    print(f"PASS test_sequence_is_per_component_and_advances_on_dropped_frames "
+          f"(slots={slots}, sent={len(seen[DEMO_COMPONENT])}, "
+          f"dropped={dropped_motor}, components={len(seen)})")

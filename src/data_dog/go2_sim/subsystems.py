@@ -202,7 +202,14 @@ class ImuState:
         roll, pitch, yaw = self.rpy
         gx, gy, gz = self.gyro
         ax, ay, az = self.accel
+        qw, qx, qy, qz = self.quat
         return {
+            # IDL `IMUState.quaternion`（array[float32,4]，w,x,y,z）。
+            # **不是** rpy 的另一种写法：欧拉角在俯仰 ±90° 处奇异，四元数不奇异，
+            # 而且真机上姿态融合出来的就是四元数——下游做重力对齐要用它。
+            # 之前只发 rpy、把 `self.quat` 白存着，是纯粹的漏字段。
+            "quat_w": round(float(qw), 6), "quat_x": round(float(qx), 6),
+            "quat_y": round(float(qy), 6), "quat_z": round(float(qz), 6),
             "roll": round(float(roll), 4), "pitch": round(float(pitch), 4),
             "yaw": round(float(yaw), 4),
             "gyro_x": round(float(gx), 5), "gyro_y": round(float(gy), 5),

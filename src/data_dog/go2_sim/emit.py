@@ -96,28 +96,65 @@ def payload_for(t: Telemetry, component: str) -> dict[str, Any] | None:
     `mode` 补成 0（IDL 的 MotorState.mode，RPC/API 模式）——仿真里恒为
     RPC 模式，没有真实取值可给。
 
-    **丢包时整行返回 None**：F3/F8/F19 把丢掉的读数写成 NaN（"没有读数"，
-    不是"读数为 0"）。若照常序列化会炸在 `int(round(nan))` 上——不是报个错
-    就算了，是让发布线程直接抛出、整个仿真会话中断。而丢失本身就由
-    `lost` 计数器表达：跳过这一帧，下游看到的是**序列号空洞**，这正是
-    真实链路丢包的样子，`COMM_PACKET_LOSS`（窗口覆盖率 <95%）要的就是它。
-    补一个假温度反而会把丢包伪装成正常数据。
+    **读数非有限时，看 `lost` 计数器决定整行丢还是只丢读数**——这条分界是
+    F8 与 F3/F19 的分水岭，改之前务必读完：
+
+    - `lost > 0`：这一路**读数**没了，但设备仍在发、且自己知道丢了（IDL
+      `MotorState.lost` 是 uint32 累计计数）。此时**保留信封**，只省略非有限
+      的读数——`lost` 递增本身就是证据，丢掉它等于把唯一的证词销毁。
+      下游据此可判 `MOTOR_LOST_COUNTER_RISING`（关节侧）与
+      `COMM_FIELD_INCOMPLETE`（包到了、字段残缺）。
+    - `lost == 0`：帧在**传输途中**消失（F3 丢包 / F19 CRC 坏帧）。设备不知道
+      自己发过这一帧，`lost` 不会涨——此时整行不发，下游看到的是**序列号空洞**，
+      这正是 `COMM_PACKET_LOSS` 要的形态。
+
+    若把两条合成"有非有限值就发部分载荷"，F3 的空洞会一起消失，
+    `COMM_PACKET_LOSS` 再也报不出来——那是拿 F8 换 F3，不是修复。
+
+    **为什么不把丢掉的读数补成 0**：那会把丢包伪装成正常数据（覆盖率仍 100%），
+    `COMM_PACKET_LOSS` 永远不触发。丢掉的读数是"没有"，不是"读数为 0"。
     """
     row = t.component_row(component)
     if row is None:
         return None
-    for v in row.values():
-        if not math.isfinite(v):
-            return None
+    # 关节级失联（设备仍在发）→ 允许部分载荷；整帧丢失 → 整行不发。
+    degraded = float(row.get("lost") or 0.0) > 0.0
     out: dict[str, Any] = {"mode": 0}
     for k, v in row.items():
+        if not math.isfinite(v):
+            if degraded:
+                continue          # 只省掉这一个读数，其余字段与 lost 照发
+            return None           # F3/F19：整行不发，留出序列号空洞
         if k == "temperature":
             out[k] = int(round(v))          # IDL: uint8
         elif k == "lost":
-            out[k] = int(v)                 # IDL: uint8
+            out[k] = int(v)                 # IDL: uint32
         else:
             out[k] = round(float(v), 6)
     return out
+
+
+# 传输延迟（仿真秒）。真机链路不是零延迟：驱动采样 → 总线 → 桥接 → 网关，
+# 一条报文落地总要几十毫秒，而且**各部件不同**（电机走 EtherCAT 高速环，
+# BMS 走 CAN 且刷新慢，整机状态是控制器汇总出来的）。
+#
+# 为什么必须在仿真里建模：`occurred_at` 与 `received_at` 若恒等，
+# `clock_skew_ms`（`NormalizedTelemetryEvent` 里已有字段）永远是 0，
+# 任何"时延异常 / 时钟漂移"类判据在真机上才有意义、在仿真里全是空转。
+# 这里给的是**项目假设值**，不是厂商规格；量级参考 Go2 实测量级（数十毫秒）。
+_TRANSPORT_DELAY_S: dict[str, float] = {
+    "joint_motor": 0.012,
+    "imu.body": 0.008,
+    "thermal.main": 0.045,
+    "system.body": 0.030,
+    "battery.main": 0.060,
+}
+
+
+def transport_delay_s(component: str) -> float:
+    """该部件的建模传输延迟（仿真秒）。未知部件给一个保守中位数。"""
+    head = component.split(".", 1)[0]
+    return _TRANSPORT_DELAY_S.get(component, _TRANSPORT_DELAY_S.get(head, 0.020))
 
 
 def envelope(
@@ -132,15 +169,22 @@ def envelope(
 
     用仿真时钟而不是墙钟：变速（4x/15x）下墙钟与事件时间就脱钩了，
     下游的窗口聚合必须按事件时间算，否则 15 倍速会把 1 秒的窗塞进 15 秒的量。
+
+    `received_at` **不再恒等于 `occurred_at`**：默认按 `transport_delay_s(部件)`
+    往后推一段，如实表达"设备什么时候产生"与"网关什么时候收到"是两件事。
+    显式传 `received_at` 仍可覆盖（回放/离线测试需要固定值时用）。
+    `sequence` 是**该部件自己的**序列号，不是全场共享的一个——见
+    `session._publish` 与 `WindowBuffer` 的窗口键 `device_sn|component`。
     """
     payload = payload_for(t, component)
     if payload is None:
         return None
     occ = session_start + timedelta(seconds=float(t.t))
+    rcvd = received_at or (occ + timedelta(seconds=transport_delay_s(component)))
     return {
         "event_id": str(uuid.uuid4()),
         "occurred_at": _iso(occ),
-        "received_at": _iso(received_at or occ),
+        "received_at": _iso(rcvd),
         "sequence": int(sequence),
         "vendor": VENDOR,
         "model": MODEL,
@@ -237,7 +281,7 @@ def payload_for_subsystem(t: Telemetry, component: str) -> dict[str, Any] | None
 def subsystem_envelopes(
     t: Telemetry,
     *,
-    sequence: int,
+    sequence: int | Sequence[int],
     components: Sequence[str] = tuple(SUBSYSTEM_SOURCES),
     session_start: datetime = EPOCH,
     received_at: datetime | None = None,
@@ -252,19 +296,31 @@ def subsystem_envelopes(
     默认发全部四个子系统 = 每个投递点 4 条。**这是限流账**：10Hz 投递
     × 4 = 40 条/s，网关默认 200/s，余量够；若把 `publish_hz` 提到 50Hz，
     4 × 50 = 200/s 正好顶满，得同时调 `DD_RATE_PER_SEC`。
+
+    `sequence`：**每个子系统各自的**序列号。可以是单值（所有部件共用，
+    调用方不在乎包级丢包时用），也可以是**与 `components` 等长**的列表。
+    为什么要能分开给：`WindowBuffer` 的包级丢包按 `device_sn|component`
+    分窗统计（`chain.py` 的 `_seqnums`），序列号按部件独立才和这个分窗
+    同构。今天五个子系统严格同频投递，共用一个值也确实得到 1,2,3,…；
+    只要有一路不再锁步（只发部分部件、某路降采样），共享值就变成
+    跨部件的步进，`COMM_PACKET_LOSS` 会把别人的帧读成自己的空洞。
+    真机上每条 topic 都有自己的序列号，这里是照实拆开。
     """
     occ = session_start + timedelta(seconds=float(t.t))
     got = _iso(occ)
+    seqs: Sequence[int] = ([sequence] * len(components)
+                           if isinstance(sequence, int) else sequence)
     out: list[dict[str, Any]] = []
-    for comp in components:
+    for comp, seq in zip(components, seqs, strict=False):
         payload = payload_for_subsystem(t, comp)
         if payload is None:
             continue
+        rcvd = received_at or (occ + timedelta(seconds=transport_delay_s(comp)))
         out.append({
             "event_id": str(uuid.uuid4()),
             "occurred_at": got,
-            "received_at": _iso(received_at or occ),
-            "sequence": int(sequence),
+            "received_at": _iso(rcvd),
+            "sequence": int(seq),
             "vendor": VENDOR,
             "model": MODEL,
             "firmware": FIRMWARE,
@@ -277,8 +333,13 @@ def subsystem_envelopes(
 
 def all_envelopes(t: Telemetry, *, sequence: int, **kw: Any
                   ) -> list[dict[str, Any]]:
-    """四个已映射部件全发。**需部署把 DD_RATE_PER_SEC 调到 ≥500**，
-    否则会被限流拒掉大部分（见 `envelopes` 的说明）。"""
+    """12 个关节部件全发。**需部署把 DD_RATE_PER_SEC 调到 ≥1500**。
+
+    12 部件 × 100Hz = 1200 条/s，网关默认 200 条/s——差 6 倍，全发会被
+    拒掉绝大多数（见 `envelopes` 的说明）。**默认演示不走这条**：
+    `session` 只发 `DEMO_COMPONENT` + 4 个子系统 = 5 条/格。
+    这个函数留给"全量录制/离线回放"用，且调用方要自己确认限流。
+    """
     return envelopes(t, sequence=sequence,
                      components=list(_JOINT_TO_COMPONENT.values()), **kw)
 
