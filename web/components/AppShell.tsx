@@ -33,13 +33,12 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   );
 }
 
+/** The chrome, in Apple's material: a translucent bar that content scrolls
+ *  beneath. It carries a hairline instead of a border and no accent rule — in
+ *  the system language the bar's material *is* its edge. */
 function TopBar() {
   return (
     <header className="glass sticky top-0 z-30 border-b border-rule">
-      <span
-        aria-hidden
-        className="pointer-events-none absolute inset-x-0 bottom-[-1px] h-px bg-gradient-to-r from-transparent via-spec-violet/45 to-transparent"
-      />
       <div className="mx-auto flex h-14 w-full max-w-[1600px] items-center gap-4 px-4 lg:px-6">
         <Link href="/" aria-label="遥测故障调查台">
           <Logo />
@@ -55,6 +54,10 @@ function TopBar() {
   );
 }
 
+/** The sidebar is a grouped list, not a rail: items are rounded on all four
+ *  corners, the active one is filled with the accent tint and its label takes
+ *  the accent colour. That is the exact treatment of a selected item in System
+ *  Settings, and it needs no left rule or glow to be legible. */
 function SideNav({ pathname }: { pathname: string }) {
   return (
     <nav aria-label="主导航" className="hidden w-52 shrink-0 py-5 lg:block">
@@ -67,18 +70,21 @@ function SideNav({ pathname }: { pathname: string }) {
                 href={item.href}
                 aria-current={active ? "page" : undefined}
                 className={clsx(
-                  // Nav is a distinct interaction plane: a persistent left rail
-                  // marks it as a link even at rest, so it never reads as plain
-                  // text. The active state brightens that rail to the spectrum
-                  // and adds an inset halo — state, stated once, with no motion.
-                  "block rounded-r-[var(--radius-token)] border-l-2 px-3 py-2 text-sm transition-all",
+                  "block rounded-[var(--radius-token-sm)] px-3 py-2 text-sm transition-colors",
                   active
-                    ? "border-spec-violet bg-primary-soft font-medium text-primary shadow-[inset_0_0_20px_-8px_var(--glow-ring)]"
-                    : "border-rule-strong text-ink-muted hover:border-spec-cyan hover:bg-paper-sunken hover:text-ink",
+                    ? "bg-primary-soft font-medium text-primary"
+                    : "text-ink-muted hover:bg-paper-sunken hover:text-ink",
                 )}
               >
                 {item.label}
-                <span className="mt-0.5 block text-[11px] text-ink-faint">{item.hint}</span>
+                <span
+                  className={clsx(
+                    "mt-0.5 block text-[11px]",
+                    active ? "text-primary/75" : "text-ink-faint",
+                  )}
+                >
+                  {item.hint}
+                </span>
               </Link>
             </li>
           );
@@ -91,13 +97,13 @@ function SideNav({ pathname }: { pathname: string }) {
 /** Below lg the sidebar is hidden, so navigation moves to a horizontal strip
  *  directly under the top bar. It must live OUTSIDE SideNav — nesting it there
  *  put it inside a `hidden … lg:block` parent, which hid it on exactly the
- *  viewports it was meant to serve (see doc 38 §1.2). */
+ *  viewports it was meant to serve (see doc 38 §1.2).
+ *
+ *  The chips are Apple's segmented-control shape: an underlined accent bar was
+ *  the old language; a filled pill is how a compact control states selection. */
 function MobileNav({ pathname }: { pathname: string }) {
   return (
-    <nav
-      aria-label="主导航"
-      className="glass border-b border-rule lg:hidden"
-    >
+    <nav aria-label="主导航" className="glass border-b border-rule lg:hidden">
       <ul className="mx-auto flex w-full max-w-[1600px] gap-1 overflow-x-auto px-4 py-2">
         {NAV.map((item) => {
           const active = item.href === "/" ? pathname === "/" : pathname.startsWith(item.href);
@@ -107,19 +113,13 @@ function MobileNav({ pathname }: { pathname: string }) {
                 href={item.href}
                 aria-current={active ? "page" : undefined}
                 className={clsx(
-                  "relative block whitespace-nowrap rounded-full px-2.5 py-1 text-xs transition-colors",
+                  "block whitespace-nowrap rounded-full px-3 py-1 text-xs transition-colors",
                   active
-                    ? "bg-gradient-to-r from-spec-violet/25 to-spec-magenta/20 font-medium text-primary"
-                    : "text-ink-muted",
+                    ? "bg-primary-soft font-medium text-primary"
+                    : "text-ink-muted hover:bg-paper-sunken",
                 )}
               >
                 {item.label}
-                {active && (
-                  <span
-                    aria-hidden
-                    className="pointer-events-none absolute inset-x-2 -bottom-px h-px rounded-full bg-gradient-to-r from-transparent via-spec-violet to-transparent"
-                  />
-                )}
               </Link>
             </li>
           );

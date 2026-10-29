@@ -33,7 +33,7 @@ export function RequestTrend({ data }: { data: TrendPoint[] }) {
             type="category"
             dataKey="label"
             width={48}
-            tick={{ fill: "var(--ink-muted)", fontSize: 11, fontFamily: "var(--font-plex-mono)" }}
+            tick={{ fill: "var(--ink-muted)", fontSize: 11, fontFamily: "var(--font-code)" }}
             stroke="var(--rule-strong)"
           />
           <Tooltip

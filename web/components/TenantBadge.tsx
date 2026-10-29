@@ -25,7 +25,7 @@ export function TenantBadge() {
     <span
       data-testid="tenant-badge"
       title={title}
-      className="inline-flex h-8 items-center gap-1.5 rounded-full border border-rule-strong bg-panel/50 px-2.5 text-xs text-ink-muted"
+      className="inline-flex h-8 items-center gap-1.5 rounded-full border border-rule bg-paper-sunken px-2.5 text-xs text-ink-muted"
     >
       <span className="text-ink-faint">租户</span>
       <span className="reading font-medium text-ink">{tenant}</span>

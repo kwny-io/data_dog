@@ -32,8 +32,8 @@ export function TechToggle() {
       className={clsx(
         "inline-flex h-8 items-center gap-1.5 rounded-full border px-2.5 text-xs transition-colors",
         showTech
-          ? "border-spec-violet/70 bg-primary-soft font-medium text-primary shadow-[0_0_16px_-6px_var(--glow-ring)]"
-          : "border-rule-strong bg-panel/50 text-ink-muted hover:border-spec-violet/60 hover:text-ink",
+          ? "border-transparent bg-primary-soft font-medium text-primary"
+          : "border-rule bg-paper-sunken text-ink-muted hover:text-ink",
       )}
     >
       {/* A bracket pair reads as "raw / bracketed datum" — the same visual

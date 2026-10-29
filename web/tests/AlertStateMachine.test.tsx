@@ -75,9 +75,13 @@ describe("AlertStateMachine", () => {
       return btn.querySelector<HTMLElement>("[data-dot]")!;
     };
 
-    // jsdom has no Tailwind, so assert the inline style the component sets:
-    // a lit dot carries a glow; a hollow one does not.
-    expect(dot("detected").style.boxShadow).toBeTruthy();
-    expect(dot("closed").style.boxShadow).toBe("");
+    // jsdom never applies Tailwind, so computed colours are out. The class names
+    // are the contract: a lit dot is FILLED (`bg-current`), a hollow one is an
+    // unfilled ring. (This used to assert an inline glow instead; the glow was
+    // removed with the rest of the decorative shadows, and the fill/hollow
+    // distinction is what the dot actually means.)
+    expect(dot("detected").classList.contains("bg-current")).toBe(true);
+    expect(dot("closed").classList.contains("bg-current")).toBe(false);
+    expect(dot("closed").classList.contains("border-rule-strong")).toBe(true);
   });
 });

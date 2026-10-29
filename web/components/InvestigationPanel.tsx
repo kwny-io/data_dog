@@ -175,7 +175,7 @@ function ProgressTrack({ elapsed }: { elapsed: number }) {
       aria-label="调查进度（按 90 秒时限估算）"
     >
       <div
-        className="h-full rounded-full bg-spectrum transition-[width]"
+        className="h-full rounded-full bg-primary transition-[width]"
         style={{ width: `${pct}%` }}
       />
     </div>
