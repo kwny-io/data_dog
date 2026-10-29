@@ -83,9 +83,13 @@ jobs:
           python-version: "3.12"
           cache: pip
       - name: 安装依赖
+        # 必须带 sim：`go2_sim/rig.py` 的物理用例全部 `importorskip("mujoco")`，
+        # 缺这个 extra 时它们静默跳过，rig.py 只剩 18% 覆盖率，直接压垮
+        # 下面两道门（总分 85% + 单模块 70%）。这两个包在 Linux x86_64/cp312
+        # 上都有现成 wheel，不需要编译器，也没有顶层的 glfw 导入。
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev,postgres]"
+          pip install -e ".[dev,postgres,sim]"
       - name: 跑测试（覆盖率门禁 85%）
         run: |
           pytest -q \
