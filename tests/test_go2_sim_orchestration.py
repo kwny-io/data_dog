@@ -35,6 +35,7 @@ import pytest
 
 from data_dog.go2_sim import server as server_mod
 from data_dog.go2_sim import session as session_mod
+from data_dog.go2_sim.emit import DEMO_COMPONENT, SUBSYSTEM_SOURCES
 from data_dog.go2_sim.mqtt_pub import MqttTelemetryPublisher
 from data_dog.go2_sim.rig import SimConfig, Telemetry
 from data_dog.go2_sim.server import _PlaneSink, _telemetry_rows
@@ -249,9 +250,9 @@ def test_chunk_index_maps_wall_slot_back_to_telemetry_point(fake_rig) -> None:
 
 
 def test_snapshot_actual_speed_is_none_during_warmup(fake_rig) -> None:
-    """实际倍率在墙钟 <0.5s 时给 None，不拿 0 冒充。
+    """实际倍率在有效墙钟 <0.5s 时给 None，不拿 0 冒充。
 
-    刚启动时 `t/wall` 是两个噪声之比（可能是 37x）。页面据此显示"—"，
+    刚启动时分子分母都是噪声之比（可能是 37x）。页面据此显示"—"，
     半秒后才有意义。
     """
     sess, sim = fake_rig(SimConfig(posture="stand"))
@@ -261,12 +262,50 @@ def test_snapshot_actual_speed_is_none_during_warmup(fake_rig) -> None:
     assert snap["running"] is False
     assert snap["stats"]["wall_elapsed"] == 0 or snap["stats"]["wall_elapsed"] >= 0
 
-    # 把基准前移 2 秒，仿真推进 4 秒 → 2.0x
-    sim.t = 4.0
-    sess._t0 -= 2.0
+    # 稳定跑 2.0x 四秒：有效墙钟 0→4s，仿真钟 0→8s
+    sess._active_wall = 4.0
+    sess.stats.steps = 800
+    sess._rate_hist.extend([(0.0, 0.0), (1.0, 2.0), (2.0, 4.0),
+                            (3.0, 6.0), (4.0, 8.0)])
     snap = sess.snapshot()
     assert snap["actual_speed"] == pytest.approx(2.0, abs=0.05), snap
     print("PASS test_snapshot_actual_speed_is_none_during_warmup")
+
+
+def test_actual_speed_tracks_recent_window_not_lifetime_average(fake_rig) -> None:
+    """换倍率后，实际倍率看**最近 5 个有效墙钟秒**，不是开天辟地以来的平均。
+
+    实测症状：1x 跑一段后切 15x，页面显示 4.71x，而当下确实在跑 12.9x。
+    累计平均被之前的 1x 拖着，报出来的数对不上实际——录像里就是在撒谎。
+    """
+    sess, _ = fake_rig(SimConfig(posture="stand"))
+    sess._active_wall = 60.0
+    sess.stats.steps = 6000 + 1500        # 历史 60s@1x + 近 5s@15x
+    # 前 55 秒 1x（墙钟 0→55，仿真 0→55），后 5 秒 15x（55→60，仿真 55→130）
+    sess._rate_hist.extend([(0.0, 0.0), (30.0, 30.0), (55.0, 55.0),
+                            (56.0, 70.0), (58.0, 100.0), (60.0, 130.0)])
+    snap = sess.snapshot()
+    # 全期平均是 130/60 = 2.17x；近期窗口应给出 15x 量级
+    assert snap["actual_speed"] == pytest.approx(15.0, abs=0.1), snap
+    print("PASS test_actual_speed_tracks_recent_window_not_lifetime_average")
+
+
+def test_paused_time_does_not_dilute_actual_speed(fake_rig) -> None:
+    """暂停期间墙钟照走、仿真停着，实际倍率必须不因此掉下来。
+
+    实测症状：暂停 5 秒后页面显示 0.49x，恢复后真实速率是 0.99x。
+    "卡住了"是假象，而且暂停越久越离谱。分母因此改用**真正在推进**的墙钟
+    （`_active_wall`），不是 `monotonic() - _t0`。
+    """
+    sess, _ = fake_rig(SimConfig(posture="stand"))
+    sess._active_wall = 10.0              # 有效墙钟只算没暂停的那些 tick
+    sess._t0 -= 30.0                      # 但真实墙钟已经走了 30 秒
+    sess.stats.steps = 1000               # 仿真推了 10 秒 → 1.0x
+    sess._rate_hist.extend([(0.0, 0.0), (5.0, 5.0), (10.0, 10.0)])
+    snap = sess.snapshot()
+    assert snap["actual_speed"] == pytest.approx(1.0, abs=0.05), snap
+    assert snap["stats"]["wall_elapsed"] == pytest.approx(30.0, abs=1.0), snap
+    print("PASS test_paused_time_does_not_dilute_actual_speed")
 
 
 def test_history_returns_last_n(fake_rig) -> None:
@@ -289,14 +328,15 @@ def test_publish_sends_one_motor_plus_four_subsystem_envelopes(fake_rig) -> None
     got: list[SimEvent] = []
     sess, _ = fake_rig(SimConfig(posture="stand"),
                        on_event=got.append)
-    sess._seq = 7
-    sess._publish(_telemetry(1.25))
+    # 序列号按部件独立：五个部件各走各的计数器，这里统一抬到 7 再发一格。
+    sess._seq = {c: 7 for c in (DEMO_COMPONENT, *SUBSYSTEM_SOURCES)}
+    sess._publish(_telemetry(1.25), sess._tick_seq())
     hints = [e.env["component_hint"] for e in got]
     assert len(hints) == 5, hints
     assert hints[0] == "joint_motor.front_left_knee", hints
     assert set(hints[1:]) == {"battery.main", "imu.body",
                               "thermal.main", "system.body"}, hints
-    assert all(e.env["sequence"] == 7 for e in got)
+    assert all(e.env["sequence"] == 8 for e in got)
     assert all(e.t == pytest.approx(1.25) for e in got)
     assert sess.stats.published == 5
     assert sess.stats.dropped == 0
@@ -316,7 +356,7 @@ def test_publish_records_first_and_every_hundredth_drop(fake_rig) -> None:
         raise RuntimeError(f"下游炸了 #{calls['n']}")
 
     sess, _ = fake_rig(SimConfig(posture="stand"), on_event=boom)
-    sess._publish(_telemetry(0.5))
+    sess._publish(_telemetry(0.5), sess._tick_seq())
     assert sess.stats.dropped == 1
     assert sess.stats.published == 0
     assert sess.stats.drop_reason is not None
@@ -325,13 +365,13 @@ def test_publish_records_first_and_every_hundredth_drop(fake_rig) -> None:
     first = sess.stats.drop_reason
 
     # 第 2 次不刷新原因（只在 1、100、200… 刷新）
-    sess._publish(_telemetry(0.6))
+    sess._publish(_telemetry(0.6), sess._tick_seq())
     assert sess.stats.dropped == 2
     assert sess.stats.drop_reason == first
 
     # 补到 100 次，原因带上新的总数
     for i in range(3, 101):
-        sess._publish(_telemetry(0.6 + i * 0.01))
+        sess._publish(_telemetry(0.6 + i * 0.01), sess._tick_seq())
     assert sess.stats.dropped == 100
     assert "共 100 帧" in sess.stats.drop_reason
     print("PASS test_publish_records_first_and_every_hundredth_drop")
@@ -339,7 +379,7 @@ def test_publish_records_first_and_every_hundredth_drop(fake_rig) -> None:
 
 def test_publish_without_callback_is_a_noop(fake_rig) -> None:
     sess, _ = fake_rig(SimConfig(posture="stand"))
-    sess._publish(_telemetry(0.0))
+    sess._publish(_telemetry(0.0), sess._tick_seq())
     assert sess.stats.published == 0 and sess.stats.dropped == 0
     print("PASS test_publish_without_callback_is_a_noop")
 
@@ -356,7 +396,7 @@ def test_publish_skips_row_that_is_not_finite(fake_rig) -> None:
                        on_event=got.append)
     bad = _telemetry(0.3)
     bad.temperature = np.full(12, np.nan)
-    sess._publish(bad)
+    sess._publish(bad, sess._tick_seq())
     assert all(e.env["component_hint"] != "joint_motor.front_left_knee"
                for e in got)
     assert len(got) == 4, [e.env["component_hint"] for e in got]
@@ -508,7 +548,7 @@ def test_reconfigure_resets_history_sequence_and_clock(fake_rig) -> None:
     """
     sess, sim = fake_rig(SimConfig(posture="stand"))
     sess._hist.extend(_telemetry(i * 0.01) for i in range(10))
-    sess._seq = 42
+    sess._seq = {c: 42 for c in (DEMO_COMPONENT, *SUBSYSTEM_SOURCES)}
     t0_before = sess._t0
 
     sess.reconfigure(posture="run", severity=0.5, thermal_scale=2.0)
@@ -521,7 +561,7 @@ def test_reconfigure_resets_history_sequence_and_clock(fake_rig) -> None:
     # 未指定的项沿用旧配置，不能被清成默认值
     assert new_cfg.fault == sim.config.fault
     assert sess.history(10) == []
-    assert sess._seq == 0
+    assert sess._seq == {}
     assert sess._t0 >= t0_before
     assert sess._reset_clock.is_set(), "循环要看到这个标记才会把仿真时钟归零"
     print("PASS test_reconfigure_resets_history_sequence_and_clock")

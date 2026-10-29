@@ -125,7 +125,9 @@ def test_joint_component_map_is_bijective() -> None:
     不是双向的时候 `component_row` 会静默取到另一个关节的读数，
     表现是"故障打在 A，检测器看着 B"——两条线看起来都正常，就是没候选。
     """
-    assert len(_JOINT_TO_COMPONENT) == len(_COMPONENT_TO_JOINT) == 4
+    # 不写死条数：映射会随 idl 覆盖范围扩（本次从 4 关节扩到全 12 关节）。
+    # 要钉的是一一对应，不是某个具体数字。
+    assert len(_JOINT_TO_COMPONENT) == len(_COMPONENT_TO_JOINT)
     for joint, comp in _JOINT_TO_COMPONENT.items():
         assert _COMPONENT_TO_JOINT[comp] == joint
     print("PASS test_joint_component_map_is_bijective")
@@ -157,6 +159,9 @@ def test_component_row_reads_the_named_joint_not_row_zero() -> None:
         dq=np.arange(12, dtype=float) * 0.3,
         dq_raw=np.arange(12, dtype=float) * 0.4,
         valid=np.array([True] * 11 + [False]),
+        # `lost` 是**累计计数器**（IDL uint32），不是 0/1 标志。
+        # 逐关节给不同值，取错行立刻能看出来。
+        lost=np.arange(12, dtype=np.int64) * 3,
     )
     for joint, comp in _JOINT_TO_COMPONENT.items():
         i = t.joints.index(joint)
@@ -169,7 +174,9 @@ def test_component_row_reads_the_named_joint_not_row_zero() -> None:
         assert row["q_raw"] == pytest.approx(0.2 * i), comp
         assert row["dq"] == pytest.approx(0.3 * i), comp
         assert row["dq_raw"] == pytest.approx(0.4 * i), comp
-        assert row["lost"] == (0.0 if i < 11 else 1.0), comp
+        # 计数器原样透出，**不按 valid 折算成 0/1**：折算回标志位后
+        # `delta(lost) > 0` 恒假，F8 永远报不出来。
+        assert row["lost"] == 3.0 * i, comp
     print("PASS test_component_row_reads_the_named_joint_not_row_zero")
 
 
@@ -182,7 +189,8 @@ def test_component_row_returns_none_for_unknown_or_missing_joint() -> None:
     assert t.component_row("") is None
     assert t.component_row("battery.main") is None
     assert t.component_row("joint_motor.fl_hip") is None     # 少了前缀
-    assert t.component_row("joint_motor.front_left_calf") is None  # 未映射
+    # 映射已覆盖全 12 关节，这里要挑一个**确实不在映射里**的名字。
+    assert t.component_row("joint_motor.front_left_toe") is None  # 不存在
 
     # 该关节不在本次采样的 joints 列表里 → None
     t2 = Telemetry(t=0.0, joints=["FL_thigh"])
