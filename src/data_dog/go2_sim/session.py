@@ -288,7 +288,8 @@ class SimSession:
             # 等比铺满再居中裁切，避免把狗拉变形
             scale = max(w / out.width, h / out.height)
             mid = out.resize((max(1, round(out.width * scale)),
-                              max(1, round(out.height * scale))), Image.LANCZOS)
+                              max(1, round(out.height * scale))),
+                             Image.Resampling.LANCZOS)
             left = (mid.width - w) // 2
             top = (mid.height - h) // 2
             buf = io.BytesIO()
@@ -388,9 +389,13 @@ class SimSession:
                 components=tuple(SUBSYSTEM_SOURCES),
                 sequence=[sequences[c] for c in SUBSYSTEM_SOURCES],
             )
-            for one in batch:
-                self._on_event(SimEvent(t=float(t_last.t), env=one))
-                self.stats.published += 1
+            # 取局部变量而不是每次都读 `self._on_event`：让类型检查能收窄到
+            # "非 None"，也让这一批信封投递给的是同一个回调（中途不会换）。
+            emit = self._on_event
+            if emit is not None:
+                for one in batch:
+                    emit(SimEvent(t=float(t_last.t), env=one))
+                    self.stats.published += 1
         except Exception as e:                    # noqa: BLE001
             # **不许静默**：这里曾经只有一句 `dropped += 1`，什么原因都不留。
             # 结果是页面照常跑、温度照常涨、候选一直是 0，而"多少帧在哪一步
