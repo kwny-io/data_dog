@@ -43,8 +43,13 @@ from .dds_bridge import DdsTelemetryPublisher
 from .faults import FAULT_LIBRARY, fault_by_key
 from .mqtt_pub import MqttTelemetryPublisher
 from .postures import POSTURES
-from .rig import SimConfig
-from .semantic import component_name, rule_name, signal_name
+from .rig import _JOINT_TO_COMPONENT, SimConfig
+from .semantic import (
+    component_name,
+    component_part_name,
+    rule_name,
+    signal_name,
+)
 from .session import SPEEDS, SimEvent, SimSession
 
 # 演示身份。与 MQTT 侧一致：身份来自信道配置，不来自报文。
@@ -244,6 +249,11 @@ def _telemetry_rows(history: list[Any]) -> dict[str, Any]:
 
     只给**当前值 + 最近曲线**，不搬整车历史：12 关节 × 600 点 = 7200 个数字，
     每 200ms 传一次会明显吃带宽。曲线降到 120 点（12 秒 @10Hz）足够看出趋势。
+
+    `name` 是执行器名（`FL_thigh`），`label` 是人话名（"左前膝"）。**两个都给**：
+    界面显示 `label`，`name` 留给排障时对着 MuJoCo 模型文件认关节——
+    只留人话名的话，"左前膝温度不对"在现场定位不到是哪一个执行器。
+    翻译在服务端做，页面只负责显示（与 `/api/candidates` 的 `names` 同一套做法）。
     """
     if not history:
         return {"t": 0.0, "joints": [], "series": {}}
@@ -252,6 +262,8 @@ def _telemetry_rows(history: list[Any]) -> dict[str, Any]:
     for i, name in enumerate(last.joints):
         joints.append({
             "name": name,
+            "label": component_part_name(
+                _JOINT_TO_COMPONENT.get(name, name)),
             "q": round(float(last.q[i]), 4),
             "dq": round(float(last.dq[i]), 4),
             "tau": round(float(last.torque[i]), 3),

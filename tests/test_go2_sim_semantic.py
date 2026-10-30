@@ -250,6 +250,46 @@ def test_fault_table_covers_library() -> None:
     print(f"PASS test_fault_table_covers_library ({len(keys)} 条故障)")
 
 
+def test_every_actuator_has_a_chinese_name() -> None:
+    """12 个执行器名必须全部翻成人话——关节遥测表 12 行，一行都不能漏原串。
+
+    这是用户 2026-10-31 当场提的那条："FL_hip / FL_thigh … 别人看不懂"。
+    控制台原来直接印 `j.name`，整张表就是一堆厂商缩写。
+
+    **从 `ACTUATORS` 枚举，不是抄一份 12 条**：抄一遍就有两个事实源，
+    模型加了执行器这里不会红，界面上照样漏原串。
+
+    翻译走 `_JOINT_TO_COMPONENT`（已有的权威映射）+ `component_part_name`，
+    **不另建一张关节名表**。这条测试同时钉住了那个映射对 12 个执行器都成立。
+    """
+    from data_dog.go2_sim.rig import _JOINT_TO_COMPONENT
+    from data_dog.go2_sim.semantic import component_part_name
+    from data_dog.mujoco_sim.simulate import ACTUATORS
+
+    assert len(ACTUATORS) == 12, f"执行器数变了：{ACTUATORS}"
+
+    unmapped = [a for a in ACTUATORS if a not in _JOINT_TO_COMPONENT]
+    assert not unmapped, (
+        f"这些执行器没有部件映射，界面上会印原始执行器名：{unmapped}\n"
+        f"补进 rig.py 的 _JOINT_TO_COMPONENT。"
+    )
+
+    for act in ACTUATORS:
+        label = component_part_name(_JOINT_TO_COMPONENT[act])
+        assert _has_cjk(label), f"{act} 翻出来是 {label!r}，没有中文"
+        # 中英混排是这层要消灭的东西：回退路径会拼出
+        # "front left calf" 这种半英文，`calf` 漏登记时就是这样漏的。
+        assert not any("a" <= ch.lower() <= "z" for ch in label), (
+            f"{act} 翻出来是 {label!r}，还带着英文——COMPONENT_PART_NAME 漏了哪个后缀？"
+        )
+
+    # 12 个名字互不相同：撞名的话表格上分不出是哪个关节
+    labels = [component_part_name(_JOINT_TO_COMPONENT[a]) for a in ACTUATORS]
+    assert len(set(labels)) == 12, f"翻译后有重名：{labels}"
+
+    print(f"PASS test_every_actuator_has_a_chinese_name ({len(ACTUATORS)} 个执行器)")
+
+
 def test_component_name_reads_naturally() -> None:
     """部件名是"实例在前、类型在后"，且未知部分不与中文粘连。"""
     assert component_name("joint_motor.front_left_hip") == "左前髋关节电机"

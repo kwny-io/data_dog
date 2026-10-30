@@ -160,6 +160,15 @@ body{
   color:var(--t3);font-size:10px;font-weight:600;letter-spacing:.04em;
   padding-bottom:3px}
 .jt .n{color:var(--t2);font-family:var(--sans);font-size:12px}
+/* 换腿的分隔线：12 行中文名（左前髋/左前膝/左前小腿…）长得太像，
+   不分组的表格会看串行。只在腿与腿之间加，同一个腿内部不加。
+   三列是 grid 的三个格子，所以要逐个补——只给第一格加会断成半截线。
+
+   **不加 padding**：表格 13 行刚好卡在 264px（见上面 .jt 的说明），
+   每加 4px 上内边距 × 3 条腿就多出 12px，最后一行被推出可视区
+   （实测 scrollHeight 269 > 264）。行间本来有 4px gap，够透气了。 */
+.jt .n.brk,.jt .n.brk+.v,.jt .n.brk+.v+.v{
+  border-top:.5px solid var(--hair-2)}
 .jt .v{text-align:right;font-variant-numeric:tabular-nums;color:var(--t1)}
 .jt .v.hot{color:#B36B00;font-weight:600}
 .jt .v.crit{color:var(--red);font-weight:600}
@@ -482,10 +491,18 @@ function renderTelemetry(d){
   const box = $('#joints');
   const rows = ['<div class="h">关节</div><div class="h">温度</div>'
               + '<div class="h">电流</div>'];
+  // 显示人话名（`label` 由服务端按 semantic.py 译好），`name` 降级到 title。
+  // `FL_thigh` 摆在正文里等于让值班员先做一次人机翻译；但排障时又要对得上
+  // MuJoCo 模型里的执行器名，所以不能丢——它进 title，需要时悬停就能看见。
+  // 四条腿之间加分隔线：12 行中文名长得太像，不分组会看串行。
+  let prevLeg = null;
   for (const j of d.joints){
     const cls = !j.valid ? 'dead' : j.temp >= 90 ? 'crit'
               : j.temp >= 75 ? 'hot' : '';
-    rows.push(`<div class="n">${j.name}</div>` +
+    const leg = String(j.name || '').slice(0, 2);
+    const ncls = (prevLeg !== null && leg !== prevLeg) ? 'n brk' : 'n';
+    prevLeg = leg;
+    rows.push(`<div class="${ncls}" title="${j.name || ''}">${j.label || j.name}</div>` +
               `<div class="v ${cls}">${fmt(j.temp,1)}°</div>` +
               `<div class="v">${fmt(j.current,1)}A</div>`);
   }

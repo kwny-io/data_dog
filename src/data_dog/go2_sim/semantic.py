@@ -2,18 +2,24 @@
 
 ## 为什么要有这一层
 
-系统里同时在用**三套互不相干的标识符**，每一套都会漏到界面上：
+系统里同时在用**四套互不相干的标识符**，每一套都会漏到界面上：
 
 | 来源 | 长相 | 谁产生 |
 |---|---|---|
 | 故障键 | `F1_stall` | `faults.py` 的 `FAULT_LIBRARY` |
 | 规则 ID | `MOTOR_STALL_SUSTAINED` | 各 `ThresholdRule.rule_id` |
 | 派生事件类型 | `joint_motor_temperature_rising_under_normalized_load` | `faults.py` 的 `label`、`emit.py` 的 `component_hint` |
+| 执行器名 | `FL_thigh` | `rig.py` 的 `ACTUATORS`（照抄 MuJoCo/Unitree） |
 
 **它们都是给机器看的**。直接渲染出来，界面上就是
 `joint_motor.front_left_hip` 和 `POWER_SOC_LOW` —— 值班员要么不认识，
 要么得在现场心算一遍。实测（2026-10-30）仿真控制台的候选卡片
 就是这么显示的第一行。
+
+第 4 套（执行器名）是 2026-10-31 补的：关节遥测表原来直接印 `FL_hip`，
+用户当场反馈"别人看不懂"。它**没有单独的翻译表**——`_JOINT_TO_COMPONENT`
+已经把执行器映射到部件，用 `component_part_name()` 取部件那一段就是人话名。
+再抄一张表就是两个事实源，改一处忘一处。
 
 ## 为什么不全靠逐词拼接
 
@@ -183,6 +189,14 @@ COMPONENT_PART_NAME: dict[str, str] = {
     "front_right_knee": "右前膝",
     "rear_left_knee": "左后膝",
     "rear_right_knee": "右后膝",
+    # 小腿段（`*_calf`）。**必须先于 foot 之类补齐**：漏了它时
+    # `component_name("joint_motor.front_left_calf")` 会拼出
+    # "front left calf 关节电机" —— 中英混排，正是这层要消灭的东西。
+    # 实测 2026-10-31：12 个关节里 4 个 calf 全中。
+    "front_left_calf": "左前小腿",
+    "front_right_calf": "右前小腿",
+    "rear_left_calf": "左后小腿",
+    "rear_right_calf": "右后小腿",
     "front_left_foot": "左前足",
     "front_right_foot": "右前足",
     "rear_left_foot": "左后足",
@@ -285,6 +299,23 @@ def component_name(ref: str) -> str:
     return part or kind or ref
 
 
+def component_part_name(ref: str) -> str:
+    """`joint_motor.front_left_hip` → "左前髋"：只要部件那一段，丢掉类型。
+
+    关节遥测表要的是这个。那张表 12 行全是关节电机，行行写"……关节电机"
+    只是每行多占四个字——类型由表头交代一次就够。
+
+    未知部件退化成去下划线，不做逐词翻译；空串原样返回。
+    """
+    if not ref:
+        return ref
+    _, _, part_raw = ref.partition(".")
+    hit = COMPONENT_PART_NAME.get(part_raw)
+    if hit is not None:
+        return hit
+    return part_raw.replace("_", " ") or ref
+
+
 def describe_fault(key: str) -> dict[str, str]:
     """故障的完整人话描述，给 UI 的 tooltip 用。"""
     return {
@@ -300,5 +331,5 @@ __all__ = [
     "RULE_NAME", "SIGNAL_NAME", "EVENT_TYPE_NAME",
     "COMPONENT_KIND_NAME", "COMPONENT_PART_NAME",
     "fault_name", "rule_name", "signal_name", "event_type_name",
-    "component_name", "describe_fault",
+    "component_name", "component_part_name", "describe_fault",
 ]

@@ -57,6 +57,8 @@ const POSITION: Record<string, string> = {
 const JOINT: Record<string, string> = {
   hip: "髋",
   knee: "膝",
+  thigh: "大腿",
+  calf: "小腿",
   foot: "足",
   ankle: "踝",
   shoulder: "肩",
