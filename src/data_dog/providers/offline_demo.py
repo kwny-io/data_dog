@@ -13,7 +13,17 @@ from typing import Any
 
 from ..core.injection import unwrap
 from ..evidence.store import RECENT_CHANGES
-from ..presentation import component_cn
+
+# 名字与组句都从 `presentation` 取，**不直接 import go2_sim**：
+# `providers → go2_sim → mujoco_sim → providers` 会成环
+# （tests/test_layering.py::test_no_new_dependency_cycles 会红）。
+from ..presentation import (
+    component_cn,
+    confirmed_actions,
+    confirmed_cause,
+    signal_clause,
+    signal_name,
+)
 
 
 class DeterministicEvidenceProvider:
@@ -99,28 +109,35 @@ class DeterministicEvidenceProvider:
             return {
                 "disposition": "rejected", "severity": "info", "confidence": 0.85,
                 "event_type": event_type,
-                "summary": f"{what_comp}未越过厂商保护阈值，判定为非异常。",
+                "summary": f"{what_comp}未触发厂商保护条件，判定为非异常。",
                 "hypotheses": [], "missing_evidence": [],
                 "recommended_actions": ["无需处理"],
             }
+        # `signal_clause` 按信号族给半句，方向也跟着族走：温度越上限、
+        # 电量破下限，一个"越过阈值"套不住两头。认不出的族退化成
+        # "X出现异常"，不猜方向——宁少说，不说错。
+        clause = signal_clause(signal)
         if changes:
             what = changes[0].get("what", "近期变更")
             return {
                 "disposition": "needs_human_review", "severity": "critical",
                 "confidence": 0.6, "event_type": event_type,
-                "summary": (f"{what_comp}温度越过厂商保护阈值，但该部件近期有变更（{what}），"
+                "summary": (f"{what_comp}{clause}，但该部件近期有变更（{what}），"
                             "无法区分变更效应与真实退化，需人工复核。"),
                 "hypotheses": [{"cause": f"{what} 导致读数偏移", "status": "supported"},
-                               {"cause": "真实热退化", "status": "supported"}],
+                               {"cause": f"真实退化（{signal_name(signal) or '信号异常'}）",
+                                "status": "supported"}],
                 "missing_evidence": ["变更前同工况基线"],
                 "recommended_actions": ["复核变更前后基线", "安排现场检查"],
             }
         return {
             "disposition": "confirmed", "severity": "critical", "confidence": 0.9,
             "event_type": event_type,
-            "summary": (f"{what_comp}温度越过厂商保护阈值，且无变更干扰、证据完整，"
-                        "判为明确热故障。"),
-            "hypotheses": [{"cause": "热退化/冷却失效", "status": "supported"}],
+            "summary": (f"{what_comp}{clause}，且无变更干扰、证据完整，"
+                        "判为明确异常。"),
+            # 假设与建议同样跟着信号走：信号是电量却建议"检查冷却通道"，
+            # 是把热故障的剧本套在了电源故障上（同一个 A86 的另一个面）。
+            "hypotheses": [{"cause": confirmed_cause(signal), "status": "supported"}],
             "missing_evidence": [],
-            "recommended_actions": ["降低负载并安排检修", "检查冷却通道"],
+            "recommended_actions": confirmed_actions(signal),
         }

@@ -46,6 +46,10 @@ from data_dog.go2_sim.semantic import (
     signal_name,
 )
 
+# 结论半句住在展示层，不在语义层——`providers` 不能依赖 `go2_sim`
+# （会成环，tests/test_layering.py 守着），而组句本来就是展示层的活。
+from data_dog.presentation import SIGNAL_CLAUSE, signal_clause
+
 # 仓库根：tests/ 的上一级。
 _ROOT = Path(__file__).resolve().parents[1]
 
@@ -164,6 +168,43 @@ def test_every_rule_has_a_chinese_name() -> None:
         assert "_" not in name, f"{rid} 翻出来是 {name!r}，还带着下划线"
 
     print(f"PASS test_every_rule_has_a_chinese_name ({len(rule_ids)} 条规则)")
+
+
+def test_every_signal_has_a_conclusion_clause() -> None:
+    """每个信号族都要有"结论里的半句"，否则电池会被说成温度越线。
+
+    这条钉的是台账 A86：`offline_demo._conclusion` 原来三条分支一律写死
+    "温度越过厂商保护阈值"，于是 `battery.main` 的结论成了
+    "主机电池温度越过厂商保护阈值"——电池报的是 SOC/电压/压差，没有温度。
+
+    要求**两张表键集相同**：只给 SIGNAL_NAME 补名字、不补 SIGNAL_CLAUSE 时，
+    结论会静默退化成 "X出现异常"（不说谎，但也不具体）。退化本身是安全的，
+    但它会让"补了表"看起来完成了，所以这里卡死。
+    """
+    pairs = _extract_rules()
+    signals = {_signal_of(rid, fld) for rid, fld in pairs}
+
+    missing = sorted(s for s in signals if s not in SIGNAL_CLAUSE)
+    assert not missing, (
+        f"这些信号族没有结论半句，调查结论会退化成 'X出现异常'：{missing}\n"
+        f"补进 presentation.py 的 SIGNAL_CLAUSE（注意方向：温度越上限、电量破下限），"
+        f"连 _CONFIRMED_CAUSE / _CONFIRMED_ACTIONS 一起补，三张表要同键集。"
+    )
+    # 反向检查：SIGNAL_CLAUSE 里不该有 SIGNAL_NAME 不认识的族。
+    # 多写一条半句而没有名字，说明那个族从没在真链路出现过——表在自我膨胀。
+    orphan = sorted(set(SIGNAL_CLAUSE) - set(SIGNAL_NAME))
+    assert not orphan, (
+        f"这些半句对应的信号族没有中文名（从没在候选里出现过？）：{orphan}"
+    )
+
+    for sig in signals:
+        clause = signal_clause(sig)
+        assert _has_cjk(clause), f"signal {sig!r} 的半句是 {clause!r}，没有中文"
+        assert not clause.startswith(sig), (
+            f"signal {sig!r} 的半句直接以原串开头，说明没翻译：{clause!r}"
+        )
+
+    print(f"PASS test_every_signal_has_a_conclusion_clause ({len(signals)} 个信号族)")
 
 
 def test_every_signal_has_a_chinese_name() -> None:
