@@ -31,9 +31,20 @@ describe("vocabulary — graceful degradation", () => {
   });
 
   it("translates event types", () => {
-    expect(eventTypeName("motor_over_temperature")).toContain("电机");
-    expect(eventTypeName("motor_over_temperature")).toContain("温度");
+    // Exact glossary name wins over token composition: the composed form was
+    // "电机温度过高", which reads worse than the established "电机过温".
+    expect(eventTypeName("motor_over_temperature")).toBe("电机过温");
     expect(eventTypeName("joint_motor_thermal_degradation")).not.toMatch(/_/);
+  });
+
+  it("uses the exact name for signals instead of the bare field name", () => {
+    // Regression: a candidate's `signal` is `_signal_of(rule_id, field)`, which
+    // returns the FIELD NAME when it cannot classify. The console showed
+    // "tau_est" as the first line of a candidate card.
+    expect(signalName("tau_est")).toBe("估计力矩");
+    expect(signalName("temperature_high")).toBe("温度过高");
+    // Unlisted values still degrade through composition, never raw snake_case.
+    expect(signalName("some_new_signal")).not.toMatch(/_/);
   });
 
   it("translates rule matches", () => {

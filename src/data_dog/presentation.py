@@ -19,22 +19,33 @@ from __future__ import annotations
 
 from typing import Any
 
-# 部件英文标识 → 中文显示名（只用于界面，不参与计算）
-_COMPONENT_CN = {
-    "joint_motor.front_left_hip": "左前髋关节电机",
-    "joint_motor.front_right_hip": "右前髋关节电机",
-    "joint_motor.front_left_knee": "左前膝关节电机",
-    "joint_motor.front_right_knee": "右前膝关节电机",
-    "battery.main": "主电池",
-    "controller.main": "主控",
-}
+from .go2_sim.semantic import COMPONENT_KIND_NAME, COMPONENT_PART_NAME
 
 _SEVERITY_CN = {"critical": "严重", "warning": "警告"}
 
 
 def component_cn(component_ref: str) -> str:
-    """部件显示名：有中文就用中文，没有就原样返回。"""
-    return _COMPONENT_CN.get(component_ref, component_ref)
+    """部件显示名：能翻就翻，翻不了**原样返回**（不编造名字）。
+
+    这里原来有一份 6 条的 `_COMPONENT_CN` 硬编码表，只覆盖左前髋/左前膝等
+    少数部件，且与 `go2_sim/semantic.py` 的表**各自演进**——同一部件在两个
+    页面上叫法不同，没登记的部件则直接漏英文。
+
+    现在改为拼 `semantic.py` 的两张表（部件类型 + 部件实例），覆盖全部 12 个
+    关节和 5 类部件。**保留"翻不了就原样返回"这个语义**：调用方（演示台的
+    一句话结论、HTTP 调查端点）需要的是"宁可露出原串，也不要编一个中文名"，
+    所以不做 `semantic.component_name` 那种拆词重组。
+    """
+    if not component_ref:
+        return component_ref
+    kind_raw, sep, part_raw = component_ref.partition(".")
+    if not sep:
+        return COMPONENT_KIND_NAME.get(kind_raw, component_ref)
+    kind = COMPONENT_KIND_NAME.get(kind_raw)
+    part = COMPONENT_PART_NAME.get(part_raw)
+    if kind is None or part is None:
+        return component_ref          # 任一半没登记 → 原样，不拼半个中文
+    return f"{part}{kind}"
 
 
 def _first_temperature(telemetry: dict[str, dict[str, Any]]) -> float | None:

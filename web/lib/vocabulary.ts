@@ -30,38 +30,16 @@
  * phrase, never raw snake_case.
  */
 
+import {
+  COMPONENT_KIND_NAME,
+  COMPONENT_PART_NAME,
+  EVENT_TYPE_NAME,
+  FAULT_NAME,
+  RULE_NAME,
+  SIGNAL_NAME,
+} from "./glossary";
+
 // ------------------------------------------------------------- dictionaries
-
-/** Component kind (the part before the "."). */
-const COMPONENT_KIND: Record<string, string> = {
-  joint_motor: "关节电机",
-  motor: "电机",
-  battery: "电池",
-  bms: "BMS",
-  controller: "主控",
-  imu: "IMU",
-  lidar: "激光雷达",
-  camera: "相机",
-  main: "主机",
-};
-
-/** Component instance (the part after the "."). */
-const COMPONENT_PART: Record<string, string> = {
-  front_left_hip: "左前髋",
-  front_right_hip: "右前髋",
-  rear_left_hip: "左后髋",
-  rear_right_hip: "右后髋",
-  front_left_knee: "左前膝",
-  front_right_knee: "右前膝",
-  rear_left_knee: "左后膝",
-  rear_right_knee: "右后膝",
-  front_left_foot: "左前足",
-  front_right_foot: "右前足",
-  rear_left_foot: "左后足",
-  rear_right_foot: "右后足",
-  main: "主机",
-  bms: "BMS",
-};
 
 /** Position tokens, so an unlisted joint still reads correctly. */
 const POSITION: Record<string, string> = {
@@ -118,7 +96,13 @@ const TOKEN: Record<string, string> = {
   high: "过高",
   low: "过低",
   over: "过",
-  under: "欠",
+  // `under` 在标识符里有两种含义，逐词翻译分不清：
+  //   `motor_over_temperature`   → "过"（电气语境：超过）
+  //   `rising_under_normal_load` → "在…下"（条件语境：负载没变的情况下）
+  // 译成"欠"（欠载）只在 `under_load` 这一种里对，而它正好是最常见的反例。
+  // 折中成一字"下"：`温度持续上升下负载` 仍不通顺，但比 `欠正常化负载`
+  // 少一个错误含义；真正通顺要靠 semantic.py 里写死的整句。
+  under: "下",
   rising: "持续上升",
   falling: "持续下降",
   normalized: "正常化",
@@ -141,6 +125,54 @@ const TOKEN: Record<string, string> = {
   event: "事件",
   control: "控制",
   controller: "主控",
+  // ---- 故障词汇表（2026-10-30 补）
+  //
+  // 补之前实测：`joint_motor_temperature_rising_under_normalized_load` 译成
+  // "温度持续上升欠正常化负载"，`POWER_SOC_LOW` 译成"功率电量过低"。
+  // 原因是这些业务词一个都不在表里，`under` 还被当介词译成了"欠"。
+  // 下面这批词专门为**故障/告警**这一路补，覆盖 23 条故障键
+  // 与 22 条规则 ID 里的全部实义词。
+  //
+  // 与 Python 侧 `src/data_dog/go2_sim/semantic.py` 的 `RULE_NAME` 对齐：
+  // 逐词是兜底，那边写死的整句才是首选（例：`MOTOR_TEMP_PROTECT`
+  // 拼出来是"电机温度保护"，而那边给的是"电机过温保护"——后者更像人话）。
+  stall: "堵转",
+  stalled: "停转",
+  slip: "打滑",
+  gait: "步态",
+  crc: "CRC",
+  bandwidth: "带宽",
+  packet: "报文",
+  loss: "丢失",
+  encoder: "编码器",
+  tau: "力矩",
+  bias: "漂移",
+  fallen: "翻倒",
+  fall: "翻倒",
+  joint: "关节",
+  sustained: "持续",
+  jumped: "跳变",
+  jump: "跳变",
+  incomplete: "不完整",
+  invalid: "越界",
+  sanity: "合法性",
+  field: "字段",
+  rate: "率",
+  degrade: "降额",
+  failed: "失效",
+  fail: "失效",
+  lost: "失联",
+  counter: "计数",
+  mode: "模式",
+  flag: "标志",
+  set: "置位",
+  cell: "单体",
+  imbalance: "不均衡",
+  overheat: "过温",
+  overcurrent: "过流",
+  ambient: "环境",
+  hot: "高温",
+  fan: "风扇",
   // glue — recognised but dropped when joining
   of: "",
   the: "",
@@ -214,10 +246,10 @@ function compose(s: string): string {
  */
 export function componentName(ref: string): string {
   const [kindRaw, partRaw] = ref.split(".");
-  const kind = kindRaw ? (COMPONENT_KIND[kindRaw] ?? compose(kindRaw)) : "";
+  const kind = kindRaw ? (COMPONENT_KIND_NAME[kindRaw] ?? compose(kindRaw)) : "";
   const part = partRaw
     ? // exact instance, else compose from position + joint tokens
-      (COMPONENT_PART[partRaw] ?? composePart(partRaw))
+      (COMPONENT_PART_NAME[partRaw] ?? composePart(partRaw))
     : "";
   if (!kind) return part || ref;
   if (!part) return kind;
@@ -225,7 +257,7 @@ export function componentName(ref: string): string {
   return `${part}${kind}`;
 }
 
-/** "rear_right_knee" → "右后膝" even though it is not in COMPONENT_PART. */
+/** "rear_right_knee" → "右后膝" even though it is not in COMPONENT_PART_NAME. */
 function composePart(part: string): string {
   const exact = POSITION[part];
   if (exact) return exact;
@@ -237,19 +269,31 @@ function composePart(part: string): string {
   return compose(part);
 }
 
+/** "F1_stall" → "堵转". Fault keys are a CLOSED set — unknown falls through to compose. */
+export function faultName(key: string): string {
+  return FAULT_NAME[key] ?? compose(key);
+}
+
 /** "motor_over_temperature" → "电机过温" */
 export function eventTypeName(t: string): string {
-  return compose(t);
+  return EVENT_TYPE_NAME[t] ?? compose(t);
 }
 
-/** "temperature_rising_under_normalized_load" → "温度持续上升正常化负载" → tidied. */
+/**
+ * A candidate's signal family → a readable label.
+ *
+ * `signal` is `_signal_of(rule_id, field)`: four semantic buckets
+ * (`temperature_high`, `current_anomaly`, …) plus a fallback that returns the
+ * **bare field name** (`tau_est`, `q`, `lost`, `soc`). The glossary covers all
+ * 15 observed values; composition handles anything new.
+ */
 export function signalName(s: string): string {
-  return compose(s);
+  return SIGNAL_NAME[s] ?? compose(s);
 }
 
-/** "MOTOR_TEMP_PROTECT" → "电机温度保护" */
+/** "MOTOR_TEMP_PROTECT" → "电机过温保护" */
 export function ruleName(r: string): string {
-  return compose(r.toLowerCase());
+  return RULE_NAME[r] ?? compose(r.toLowerCase());
 }
 
 /** "op.temperature_protect:1" → "温度保护算子 v1" */

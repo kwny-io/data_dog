@@ -347,8 +347,10 @@ async function loadFaults(){
     for (const f of arr){
       const o = document.createElement('option');
       o.value = f.key;
-      o.textContent = `${f.key} · ${f.label}`;
-      o.title = f.story + '\n症状：' + f.symptom;
+      // 只显示人话名。`F1_stall` 这类键是给协议用的，摆在选单里
+      // 等于逼值班员先做一次人机翻译——它降到 title，要的时候能看见。
+      o.textContent = f.label;
+      o.title = `${f.key}\n${f.story}\n症状：${f.symptom}`;
       g.appendChild(o);
     }
     sel.appendChild(g);
@@ -567,13 +569,20 @@ function renderCandidates(d){
   }
   box.innerHTML = list.map(c => {
     const sev = (c.severity_hint||c.severity||'info').toLowerCase();
-    const name = c.component_ref || c.component || '—';
+    // 人话名优先。`names` 由服务端按 semantic.py 填好；
+    // 老服务端没有这个字段时退回原始 ref，**不能显示成空白**。
+    const n = c.names || {};
+    const name = n.component || c.component_ref || c.component || '—';
+    const rules = (n.rules && n.rules.length) ? n.rules.join('、') : '';
     const msgs = (c.evidence||[]).map(e => e.message||e.metric).filter(Boolean);
     const msg = msgs.slice(0,2).join('；') || (c.reason||'');
     const tm = (c.window_start || c.occurred_at || '').toString().slice(11,19);
-    return `<div class="cand ${sev}">
+    // title 里留原始标识符 —— 工单和 grep 还要用，只是不该占着头条位置。
+    const raw = [c.component_ref, (c.rule_matches||[]).join(',')].filter(Boolean).join(' · ');
+    return `<div class="cand ${sev}" title="${raw}">
       <div class="top"><span class="nm">${name}</span>
         <span class="sev ${sev}">${sev}</span></div>
+      ${rules ? `<div class="msg">${rules}</div>` : ''}
       ${msg ? `<div class="msg">${msg}</div>` : ''}
       <div class="tm">${tm} · hits=${c.sample_count||c.hit_count||'—'}</div>
     </div>`;

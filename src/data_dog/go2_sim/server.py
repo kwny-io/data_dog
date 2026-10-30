@@ -44,6 +44,7 @@ from .faults import FAULT_LIBRARY, fault_by_key
 from .mqtt_pub import MqttTelemetryPublisher
 from .postures import POSTURES
 from .rig import SimConfig
+from .semantic import component_name, rule_name, signal_name
 from .session import SPEEDS, SimEvent, SimSession
 
 # 演示身份。与 MQTT 侧一致：身份来自信道配置，不来自报文。
@@ -394,7 +395,20 @@ def create_app(*, config: SimConfig | None = None,
 
     @app.get("/api/candidates")
     def candidates(limit: int = Query(20, ge=1, le=200)) -> dict[str, Any]:
-        return {"candidates": sink.candidates(limit), "plane": sink.stats()}
+        # 除了原始标识符，**再带上人话名**。两边都要：
+        # 界面显示 `names`，工单和 grep 仍用 `component_ref` / `rule_matches`。
+        # 不在这里翻译掉原字段——那是线上协议的取值，改了会连带破坏
+        # 数据面的去重键和下发给 data_dog 的那一份。
+        items = sink.candidates(limit)
+        for c in items:
+            c["names"] = {
+                "component": component_name(str(c.get("component_ref") or "")),
+                "rules": [rule_name(str(r)) for r in (c.get("rule_matches") or [])],
+                # signal 是 `_signal_of()` 派生的信号族（`tau_est`/`temperature_high`），
+                # **不是** event_type。用错表会把它翻成不相干的名字。
+                "signal": signal_name(str(c.get("signal") or "")),
+            }
+        return {"candidates": items, "plane": sink.stats()}
 
     # ------------------------------------------------------------ 控制
     @app.post("/api/control")

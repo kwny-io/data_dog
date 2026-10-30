@@ -13,6 +13,7 @@ from typing import Any
 
 from ..core.injection import unwrap
 from ..evidence.store import RECENT_CHANGES
+from ..presentation import component_cn
 
 
 class DeterministicEvidenceProvider:
@@ -90,11 +91,15 @@ class DeterministicEvidenceProvider:
     def _conclusion(comp: str, severity: str, signal: str = "") -> dict[str, Any]:
         changes = RECENT_CHANGES.get(comp, [])
         event_type = DeterministicEvidenceProvider._event_type(comp, signal)
+        # 摘要里放**人话部件名**。原来直接拼 `comp`（`joint_motor.front_left_hip`），
+        # 于是告警详情页的摘要第一句是英文标识符——用户报的正是这个。
+        # 认不出的部件 `component_cn` 原样返回，摘要仍然完整，只是那一截是英文。
+        what_comp = component_cn(comp)
         if severity != "critical":
             return {
                 "disposition": "rejected", "severity": "info", "confidence": 0.85,
                 "event_type": event_type,
-                "summary": f"{comp} 未越过厂商保护阈值，判定为非异常。",
+                "summary": f"{what_comp}未越过厂商保护阈值，判定为非异常。",
                 "hypotheses": [], "missing_evidence": [],
                 "recommended_actions": ["无需处理"],
             }
@@ -103,7 +108,7 @@ class DeterministicEvidenceProvider:
             return {
                 "disposition": "needs_human_review", "severity": "critical",
                 "confidence": 0.6, "event_type": event_type,
-                "summary": (f"{comp} 温度越过厂商保护阈值，但该部件近期有变更（{what}），"
+                "summary": (f"{what_comp}温度越过厂商保护阈值，但该部件近期有变更（{what}），"
                             "无法区分变更效应与真实退化，需人工复核。"),
                 "hypotheses": [{"cause": f"{what} 导致读数偏移", "status": "supported"},
                                {"cause": "真实热退化", "status": "supported"}],
@@ -113,7 +118,7 @@ class DeterministicEvidenceProvider:
         return {
             "disposition": "confirmed", "severity": "critical", "confidence": 0.9,
             "event_type": event_type,
-            "summary": (f"{comp} 温度越过厂商保护阈值，且无变更干扰、证据完整，"
+            "summary": (f"{what_comp}温度越过厂商保护阈值，且无变更干扰、证据完整，"
                         "判为明确热故障。"),
             "hypotheses": [{"cause": "热退化/冷却失效", "status": "supported"}],
             "missing_evidence": [],
