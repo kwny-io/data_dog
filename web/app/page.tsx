@@ -57,7 +57,7 @@ export default function DashboardPage() {
   const trend: TrendPoint[] = useMemo(() => buildTrend(requestsByStatus), [requestsByStatus]);
 
   return (
-    <div className="stagger space-y-5">
+    <div className="apple-ui stagger space-y-5">
       <PageHeading />
 
       {/* Metric row. P95 leads: it is the one number an operator is here to
@@ -197,16 +197,16 @@ export default function DashboardPage() {
       </div>
 
       <Panel variant="quiet" title="后续动作" subtitle="不知道从哪开始时的建议入口">
-        <div className="flex flex-wrap gap-3 p-4">
+        <div className="flex flex-wrap gap-2.5 p-4">
           <Link
             href="/investigate"
-            className="inline-flex items-center gap-2 rounded-[var(--radius-token)] border border-rule-strong bg-panel/50 px-3 py-2 text-sm text-ink transition-colors hover:border-spec-violet/60"
+            className="card-link inline-flex items-center gap-2 rounded-[var(--radius-token)] px-3.5 py-2 text-sm font-medium text-primary"
           >
             去调查台选一个候选开始调查 →
           </Link>
           <Link
             href="/alerts"
-            className="inline-flex items-center gap-2 rounded-[var(--radius-token)] border border-rule-strong bg-panel/50 px-3 py-2 text-sm text-ink transition-colors hover:border-spec-violet/60"
+            className="card-link inline-flex items-center gap-2 rounded-[var(--radius-token)] px-3.5 py-2 text-sm font-medium text-primary"
           >
             查看告警状态机 →
           </Link>

@@ -35,7 +35,7 @@ export default function AlertsPage() {
   const open = rows.find((a) => a.event_id === openId) ?? null;
 
   return (
-    <div className="stagger space-y-4">
+    <div className="apple-ui stagger space-y-4">
       <header>
         <h1 className="text-lg font-semibold text-ink">告警</h1>
         <p className="mt-1 text-sm text-ink-muted">

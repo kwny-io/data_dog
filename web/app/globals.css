@@ -682,3 +682,365 @@ html.lenis body {
     transparent 1.5px 5px
   );
 }
+
+/* ==================================================== 苹果风：页面作用域 *
+ *
+ * 用法：给某个路由的根节点加 `.apple-ui`，该路由整棵子树切换到克制版外观；
+ * 没挂这个类的页面渲染结果**一点不变**。这样做是为了先在一页上验收——
+ * 推广的动作只是把类名加到其它页的根节点，不需要再动样式。
+ *
+ * 为什么是"换变量"而不是"逐个改组件"：组件里写的都是 bg-panel / text-ink /
+ * border-rule 这类语义类，它们的色值来自 `--panel` / `--ink` / `--rule`。
+ * 在作用域里重定义这几个变量，整棵子树（包括我没有逐个碰过的子组件）一起
+ * 换面，也就不存在"这张卡片改了、那张忘了"的半截状态。
+ *
+ * 苹果风在这里的具体含义，逐条对着"原来花哨在哪"：
+ *   毛玻璃 + 饱和 140%   → 实底卡片 + 1px 发丝边
+ *   紫色光晕 / 光晕环     → 一层很浅的中性投影（只为分层级，不该被看见）
+ *   面板顶部流光条        → 去掉
+ *   标题左侧三段彩条      → 去掉；层级靠字号和字重，不靠装饰
+ *   悬停边框染紫          → 悬停只轻微加深投影
+ *   数字下的彩色短线      → 去掉；数字本身已经带色
+ *   光晕点 / 光晕胶囊     → 去掉，实心点即可
+ *   紫色点云 / 噪点 / 暗角 → 去掉，换成一块中性浅底
+ * 品牌色留着，但只出现在该被看见的地方：主数字、状态语义、链接。
+ *
+ * 一处必须成对改的坑：`--radius-token: var(--radius)` 是在 `:root` 上求值的
+ * （自定义属性里的 var() 在声明它的元素上就替换掉了），所以只改 `.apple-ui`
+ * 的 `--radius` 动不了那些写 `rounded-[var(--radius-token)]` 的地方。两个都设。
+ * ---------------------------------------------------------------------- */
+
+/* 令牌挂在 `html:has(.apple-ui)` 上而不是 `.apple-ui` 本身：顶栏、移动端导航、
+   底板 `.console-bg` 都渲染在路由子树之外（布局里），只有挂到 html 这一层，
+   它们才继承得到同一套值。挂载点仍然是页面根节点上的那个类名。 */
+html:has(.apple-ui) {
+  /* 表面：不是一块灰。瓷器白——顶部略暖、底部略冷，卡片浮在这层上才有材质感。
+     纯 #f5f5f7 会把整个控制台压成一张纸，深浅关系全靠投影硬撑，看着廉价。 */
+  --paper: #f0f1f7;
+  --paper-sunken: #e5e7f0;
+
+  /* 卡片是"双色面"：顶部比底部亮一点，模拟一块受光的实体表面。
+     --panel 仍是纯色，给那些只能用单色的地方（表格吸顶、下拉）兜底。 */
+  --panel: #ffffff;
+  --panel-glass: #ffffff;
+  --panel-top: #ffffff;
+  --panel-bot: #f7f8fd;
+  --panel-quiet: color-mix(in srgb, #ffffff 62%, transparent);
+  /* 顶部一道内高光 = 抛光过的棱；底部一道内阴影 = 有厚度。两者都极淡。 */
+  --panel-sheen: rgba(255, 255, 255, 0.95);
+  --panel-shade: rgba(23, 26, 54, 0.035);
+
+  --rule: rgba(23, 26, 54, 0.075);
+  --rule-strong: rgba(23, 26, 54, 0.15);
+  --grid: rgba(23, 26, 54, 0.055);
+
+  --ink: #16171d;
+  --ink-muted: #5f6271;
+  --ink-faint: #8a8d9c;
+
+  --primary-soft: #edebfd;
+
+  --radius: 18px;
+  --radius-token: 18px;
+
+  /* 环境光：三层不同色相的光斑 + 一道底色渐变。这是"背景有层次"的来源，
+     不是装饰——它们的位置和色相决定了整个页面是冷、是暖、是未来还是办公。 */
+  --wash-top: #fbfbfe;
+  --wash-bot: #eaecf5;
+  --ambient-1: rgba(124, 58, 237, 0.14); /* 左上：紫，主光 */
+  --ambient-2: rgba(6, 182, 212, 0.09); /* 右上：青，冷调补光 */
+  --ambient-3: rgba(219, 39, 119, 0.07); /* 右下：品红，暖调收口 */
+  --grain-opacity: 0.028;
+
+  /* 光晕环归零：还留在样式里的 `shadow-[…var(--glow-ring)]` 会自动失效，
+     不必去组件里挨个删。 */
+  --glow-ring: transparent;
+  --glow: var(--apple-shadow);
+
+  /* 四层投影，这是苹果那套"阴影是材质的一部分"的写法：
+     第 1 层贴地（1px，几乎看不见，只负责让卡片离开纸面），
+     第 2 层近影（4px），第 3 层中影（12px），第 4 层大气层（32px）。
+     单层大投影会发灰；四层叠出来的是"悬浮"，不是"脏"。 */
+  --apple-shadow:
+    0 1px 1px rgba(20, 22, 48, 0.035), 0 4px 8px -3px rgba(20, 22, 48, 0.05),
+    0 12px 26px -12px rgba(20, 22, 48, 0.1), 0 32px 64px -34px rgba(20, 22, 48, 0.2);
+  --apple-shadow-hover:
+    0 1px 1px rgba(20, 22, 48, 0.04), 0 6px 12px -4px rgba(20, 22, 48, 0.07),
+    0 18px 36px -16px rgba(20, 22, 48, 0.14), 0 44px 80px -40px rgba(20, 22, 48, 0.26);
+}
+
+.dark:has(.apple-ui) {
+  /* 近黑但不纯黑：留一点点蓝，卡片才浮得起来。纯 #000 只能靠投影分级，
+     在没有环境光的暗面上，投影几乎不可见。 */
+  --paper: #06070d;
+  --paper-sunken: #12141d;
+
+  --panel: #171922;
+  --panel-glass: #171922;
+  --panel-top: #1c1f2a;
+  --panel-bot: #14161e;
+  --panel-quiet: color-mix(in srgb, #1b1e29 58%, transparent);
+  --panel-sheen: rgba(255, 255, 255, 0.075);
+  --panel-shade: rgba(0, 0, 0, 0.35);
+
+  --rule: rgba(255, 255, 255, 0.085);
+  --rule-strong: rgba(255, 255, 255, 0.15);
+  --grid: rgba(180, 205, 255, 0.05);
+
+  --ink: #f2f3f7;
+  --ink-muted: #9a9dab;
+  --ink-faint: #7c7f8e;
+
+  --primary-soft: #221d3c;
+
+  /* 暗色才是这套样式的展示面：紫光要够亮够饱和（这是产品方明确要过的），
+     青和品红只做边缘的色温变化，让人感觉背景有空间，说不出是哪个颜色。 */
+  --wash-top: #0b0d17;
+  --wash-bot: #04050a;
+  --ambient-1: rgba(139, 92, 246, 0.38);
+  --ambient-2: rgba(34, 211, 238, 0.12);
+  --ambient-3: rgba(219, 39, 119, 0.17);
+  --grain-opacity: 0.03;
+
+  --glow: var(--apple-shadow);
+  --apple-shadow:
+    0 1px 1px rgba(0, 0, 0, 0.45), 0 6px 14px -6px rgba(0, 0, 0, 0.55),
+    0 20px 40px -20px rgba(0, 0, 0, 0.7), 0 48px 88px -48px rgba(0, 0, 0, 0.85);
+  --apple-shadow-hover:
+    0 1px 1px rgba(0, 0, 0, 0.5), 0 10px 20px -8px rgba(0, 0, 0, 0.6),
+    0 28px 52px -24px rgba(0, 0, 0, 0.75), 0 60px 100px -52px rgba(0, 0, 0, 0.9);
+}
+
+/* 底板：`ConsoleBackground` 渲染在根布局里、不在路由子树内，所以作用域选择器
+   够不着它。用 `:has()` 从页面根节点反查。
+ *
+ * 这里不再"换成一块纯色"——那是上一版的错，页面塌成一张纸。改成**一层底色
+ * 渐变 + 三层不同色相的环境光**：左上紫（主光）、右上青（冷调补光）、右下品红
+ * （暖调收口）。三层叠起来背景才有纵深，而不会看出"这是哪一块颜色"。
+ *
+ * `.orb` 关掉：它模糊得很重（64px），叠在环境光上会糊成一团雾，且只能有一个
+ * 色相。环境光用更干净的多重径向渐变替掉它。
+ *
+ * 噪点和暗角留着——这两个不是装饰，是**材质**：噪点消除大面积渐变的色带，
+ * 暗角让画面有画框般的收口。轻奢感有一半来自这种"印出来的纸"的质感。
+ * 网格也留着，压到极淡：它是仪表盘的技术骨架，一根都看不见时页面会显得
+ * 太"软件"了。 */
+html:has(.apple-ui) .console-bg {
+  background-color: var(--paper);
+  background-image:
+    radial-gradient(88% 66% at 6% -12%, var(--ambient-1) 0%, transparent 62%),
+    radial-gradient(66% 58% at 102% -6%, var(--ambient-2) 0%, transparent 58%),
+    radial-gradient(78% 68% at 84% 110%, var(--ambient-3) 0%, transparent 64%),
+    linear-gradient(180deg, var(--wash-top) 0%, var(--wash-bot) 100%);
+}
+html:has(.apple-ui) .orb {
+  display: none;
+}
+html:has(.apple-ui) .console-bg::after {
+  opacity: 0.16;
+}
+
+/* 顶栏与移动端导航同样在路由子树之外（AppShell 渲染在布局里），
+   不跟着换就会出现"苹果卡片 + 紫色毛玻璃顶栏"的割裂。用同一个 :has()
+   从页面根节点反查。等这套样式推广到其它页时，这些规则自然一起生效。 */
+html:has(.apple-ui) header.glass,
+html:has(.apple-ui) nav.glass {
+  background: color-mix(in srgb, var(--panel) 72%, transparent);
+  -webkit-backdrop-filter: saturate(200%) blur(24px);
+  backdrop-filter: saturate(200%) blur(24px);
+}
+html:has(.apple-ui) header.glass {
+  border-bottom-color: var(--rule);
+  /* 顶栏不是"一条灰线"，是一块悬在内容上方的玻璃：底部一道内高光 + 一层
+     向下的柔影，滚动时内容从它下面经过会有明确的层次，而不是贴在顶上。 */
+  box-shadow:
+    inset 0 1px 0 0 var(--panel-sheen),
+    0 1px 0 var(--rule),
+    0 12px 28px -22px rgba(20, 22, 48, 0.45);
+}
+
+/* 侧栏当前项：不做成一块灰底（那是设置页的做法）。改成"玻璃胶囊"：
+   一层很淡的紫、一根左侧指示条、一点点向内的光。选中态要被看见，
+   但不要靠高饱和色块喊出来。 */
+html:has(.apple-ui) nav[aria-label="主导航"][class*="w-52"] a[aria-current="page"] {
+  border-left-color: var(--primary);
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--primary) 13%, transparent),
+    color-mix(in srgb, var(--primary) 4%, transparent)
+  );
+  color: var(--ink);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--primary) 14%, transparent);
+}
+/* 移动端导航当前项：同样的胶囊语言。 */
+html:has(.apple-ui) nav.glass a[aria-current="page"] {
+  background-image: linear-gradient(
+    100deg,
+    color-mix(in srgb, var(--primary) 22%, transparent),
+    color-mix(in srgb, var(--primary) 10%, transparent)
+  );
+  background-color: transparent;
+  color: var(--ink);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--primary) 20%, transparent);
+}
+html:has(.apple-ui) nav.glass a[aria-current="page"] > span {
+  display: none;
+}
+
+/* 卡片：不用毛玻璃——模糊在这里没有信息量。改成一整块受光的实体面：
+   - 面本身是自上而下极淡的渐变（顶部亮、底部沉），这是材质感的来源；
+   - 顶部一道 1px 内高光，像抛光边缘被光扫到；
+   - 底部一道内阴影，给这块面厚度。
+   外框不在这里画：Panel 本身带 `border border-rule`，再加一圈 `0 0 0 1px`
+   会叠成 2px，看着像加了粗。投影变量 --apple-shadow 是四层的，见上方注释。 */
+.apple-ui .glass,
+.apple-ui .glow {
+  background-color: var(--panel);
+  background-image: linear-gradient(180deg, var(--panel-top), var(--panel-bot));
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+  box-shadow:
+    inset 0 1px 0 0 var(--panel-sheen),
+    inset 0 -1px 0 0 var(--panel-shade),
+    var(--apple-shadow);
+}
+
+/* 一个可以点的"卡片按钮"：实底 + 发丝边 + 浅投影，悬停把投影推深一格。
+   不写成 `shadow-[var(--apple-shadow)]`：Tailwind v4 的 shadow 工具类生成的
+   是 `box-shadow: var(--tw-inset-shadow), …, var(--tw-shadow)` 一串占位符，
+   直接塞自定义值进去会被相邻的空占位符冲成全透明（实测如此）。 */
+/* card-link 没有 border 类，所以这里的 `0 0 0 1px` 不是重复，是它的外框。 */
+.apple-ui .card-link {
+  background-color: var(--panel);
+  background-image: linear-gradient(180deg, var(--panel-top), var(--panel-bot));
+  box-shadow:
+    inset 0 1px 0 0 var(--panel-sheen),
+    0 0 0 1px var(--rule),
+    var(--apple-shadow);
+  transition:
+    box-shadow var(--dur-1) var(--ease-out-expo),
+    transform var(--dur-1) var(--ease-out-expo);
+}
+.apple-ui .card-link:hover {
+  transform: translateY(-1px);
+  box-shadow:
+    inset 0 1px 0 0 var(--panel-sheen),
+    0 0 0 1px color-mix(in srgb, var(--primary) 30%, var(--rule)),
+    var(--apple-shadow-hover);
+}
+
+/* quiet 面板（`bg-panel/40` + `ring-rule/40`）在苹果风底下会散掉：底色和
+   边框都乘了 40% 透明，浅灰底上分不清面板从哪开始。
+   这里不把它做成白卡——quiet 的语义是"次要"，做成和主卡一样实就毁了层级。
+   改成一层很淡的玻璃面：有边界、有内高光，但明显低于主卡。 */
+.apple-ui section[class*="ring-rule/40"] {
+  background-color: var(--panel-quiet);
+  -webkit-backdrop-filter: blur(12px) saturate(150%);
+  backdrop-filter: blur(12px) saturate(150%);
+  /* 直接写 box-shadow 而不是改 --tw-ring-color：Tailwind 的 ring 是一串
+     box-shadow，本文件又会在别处改写同一个属性，写死一根明确的边更好推。 */
+  box-shadow:
+    inset 0 1px 0 0 var(--panel-sheen),
+    0 0 0 1px var(--rule);
+}
+
+/* 悬停只把投影推深一格；边框不染色。 */
+.apple-ui .lift:hover {
+  border-color: var(--rule);
+  box-shadow:
+    inset 0 1px 0 0 var(--panel-sheen),
+    inset 0 -1px 0 0 var(--panel-shade),
+    var(--apple-shadow-hover);
+}
+
+.apple-ui [data-panel-shimmer] {
+  display: none;
+}
+
+/* 标题左侧的三段彩条去掉，同时撤掉为它留的 10px 左内边距——否则标题会比
+   正文缩进一截，看起来像是漏了图标。 */
+.apple-ui .panel-rake::before {
+  display: none;
+}
+.apple-ui .panel-rake {
+  padding-left: 0;
+}
+
+/* 面板标题：靠字重和字距立层级，不靠装饰。负字距是"精密"的来源——
+   苹果的标题几乎都带一点负字距，它让大字看起来是被设计过的，不是被放大的。 */
+.apple-ui header h2 {
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.014em;
+  color: var(--ink);
+}
+.apple-ui header p {
+  font-size: 12.5px;
+  letter-spacing: -0.005em;
+  color: var(--ink-muted);
+}
+
+/* 标签：无衬线、小、微正字距。正字距配小字号是"铭牌"的感觉（仪表上的刻字），
+   和标题的负字距形成对比，层级因此不用靠颜色区分。 */
+.apple-ui .eyebrow {
+  font-family: var(--font-sans);
+  font-size: 11.5px;
+  font-weight: 500;
+  letter-spacing: 0.03em;
+  color: var(--ink-muted);
+}
+
+/* 主数字：负字距收到 -0.04em，再加一层同色、极淡、大半径的辉光。
+   辉光不是"发光特效"，是让这个数字看起来是**被照亮的**而不是印上去的——
+   深色底上尤其明显，这是这套样式里最贵的一笔。alpha 必须很低（0.22），
+   高了就变成霓虹灯。 */
+.apple-ui [data-metric-hero] span.reading {
+  font-size: 58px;
+  letter-spacing: -0.04em;
+  text-shadow: 0 0 34px color-mix(in srgb, currentColor 22%, transparent);
+}
+
+/* 数字下的色标：之前整条去掉了，理由是"颜色已经在数字上，说两遍"。
+   现在改成 1px 的光谱细线——它不是重复信息，是**刻度**：
+   仪表盘上的每块读数下面都有一根这样的线，页面因此有一致的节奏感。
+   用渐变而不是实色，是为了让这 24px 本身也带一点纵深。 */
+.apple-ui [data-datum-bar] {
+  height: 1.5px;
+  border-radius: 9999px;
+  background-color: transparent;
+  background-image: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--spec-cyan) 85%, transparent),
+    color-mix(in srgb, var(--spec-violet) 90%, transparent) 55%,
+    color-mix(in srgb, var(--spec-magenta) 80%, transparent)
+  );
+  opacity: 0.9;
+}
+
+/* 状态机：导轨不从"彩色光谱"退回"死灰线"——那是两个极端。折中是把它压到
+   很低不透明度的光谱渐变：远看是一根中性的细线，近看才认出方向。
+   实心点的光晕仍然去掉（在深色卡片上会糊成一团）。 */
+.apple-ui [data-state-rail] {
+  background-image: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--spec-cyan) 30%, transparent),
+    color-mix(in srgb, var(--spec-violet) 34%, transparent) 50%,
+    color-mix(in srgb, var(--spec-magenta) 28%, transparent)
+  );
+  background-color: transparent;
+}
+/* `!important` 在这里是必要的而不是偷懒：实心点的光晕写成了行内 style
+ * （`boxShadow: 0 0 10px -1px currentColor`），行内样式的优先级高于任何
+ * 选择器，不加 `!important` 关不掉。改行内样式要动共享组件里跟本页无关的
+ * 分支，代价更大。 */
+.apple-ui [data-dot] {
+  box-shadow: none !important;
+}
+.apple-ui [data-state-pill] {
+  box-shadow: none;
+}
+
+/* 展开用的过渡比原来的入场编排安静：卡片不依次升起，直接到位。 */
+.apple-ui.stagger > * {
+  animation: none;
+}

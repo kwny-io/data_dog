@@ -69,6 +69,7 @@ export function Panel({
       {accent && !quiet && (
         <span
           aria-hidden
+          data-panel-shimmer
           className="pointer-events-none absolute inset-x-0 top-0 z-10 h-px bg-gradient-to-r from-transparent via-spec-violet/60 to-transparent"
         />
       )}
@@ -125,7 +126,7 @@ export function MetricTile({
 
   if (hero) {
     return (
-      <div className={clsx("px-1 py-1", className)}>
+      <div className={clsx("px-1 py-1", className)} data-metric-hero>
         <div className="eyebrow">{label}</div>
         {pending ? (
           <span className="reading mt-2 block text-[64px] font-semibold leading-none text-ink-faint">
@@ -144,7 +145,11 @@ export function MetricTile({
             {unit && <span className="text-sm text-ink-muted">{unit}</span>}
           </div>
         )}
-        <span aria-hidden className={clsx("mt-3 block h-0.5 w-12 rounded-full bg-current", c.text)} />
+        <span
+          aria-hidden
+          data-datum-bar
+          className={clsx("mt-3 block h-0.5 w-12 rounded-full bg-current", c.text)}
+        />
         {hint && <div className="mt-2 text-xs text-ink-faint">{hint}</div>}
       </div>
     );
@@ -169,7 +174,11 @@ export function MetricTile({
           {unit && <span className="text-xs text-ink-muted">{unit}</span>}
         </div>
       )}
-      <span aria-hidden className={clsx("mt-2 block h-0.5 w-8 rounded-full bg-current", c.text)} />
+      <span
+        aria-hidden
+        data-datum-bar
+        className={clsx("mt-2 block h-0.5 w-8 rounded-full bg-current", c.text)}
+      />
       {hint && <div className="mt-1.5 text-xs text-ink-faint">{hint}</div>}
     </Panel>
   );

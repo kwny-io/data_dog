@@ -71,6 +71,7 @@ export function AlertStateMachine({
           <div className="relative flex h-20 items-center justify-between gap-1">
             <span
               aria-hidden
+              data-state-rail
               className="pointer-events-none absolute inset-x-2 top-1/2 h-px -translate-y-1/2 bg-gradient-to-r from-spec-cyan/35 via-spec-violet/40 to-spec-magenta/35"
             />
             {MAINLINE.map((state) => (
@@ -216,6 +217,7 @@ function StateStop({
       )}
     >
       <span
+        data-state-pill
         className={clsx(
           "flex h-6 items-center whitespace-nowrap rounded-full border px-2.5 text-xs font-semibold transition-all",
           c.border,

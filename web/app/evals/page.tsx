@@ -21,7 +21,7 @@ export default function EvalsPage() {
   const adversarial = EVAL_CASES.filter((c) => c.adversarial).length;
 
   return (
-    <div className="stagger space-y-5">
+    <div className="apple-ui stagger space-y-5">
       <header className="flex items-end justify-between gap-4">
         <div>
           <h1 className="text-lg font-semibold text-ink">评估看板</h1>

@@ -64,7 +64,7 @@ export default function OperatorsPage() {
   const totalFired = operators.reduce((n, o) => n + o.count, 0);
 
   return (
-    <div className="stagger space-y-5">
+    <div className="apple-ui stagger space-y-5">
       <header>
         <h1 className="text-lg font-semibold text-ink">算子控制面</h1>
         <p className="mt-1 text-sm text-ink-muted">
