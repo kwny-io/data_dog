@@ -40,13 +40,24 @@ function TopBar() {
         aria-hidden
         className="pointer-events-none absolute inset-x-0 bottom-[-1px] h-px bg-gradient-to-r from-transparent via-spec-violet/45 to-transparent"
       />
-      <div className="mx-auto flex h-14 w-full max-w-[1600px] items-center gap-4 px-4 lg:px-6">
-        <Link href="/" aria-label="遥测故障调查台">
+      {/* 窄屏（<sm）先让内容放得下，再谈好看：
+       *  - 标题文字收起，只留图标——中文标题没有词边界，被挤时会一个字一行，
+       *    在 `h-14` 的固定高度里直接溢出（实测 320px 下标题列高 140px）。
+       *  - "租户""技术字段"两个徽标降到小屏以下：它们的信息在调查台页内仍可读到，
+       *    而"就绪"是值班时会一眼扫的状态，必须留着。
+       * 这里是 `gap-2` 而不是 `gap-4`：四件控件本身已经带了 2 的间距，
+       * 再叠一个大间距，窄屏必然超宽。 */}
+      <div className="mx-auto flex h-14 w-full max-w-[1600px] items-center gap-2 px-4 sm:gap-4 lg:px-6">
+        <Link href="/" aria-label="遥测故障调查台" className="shrink-0">
           <Logo />
         </Link>
-        <div className="ml-auto flex items-center gap-2">
-          <TenantBadge />
-          <TechToggle />
+        <div className="ml-auto flex shrink-0 items-center gap-2">
+          <span className="hidden sm:inline-flex">
+            <TenantBadge />
+          </span>
+          <span className="hidden sm:inline-flex">
+            <TechToggle />
+          </span>
           <HealthBadge />
           <ThemeToggle />
         </div>

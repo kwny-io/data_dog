@@ -6,13 +6,14 @@ PY ?= $(shell if [ -x .venv/bin/python ]; then echo .venv/bin/python; \
               else echo python; fi)
 PORT ?= 8000
 WEB_PORT ?= 3000
+SIM_PORT ?= 8099
 # 演示租户/设备：必须与控台的 DD_WEB_TENANT（compose 默认 tenant-demo）一致，
 # 否则“按文档跑完 ingest，控台永远是空”——数据落在另一个租户，而是多租户隔离在正常工作。
 # 一致性有守卫：tests/test_demo_tenant_consistency.py
 TENANT ?= tenant-demo
 DEVICE_SN ?= device-demo-0001
 
-.PHONY: help gates hooks numbers requirements format install test lint typecheck cov serve probe ingest e2e ui bench up up-prod down down-prod logs ps health clean helm-lint verify-chart k8s-e2e retention partition partition-check cov-gate cov-gate-pg perf-probe config-check
+.PHONY: help gates hooks numbers requirements format install test lint typecheck cov serve dev probe ingest e2e ui bench up up-prod down down-prod logs ps health clean helm-lint verify-chart k8s-e2e retention partition partition-check cov-gate cov-gate-pg perf-probe config-check
 
 help:            ## 显示所有命令
 	@echo "make install  安装依赖(含服务)"
@@ -95,6 +96,9 @@ demo:            ## 一条命令看效果（离线、无网络、无 API Key、�
 serve:           ## 本机起服务（零安装：SQLite 自动建表）
 	@echo "→ http://127.0.0.1:$(PORT)（另开终端跑 make probe 自检）"
 	$(PY) -m data_dog.service
+
+dev:             ## 一键起本地调试三件套：后端(:8000) + 仿真控制台(:8099) + 前端(:3000)
+	PY=$(PY) PORT=$(PORT) SIM_PORT=$(SIM_PORT) WEB_PORT=$(WEB_PORT) bash tools/dev.sh
 
 probe:           ## 探针自检
 	@echo "--- /healthz ---"; curl -s http://127.0.0.1:$(PORT)/healthz; echo

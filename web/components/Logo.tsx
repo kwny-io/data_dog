@@ -42,7 +42,13 @@ export function Logo({ compact = false }: { compact?: boolean }) {
         </svg>
       </span>
       {!compact && (
-        <span className="text-spectrum text-sm font-semibold tracking-tight">遥测故障调查台</span>
+        /* `whitespace-nowrap` 是必需的，不是修饰：文本默认会在窄到一定程度时
+         * 逐字断行（中文没有词边界，浏览器就一个字一行），把 56px 宽的标题列
+         * 撑成 140px 高的竖条——而父级 `h-14` 是固定高度，于是溢出。
+         * 窄屏直接交给外层隐藏，别让它以"先竖排再说"的方式参与争抢宽度。 */
+        <span className="text-spectrum hidden whitespace-nowrap text-sm font-semibold tracking-tight sm:inline">
+          遥测故障调查台
+        </span>
       )}
     </span>
   );
