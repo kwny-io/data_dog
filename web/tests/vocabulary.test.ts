@@ -43,6 +43,10 @@ describe("vocabulary — graceful degradation", () => {
     // "tau_est" as the first line of a candidate card.
     expect(signalName("tau_est")).toBe("估计力矩");
     expect(signalName("temperature_high")).toBe("温度过高");
+    // `POWER_SOC_LOW` is declared twice with different fields (simulator: soc,
+    // real pipeline: bms_soc). Both reach the card — the second one showed up
+    // as "bms soc" because only the first was in the table.
+    expect(signalName("bms_soc")).toBe("电量");
     // Unlisted values still degrade through composition, never raw snake_case.
     expect(signalName("some_new_signal")).not.toMatch(/_/);
   });

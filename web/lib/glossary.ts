@@ -113,7 +113,11 @@ export const SIGNAL_NAME: Record<string, string> = {
   tau_est: "估计力矩",
   q: "关节角度",
   lost: "失联计数",
+  // `POWER_SOC_LOW` is declared twice with different fields: the simulator
+  // uses the payload key `soc`, the real pipeline uses the IDL-mapped
+  // `bms_soc`. Both reach the card, so both need a name.
   soc: "电量",
+  bms_soc: "电量",
   power_v: "母线电压",
   cell_v_spread: "单体压差",
   fan_frequency: "风扇转速",

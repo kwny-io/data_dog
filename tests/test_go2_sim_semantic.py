@@ -25,6 +25,7 @@
 """
 from __future__ import annotations
 
+import ast
 import re
 from pathlib import Path
 
@@ -59,28 +60,66 @@ _RULE_SOURCES_PY = (
 )
 _RULE_SOURCE_YAML = _ROOT / "operators/generated"
 
+# 规则 ID 的形状：全大写、数字、下划线。用来从字面量里区分"这是规则 ID"。
+_RULE_ID_RE = re.compile(r"[A-Z][A-Z0-9_]+")
 
-def _extract_rules() -> dict[str, str]:
-    """从**全部**声明处捞 (rule_id -> field)。
 
-    三种声明风格并存，都要认：
+def _extract_rules() -> set[tuple[str, str]]:
+    """从**全部**声明处捞 (rule_id, field) 对——注意是**对**，不是 rule_id 去重。
+
+    ⚠ 同一个 rule_id 可以在多处声明**不同的 field**：`POWER_SOC_LOW` 在
+      `p1_demo.py` 里是 `bms_soc`（真链路，字段来自 IDL 映射），在
+      `subsystem_operator.py` 里是 `soc`（仿真器载荷）。按 rule_id 去重会让
+      后写的那份**覆盖**前一份，于是真链路的 `bms_soc` 永远不进检查范围。
+      实测就是这样：字典版全绿，线上候选卡片显示 "bms soc"。
+
+    **四种**声明风格并存，都要认：
       - `subsystem_operator.py`：`rule("POWER_SOC_LOW", "soc", "le", ...)`
-      - `p1_demo.py`：`{"rule_id": "MOTOR_LOAD_SPIKE", ... "field": "tau_est"}`
+      - `p1_demo.py` 字典式：`{"rule_id": "MOTOR_LOAD_SPIKE", ... "field": "tau_est"}`
+      - `p1_demo.py` 关键字式：`DeclarativeRule(rule_id="POWER_SOC_LOW", field="bms_soc", ...)`
       - `operators/generated/*.yaml`：`rule_id: BATT_SOC_LOW` / `field: soc`
+
+    ⚠ 关键字式是**第三次**才发现漏掉的，前两次漏的是"来源文件"和"YAML"。
+      漏它的后果不是少测一条，而是**凭空造出一个不存在的信号族**：
+      `POWER_SOC_LOW` 在关键字式里 field 是 `bms_soc`，漏掉后被 `rule(...)`
+      那一版配对成 `soc` → 推出信号族 `soc`（已登记，测试全绿），
+      而线上真实值是 `bms_soc`（**没登记**，界面显示 "bms soc"）。
+      测试通过、界面漏，和前面两个坑是同一个形状：**表只覆盖了我想到的那部分。**
 
     YAML 那一路用正则而不用 yaml 解析器：只取两个标量字段，正则够用，
     且不引入"YAML 版本不同解析出的结构不同"这种额外变量。
     """
-    found: dict[str, str] = {}
+    found: set[tuple[str, str]] = set()
     for p in _RULE_SOURCES_PY:
-        text = p.read_text(encoding="utf-8")
-        for m in re.finditer(r'rule\(\s*"([A-Z][A-Z0-9_]+)",\s*"([a-z_0-9]+)"', text):
-            found[m.group(1)] = m.group(2)
-        for m in re.finditer(
-            r'\{\s*\n\s*"rule_id": "([A-Z][A-Z0-9_]+)"(.*?)\n        \},', text, re.S
-        ):
-            fm = re.search(r'"field": "([a-z_0-9]+)"', m.group(2))
-            found[m.group(1)] = fm.group(1) if fm else ""
+        tree = ast.parse(p.read_text(encoding="utf-8"), filename=str(p))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                # `rule("ID", "field", ...)` —— 位置参数
+                if (getattr(node.func, "id", "") == "rule"
+                        and len(node.args) >= 2
+                        and all(isinstance(a, ast.Constant) and isinstance(a.value, str)
+                                for a in node.args[:2])):
+                    found.add((node.args[0].value, node.args[1].value))
+                    continue
+                # `DeclarativeRule(rule_id="ID", field="f", ...)` —— 关键字参数
+                kw = {k.arg: k.value for k in node.keywords if k.arg}
+                rid = kw.get("rule_id")
+                if (isinstance(rid, ast.Constant) and isinstance(rid.value, str)
+                        and _RULE_ID_RE.fullmatch(rid.value)):
+                    fld = kw.get("field")
+                    found.add((rid.value,
+                               fld.value if isinstance(fld, ast.Constant)
+                               and isinstance(fld.value, str) else ""))
+            elif isinstance(node, ast.Dict):
+                # `{"rule_id": "ID", "field": "f", ...}` —— 字典字面量
+                kv = {}
+                for k, v in zip(node.keys, node.values, strict=True):
+                    if (isinstance(k, ast.Constant) and isinstance(k.value, str)
+                            and isinstance(v, ast.Constant) and isinstance(v.value, str)):
+                        kv[k.value] = v.value
+                rid = kv.get("rule_id")
+                if rid and _RULE_ID_RE.fullmatch(rid):
+                    found.add((rid, kv.get("field", "")))
 
     for y in sorted(_RULE_SOURCE_YAML.glob("*.yaml")):
         text = y.read_text(encoding="utf-8")
@@ -92,7 +131,7 @@ def _extract_rules() -> dict[str, str]:
             if not rid:
                 continue
             fld = re.search(r"^\s*field:\s*([a-z_0-9]+)", block, re.M)
-            found[rid.group(1)] = fld.group(1) if fld else ""
+            found.add((rid.group(1), fld.group(1) if fld else ""))
     return found
 
 
@@ -108,22 +147,23 @@ def test_every_rule_has_a_chinese_name() -> None:
     这条是钉坑 1 的：只照着仿真器抄表时，`BATT_SOC_LOW` 这类真算子的规则
     不在表里，`rule_name()` 会退化成 "Batt soc low" 混到界面上。
     """
-    rules = _extract_rules()
-    assert len(rules) >= 20, f"只捞到 {len(rules)} 条规则，提取式样可能失效了"
+    pairs = _extract_rules()
+    rule_ids = {rid for rid, _ in pairs}
+    assert len(rule_ids) >= 20, f"只捞到 {len(rule_ids)} 条规则，提取式样可能失效了"
 
-    missing = sorted(r for r in rules if r not in RULE_NAME)
+    missing = sorted(r for r in rule_ids if r not in RULE_NAME)
     assert not missing, (
         f"这些规则没有登记中文名，界面上会显示成下划线串：{missing}\n"
         f"补进 src/data_dog/go2_sim/semantic.py 的 RULE_NAME，"
         f"以及 web/lib/glossary.ts 的 RULE_NAME。"
     )
 
-    for rid in rules:
+    for rid in rule_ids:
         name = rule_name(rid)
         assert _has_cjk(name), f"{rid} 翻出来是 {name!r}，没有中文"
         assert "_" not in name, f"{rid} 翻出来是 {name!r}，还带着下划线"
 
-    print(f"PASS test_every_rule_has_a_chinese_name ({len(rules)} 条规则)")
+    print(f"PASS test_every_rule_has_a_chinese_name ({len(rule_ids)} 条规则)")
 
 
 def test_every_signal_has_a_chinese_name() -> None:
@@ -132,8 +172,8 @@ def test_every_signal_has_a_chinese_name() -> None:
     这条是钉坑 2 的：`signal` 来自 `_signal_of(rule_id, field)`，归不进
     四个语义桶时**原样返回字段名**。实测控制台第一张候选卡就是 `tau_est`。
     """
-    rules = _extract_rules()
-    signals = {_signal_of(rid, fld) for rid, fld in rules.items()}
+    pairs = _extract_rules()
+    signals = {_signal_of(rid, fld) for rid, fld in pairs}
     assert len(signals) >= 10, f"只推出 {len(signals)} 个信号族，提取式样可能失效了"
 
     missing = sorted(s for s in signals if s not in SIGNAL_NAME)

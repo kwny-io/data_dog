@@ -138,7 +138,13 @@ SIGNAL_NAME: dict[str, str] = {
     "tau_est": "估计力矩",
     "q": "关节角度",
     "lost": "失联计数",
+    # 同一个 `POWER_SOC_LOW` 在两处声明了**不同的 field**：
+    # 仿真器 `subsystem_operator.py` 用载荷键 `soc`，
+    # 真链路 `p1_demo.py` 用 IDL 映射后的标准名 `bms_soc`。
+    # 两个值都会出现在候选卡片上，**都要登记**——只登记 `soc` 时，
+    # 真链路的候选显示成 "bms soc"（实测，2026-10-30）。
     "soc": "电量",
+    "bms_soc": "电量",
     "power_v": "母线电压",
     "cell_v_spread": "单体压差",
     "fan_frequency": "风扇转速",
