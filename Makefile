@@ -13,7 +13,7 @@ SIM_PORT ?= 8099
 TENANT ?= tenant-demo
 DEVICE_SN ?= device-demo-0001
 
-.PHONY: help gates hooks numbers requirements format install test lint typecheck cov serve dev probe ingest e2e ui bench up up-prod down down-prod logs ps health clean helm-lint verify-chart k8s-e2e retention partition partition-check cov-gate cov-gate-pg perf-probe config-check
+.PHONY: help gates hooks numbers requirements format install test lint typecheck cov serve dev dev-stop dev-status dev-restart dev-logs probe ingest e2e ui bench up up-prod down down-prod logs ps health clean helm-lint verify-chart k8s-e2e retention partition partition-check cov-gate cov-gate-pg perf-probe config-check
 
 help:            ## 显示所有命令
 	@echo "make install  安装依赖(含服务)"
@@ -30,6 +30,8 @@ help:            ## 显示所有命令
 	@echo "make cov-gate 单模块覆盖率门禁(默认腿, 下限 70%)"
 	@echo "make cov-gate-pg PG 腿门禁(PG-only 文件, 下限 80%)"
 	@echo "make serve    本机起服务(不用 Docker)"
+	@echo "make dev      一键起三件套(后台守护): 后端:8000 + 仿真:8099 + 前端:3000"
+	@echo "make dev-stop   / dev-status / dev-restart / dev-logs"
 	@echo "make probe    探存活/就绪/指标"
 	@echo "make bench    P4-8 软实时基准(起服务→压测→出报告)"
 	@echo "make retention 数据保留清理(默认 dry-run; FORCE=1 真删)"
@@ -97,8 +99,20 @@ serve:           ## 本机起服务（零安装：SQLite 自动建表）
 	@echo "→ http://127.0.0.1:$(PORT)（另开终端跑 make probe 自检）"
 	$(PY) -m data_dog.service
 
-dev:             ## 一键起本地调试三件套：后端(:8000) + 仿真控制台(:8099) + 前端(:3000)
-	PY=$(PY) PORT=$(PORT) SIM_PORT=$(SIM_PORT) WEB_PORT=$(WEB_PORT) bash tools/dev.sh
+dev:             ## 一键起本地调试三件套（后台守护，命令立刻返回）
+	PY=$(PY) PORT=$(PORT) SIM_PORT=$(SIM_PORT) WEB_PORT=$(WEB_PORT) bash tools/dev.sh start
+
+dev-stop:        ## 停掉 dev 起的三件套（只停自己人，不误杀）
+	PY=$(PY) PORT=$(PORT) SIM_PORT=$(SIM_PORT) WEB_PORT=$(WEB_PORT) bash tools/dev.sh stop
+
+dev-status:      ## 看三件套现在什么状态
+	PY=$(PY) PORT=$(PORT) SIM_PORT=$(SIM_PORT) WEB_PORT=$(WEB_PORT) bash tools/dev.sh status
+
+dev-restart:     ## 停掉再起
+	PY=$(PY) PORT=$(PORT) SIM_PORT=$(SIM_PORT) WEB_PORT=$(WEB_PORT) bash tools/dev.sh restart
+
+dev-logs:        ## 跟三件套日志（Ctrl-C 只退出日志，服务继续跑）
+	bash tools/dev.sh logs
 
 probe:           ## 探针自检
 	@echo "--- /healthz ---"; curl -s http://127.0.0.1:$(PORT)/healthz; echo

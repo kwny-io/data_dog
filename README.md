@@ -23,7 +23,7 @@
 | 📊 | **带 ground truth 的规模化评估（双栏）** | **忠实 MuJoCo 数据集 10 万条**，分层抽跑真实 Agent：**确定性 provider** n=2000 → **准确率 0.818**（Wilson 95% CI 0.801–0.834）、normal 误报率 **0.064**；**真 LLM** n=500 → **0.708**（0.667–0.746）、normal 误报率 **0.72**（故障召回反而更高）。逐类召回一并如实报（**F4 偏置 0.43 为当前最低**）；误报根因（裁决口径把"证据不足"与"证据充分但正常"混为一谈）**已定位并改口径，效果标注为未实测**（本机 key 余额为零）；另有 7 个评估 case（含 2 个对抗性：提示注入 / 身份伪装） |
 | 🚚 | **能交付：服务 + 容器 + HTTPS** | FastAPI（liveness / readiness 分离）+ Dockerfile + compose（含 Caddy 自动申请 HTTPS）+ Makefile |
 
-**规模**：源码 172 个 Python 文件 / 37351 行，测试 136 个文件 / 31552 行；前端 `web/` 为 Next.js 15 控制台（77 个 TS/TSX 文件）；5 份正式事件 JSON Schema；42 个 `make` 命令（另有 `help`）。
+**规模**：源码 172 个 Python 文件 / 37351 行，测试 136 个文件 / 31552 行；前端 `web/` 为 Next.js 15 控制台（77 个 TS/TSX 文件）；5 份正式事件 JSON Schema；46 个 `make` 命令（另有 `help`）。
 
 ---
 
@@ -118,7 +118,20 @@ data-dog test --offline --all
 **产品控制台是 `web/`**（Next.js 15，5 个页面：告警 / 评测 / 调查 / 运维 / 首页）。
 `ui/` 下的 Streamlit 页面只作演示/离线对比（A10 收敛决定：不再往它加产品功能）。
 
-起控制台（Node 20+；实测 Node 24 可用，启动约 17s）：
+**想一次起齐三块（后端 + 仿真控制台 + 前端），用一键脚本**——它在后台守护，
+命令立刻返回，关掉终端也不影响，之后可以单独 `stop` / `status`：
+
+```bash
+make dev          # 等价于 bash tools/dev.sh start
+make dev-status   # 三块各在跑没跑、pid 多少
+make dev-logs     # 跟日志（Ctrl-C 只退出日志，服务继续跑）
+make dev-stop     # 停掉；只停脚本自己起的，不误杀别的进程
+make dev-restart  # 停掉再起
+```
+
+换端口：`PORT=8011 SIM_PORT=8099 WEB_PORT=3000 bash tools/dev.sh start`。
+
+也可以只起控制台（Node 20+；实测 Node 24 可用，启动约 17s）：
 
 ```bash
 cd web

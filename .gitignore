@@ -19,6 +19,13 @@
 # 本地工具会话状态（非项目代码）
 .mimosa/
 
+# dev.sh 的运行时产物：日志、pid 文件、就绪标记。都是本机每次跑出来的，
+# 含端口/pid 这类跟机器绑定的东西，进版本库没有意义。
+.dev-logs/
+
+# MuJoCo 运行日志（仿真器每次启动覆写，属于本机产物）
+MUJOCO_LOG.TXT
+
 # Python
 __pycache__/
 *.py[cod]
