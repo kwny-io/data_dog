@@ -342,9 +342,12 @@ def test_no_private_paths_are_tracked():
     # `make ci-offline` 在 Windows 上会把 `bash` 解析成 WSL 的 bash，而 WSL 看不到 `D:\`，
     # 于是验证台“没跑”却看起来像跑了。这个 .bat 只是用 Git 自带的 bash 转发给 .sh，
     # 是可复现性的一部分，不是个人草稿。
+    # `dev.bat` 同理：Windows 上 `bash` 会解析成 WSL 的 bash（看不到 D:\），
+    # 一键启动必须显式找 Git for Windows 的 bash。它是产品入口，不是个人草稿。
     allowed = {
         ".env.example",
         "scripts/verify_ci_offline.bat",
+        "dev.bat",
     }
 
     bad: list[str] = []

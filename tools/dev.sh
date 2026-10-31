@@ -457,9 +457,10 @@ cmd_start() {
   后台跑着，关掉这个终端不影响。
   停：bash tools/dev.sh stop      状态：bash tools/dev.sh status
   日志：.dev-logs/{api,sim,web}.log
+  Windows 上也可以直接用 dev.bat（同一个脚本的入口，不用敲 bash）
 
   想看后端那条完整链路（候选→调查→报告），先灌一条演示日志：
-    make ingest      # 96°C 过温，应产出 critical 候选
+    bash tools/ingest_demo.sh       # 96°C 过温，应产出 critical 候选
 EOF
 
   if [ "$follow" -eq 1 ]; then

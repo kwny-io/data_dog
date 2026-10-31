@@ -120,13 +120,7 @@ probe:           ## 探针自检
 	@echo "--- /metrics ---"; curl -s http://127.0.0.1:$(PORT)/metrics; echo
 
 ingest:          ## 发一条演示日志(96°C 过温 → 应产出 critical 候选)
-	curl -s -X POST http://127.0.0.1:$(PORT)/v1/telemetry \
-	  -H "Content-Type: application/json" \
-	  -H "X-Tenant-Id: $(TENANT)" \
-	  -H "X-Device-Sn: $(DEVICE_SN)" \
-	  -d '{"events":[{"event_id":"e1","occurred_at":"2026-09-13T10:00:00Z","received_at":"2026-09-13T10:00:00.1Z","sequence":1,"vendor":"unitree","model":"go2","firmware":"3.2.1","protocol_version":"motor-log-v2","component_hint":"joint_motor.front_left_hip","payload_inline":"{\"temperature\":96,\"current\":12.0,\"mode\":0}"}]}'
-	@echo
-	@echo "→ 控台看这条：http://127.0.0.1:$(WEB_PORT)（租户 $(TENANT)，需与控台 DD_WEB_TENANT 一致）"
+	PORT=$(PORT) TENANT=$(TENANT) DEVICE_SN=$(DEVICE_SN) bash tools/ingest_demo.sh
 
 e2e:             ## 端到端整链回放
 	$(PY) -m data_dog.e2e.replay_demo

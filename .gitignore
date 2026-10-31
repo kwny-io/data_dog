@@ -89,6 +89,8 @@ benchmarks/last_run.txt
 # 真正要留下的是结论：docs/ci-offline.md 与 artifacts/ci-offline 的回执。
 /diag/
 /*.bat
+# 例外：根目录的一键启动入口是产品的一部分，不是本地临时脚本。
+!/dev.bat
 /.ledger_*.md
 artifacts/
 pip-audit.json

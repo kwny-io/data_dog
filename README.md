@@ -44,7 +44,7 @@
 | **能交付** | FastAPI（存活/就绪分离）+ Dockerfile + compose（Caddy 自动 HTTPS）+ Helm chart（含 PrometheusRule） |
 | **测试全离线确定性** | `pytest -q` 本机全绿，fake provider，无需 API Key、不联网；真 PG / Redis 两腿由 CI 实测 |
 
-**规模**：源码 172 个 Python 文件 / 37431 行，测试 138 个文件 / 33187 行（138 个测试文件，全离线跑）；前端 `web/` 为 Next.js 15 控制台（77 个 TS/TSX 文件）；5 份正式事件 JSON Schema；46 个 `make` 命令（另有 `help`）。
+**规模**：源码 172 个 Python 文件 / 37431 行，测试 138 个文件 / 33190 行（138 个测试文件，全离线跑）；前端 `web/` 为 Next.js 15 控制台（77 个 TS/TSX 文件）；5 份正式事件 JSON Schema；46 个 `make` 命令（另有 `help`）。
 
 ---
 
@@ -73,7 +73,20 @@ make dev-logs     # 跟日志（Ctrl-C 只退出日志）
 make dev-stop     # 只停脚本自己起的进程
 ```
 
-换端口：`PORT=8011 SIM_PORT=8099 WEB_PORT=3000 bash tools/dev.sh start`。
+Windows 没装 `make` 时，用根目录的 `dev.bat`，一条命令等价：
+
+```bat
+dev.bat           :: 启动（双击或终端里敲都行）
+dev.bat status
+dev.bat logs
+dev.bat stop
+dev.bat restart
+```
+
+`dev.bat` 只做一件事：找到 Git for Windows 自带的 `bash.exe`。cmd / PowerShell 里的
+`bash` 会解析到 WSL，而 WSL 看不到 `D:\`。逻辑仍全在 `tools/dev.sh` 里，两边不分叉。
+
+换端口：`PORT=8011 SIM_PORT=8099 WEB_PORT=3000 bash tools/dev.sh start`（`dev.bat` 同样认这些环境变量）。
 
 产品控制台是 `web/`（Next.js 15，5 个页面）。只起前端的话：
 
@@ -289,10 +302,10 @@ docker compose up -d --build --profile web # 连控制台一起
 控台默认读租户 `tenant-demo`。要让页面有数据，投一条演示日志：
 
 ```bash
-make ingest    # 96°C 过温日志 → 产出一个候选
+bash tools/ingest_demo.sh    # 96°C 过温日志 → 产出一个候选（make ingest 是它的别名）
 ```
 
-`make ingest` 默认投的也是 `tenant-demo`，两侧必须一致，投到别的租户的数据不会出现在控台——
+默认投的租户也是 `tenant-demo`，两侧必须一致，投到别的租户的数据不会出现在控台——
 这是多租户隔离在正常工作。这条一致性有测试守着。
 
 `--build` 该带就带：首次构建要装全部依赖，之后增量重建约 1 分钟且不重装依赖。
