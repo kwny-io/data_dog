@@ -94,9 +94,11 @@ def _fit(img, width: int, height: int):
     if out.size == (width, height):
         return img
     scale = max(width / out.width, height / out.height)
+    # `Image.LANCZOS` 在 Pillow 12 里只剩运行期兼容别名，类型存根已移除；
+    # 走 `Image.Resampling.LANCZOS`（Pillow 9.1+）既是存根支持的写法，
+    # 也是官方推荐写法。本仓 pin 的是 pillow>=10.0，不会掉回旧名。
     mid = out.resize((max(1, round(out.width * scale)),
-                      max(1, round(out.height * scale))),
-                     Image.Resampling.LANCZOS)
+                      max(1, round(out.height * scale))), Image.Resampling.LANCZOS)
     left = (mid.width - width) // 2
     top = (mid.height - height) // 2
     return np.asarray(mid.crop((left, top, left + width, top + height)))
@@ -861,8 +863,7 @@ class Go2Sim:
         q = d.qpos[3:7]
         g_world = np.array([0.0, 0.0, -9.81])
         a_world = acc + g_world
-        rot = _quat_to_mat((float(q[0]), float(q[1]),
-                            float(q[2]), float(q[3])))
+        rot = _quat_to_mat((float(q[0]), float(q[1]), float(q[2]), float(q[3])))
         a_body = rot.T @ a_world
         return (float(a_body[0]), float(a_body[1]), float(a_body[2]))
 
@@ -898,9 +899,9 @@ class Go2Sim:
         """
         d = self._data
         out = [0.0, 0.0, 0.0, 0.0]
-        q = d.qpos[3:7]
-        rot = _quat_to_mat((float(q[0]), float(q[1]),
-                            float(q[2]), float(q[3])))
+        qpos = d.qpos
+        rot = _quat_to_mat((float(qpos[3]), float(qpos[4]),
+                            float(qpos[5]), float(qpos[6])))
         for leg, bid in self._leg_to_foot_body.items():
             vel = np.zeros(6)
             # flg_local=0 → 前 3 项是世界系线速度
@@ -952,8 +953,12 @@ class Go2Sim:
                 cam.lookat[:] = [float(self._data.qpos[0]),
                                  float(self._data.qpos[1]), 0.20]
                 self._camera = cam
+            # 重新取一次并断言非 None：上面 if 分支里刚赋值，但属性本身
+            # 声明为 Optional，mypy 不会跨分支推断属性。
+            renderer = self._renderer
             cam = self._camera
-            assert cam is not None          # 上面刚建好；收窄类型给检查器看
+            if renderer is None or cam is None:
+                raise RuntimeError("渲染器初始化失败：_renderer/_camera 仍为 None")
             # 相机跟随机身，否则狗跑出画面
             cam.lookat[:] = [float(self._data.qpos[0]),
                              float(self._data.qpos[1]), 0.20]
@@ -963,8 +968,8 @@ class Go2Sim:
                     "MuJoCo 离屏渲染只能在建渲染器的线程调用"
                     f"（建在 {self._gl_thread}，现在 {threading.get_ident()}）。"
                     "HTTP 层请用 SimSession.frame_jpeg() 读缓存帧。")
-            self._renderer.update_scene(self._data, camera=cam)
-            img = self._renderer.render()
+            renderer.update_scene(self._data, camera=cam)
+            img = renderer.render()
         return _fit(img, width, height)
 
     def render_jpeg(self, width: int = 640, height: int = 400,

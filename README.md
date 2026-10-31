@@ -44,7 +44,7 @@
 | **能交付** | FastAPI（存活/就绪分离）+ Dockerfile + compose（Caddy 自动 HTTPS）+ Helm chart（含 PrometheusRule） |
 | **测试全离线确定性** | `pytest -q` 本机全绿，fake provider，无需 API Key、不联网；真 PG / Redis 两腿由 CI 实测 |
 
-**规模**：源码 172 个 Python 文件 / 37411 行，测试 136 个文件 / 31592 行（136 个测试文件，全离线跑）；前端 `web/` 为 Next.js 15 控制台（77 个 TS/TSX 文件）；5 份正式事件 JSON Schema；46 个 `make` 命令（另有 `help`）。
+**规模**：源码 172 个 Python 文件 / 37431 行，测试 138 个文件 / 33187 行（138 个测试文件，全离线跑）；前端 `web/` 为 Next.js 15 控制台（77 个 TS/TSX 文件）；5 份正式事件 JSON Schema；46 个 `make` 命令（另有 `help`）。
 
 ---
 

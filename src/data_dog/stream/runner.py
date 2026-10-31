@@ -96,7 +96,9 @@ def _metric_consume_latency(msgs: list[StreamMessage]) -> None:
         return
     try:
         from ..core import metrics
-        metrics.stream_consume_latency_seconds.observe(time.monotonic() - min(stamps))
+        # 与 enqueued_at 的打点时钟必须一致（见 StreamMessage 的说明）：
+        # monotonic 在 Windows 上 16ms 起步，消费延迟量出来非 0 即 16。
+        metrics.stream_consume_latency_seconds.observe(time.perf_counter() - min(stamps))
     except Exception:                                       # noqa: BLE001
         pass
 
@@ -247,7 +249,8 @@ class StreamRunner:
     # ---- 一批消息 ----
     def _drain(self, msgs: list[StreamMessage]) -> None:
         self.stats["messages"] += len(msgs)
-        now = time.monotonic()
+        # 与 _metric_consume_latency 的相减时钟同源（见 StreamMessage.enqueued_at）
+        now = time.perf_counter()
         for msg in msgs:
             # 源未打点（enqueued_at=0）时补当前时刻，保证消费延迟指标有基线可测；
             # 源已打点则尊重源侧更准的"到达"时刻。

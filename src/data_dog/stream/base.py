@@ -41,8 +41,11 @@ class StreamMessage:
     payload: dict[str, Any]
     auth: dict[str, Any] | None
     source: str = ""
-    # 消息进入消费循环的时刻（`time.monotonic()`），用于测消费延迟
+    # 消息进入消费循环的时刻（`time.perf_counter()`），用于测消费延迟
     # （收到 → 落库完成）。默认 0 表示"未打点"，此时不计消费延迟。
+    #
+    # **必须是 perf_counter，不能用 monotonic**：Windows 上 monotonic 的分辨率
+    # 只有 16ms，而消费延迟通常就在毫秒级——量出来不是 0 就是 16，指标直接失真。
     enqueued_at: float = 0.0
 
 

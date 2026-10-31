@@ -287,6 +287,8 @@ class SimSession:
             out = Image.open(io.BytesIO(data))
             # 等比铺满再居中裁切，避免把狗拉变形
             scale = max(w / out.width, h / out.height)
+            # 同 rig._fit：`Image.Resampling.LANCZOS` 是 Pillow 9.1+ 的
+            # 正式写法，`Image.LANCZOS` 已从类型存根移除。
             mid = out.resize((max(1, round(out.width * scale)),
                               max(1, round(out.height * scale))),
                              Image.Resampling.LANCZOS)
@@ -405,7 +407,9 @@ class SimSession:
                     or self.stats.publish_failed % 100 == 0):
                 self.stats.drop_reason = (
                     f"{type(e).__name__}: {e} "
-                    f"(共 {self.stats.publish_failed} 条)")
+                    # `publish_failed` 一个遥测点只加一次（一次 `_publish`
+                    # 调用 = 一个点 = 一帧），所以单位是"帧"，不是"条"。
+                    f"(共 {self.stats.publish_failed} 帧)")
 
     def history(self, n: int = 200) -> list[Telemetry]:
         with self._hist_lock:

@@ -254,11 +254,11 @@ class ImuModel:
             # 加速度计失效：模长偏离 1g（如灵敏度掉了 30%）
             a = a * 0.70
         self._T += (25.0 + extra_temp - self._T) * dt / 120.0
-        # 展成显式三元/四元：`tuple(... for ...)` 的推断类型是 `tuple[float, ...]`
-        # （长度未知），与 IDL 对齐的定长字段不兼容，检查器会拒。
+        # 逐项取值而不是 `tuple(... for v in ...)`：后者在类型上是变长
+        # `tuple[float, ...]`，与 ImuState 声明的定长三元/四元组对不上。
+        qw, qx, qy, qz = (float(v) for v in quat)
         return ImuState(
-            quat=(float(quat[0]), float(quat[1]),
-                  float(quat[2]), float(quat[3])),
+            quat=(qw, qx, qy, qz),
             gyro=(float(g[0]), float(g[1]), float(g[2])),
             accel=(float(a[0]), float(a[1]), float(a[2])),
             rpy=rpy, temperature=float(self._T),

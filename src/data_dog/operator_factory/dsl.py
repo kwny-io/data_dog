@@ -312,18 +312,18 @@ def packet_coverage_of(seqs: Sequence[int | None]) -> dict[str, Any]:
       - 不足两条（一条算不出"相邻差"）；
       - 任一条缺序列号（不知道就别说，别把"没给"当成"没丢"）。
     """
-    if len(seqs) < 2 or any(s is None for s in seqs):
+    # 过滤掉 None 而不是只做 `any(... is None)` 判断：后者能让类型留在
+    # `int | None`，下面的 `b - a` 就过不了类型检查。`len(nums) != len(seqs)`
+    # 与"存在 None"等价，判据没变。
+    nums = [s for s in seqs if s is not None]
+    if len(nums) < 2 or len(nums) != len(seqs):
         return {"known": False, "expected": 0, "arrived": 0, "lost": 0,
                 "coverage": None, "samples": len(seqs)}
-    # 收窄到 `list[int]`：上面那条已经把 None 全部挡掉，但 `any(...)` 不是
-    # 类型谓词，检查器看不到这层保证。不写 `cast` 而重新构造一次列表——
-    # 代价是 n 个元素，换来的是**真的**过滤而不是骗过检查器。
-    vals = [int(s) for s in seqs if s is not None]
-    arrived = len(vals)
+    arrived = len(nums)
     # 每一步"应该发生几包"：正常 +1；有缺口时 b-a 就是这一段应发的包数
     # （如 3→5 说明中间该有 4，共 2 包）。b-a<=0（回跳/重复/重启归零）按 1 算，
     # 即"这是紧接着的一条"，不把它当成丢包——设备重启是常态，误报代价高。
-    expected = 1 + sum(max(1, b - a) for a, b in zip(vals, vals[1:], strict=False))
+    expected = 1 + sum(max(1, b - a) for a, b in zip(nums, nums[1:], strict=False))
     lost = expected - arrived
     return {"known": True, "expected": expected, "arrived": arrived,
             "lost": lost, "coverage": arrived / expected, "samples": arrived}
