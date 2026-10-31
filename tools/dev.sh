@@ -393,6 +393,41 @@ supervise() {
 
 # ---- 子命令 -----------------------------------------------------------------
 
+# 启动后把控制台打开。用户要的是"一键"，不是"再复制一个地址去粘"。
+#
+# 三个刻意的决定：
+# 1. **只开前端，不开后端和仿真。** 前端是给人看的那个；后端 /docs 是 Swagger，
+#    仿真控制台是调试用的 —— 一次弹三个窗口是打扰，不是便利。
+# 2. **失败不影响启动。** 没有图形界面（CI、SSH、服务账号）时打不开浏览器是正常的，
+#    这时候只提示一行怎么手动打开，绝不因为"打不开浏览器"把已经起好的服务判失败。
+# 3. **URL 单独占一行、前后不加中文。** 终端和编辑器靠正则识别链接，
+#    夹在中文中间的地址识别不出来，粘不进浏览器。
+open_console() {  # $1=端口
+  local url="http://127.0.0.1:$1" rc=0
+  case "${OS:-}$(uname -s 2>/dev/null)" in
+    *Windows_NT*|*MINGW*|*MSYS*|*CYGWIN*)
+      # explorer.exe 在 Windows 上最稳：cmd 的 `start` 会把 URL 里的 & 当分隔符，
+      # powershell 的 Start-Process 在无 GUI 会话里可能挂住。explorer 立刻返回。
+      command -v explorer.exe >/dev/null 2>&1 || rc=1
+      [ "$rc" -eq 0 ] && { explorer.exe "$url" >/dev/null 2>&1 & }
+      ;;
+    Darwin*)
+      command -v open >/dev/null 2>&1 || rc=1
+      [ "$rc" -eq 0 ] && { open "$url" >/dev/null 2>&1 & }
+      ;;
+    *)
+      command -v xdg-open >/dev/null 2>&1 || rc=1
+      [ "$rc" -eq 0 ] && { xdg-open "$url" >/dev/null 2>&1 & }
+      ;;
+  esac
+  if [ "$rc" -eq 0 ]; then
+    echo "  → 已发起打开浏览器（没弹出来就点下面的链接）"
+  else
+    # 无图形界面（CI / SSH / 服务账号）很正常，不是错误。
+    echo "  · 本机没有可用的浏览器启动器，点下面的链接打开"
+  fi
+}
+
 cmd_start() {
   local follow=0
   case "${1:-}" in -f|--follow) follow=1 ;; esac
@@ -447,17 +482,24 @@ cmd_start() {
     sleep 1
   done
 
+  open_console "$WEB_PORT"
+
   cat <<EOF
 
 ===== 三个入口 =====
-  后端 API      http://127.0.0.1:$PORT      （文档 /docs，自检 /healthz）
-  仿真控制台    http://127.0.0.1:$SIM_PORT    ← 3D 视图、12 关节遥测、故障注入
-  前端控制台    http://127.0.0.1:$WEB_PORT
+  URL      http://127.0.0.1:$WEB_PORT
+  控制台   http://127.0.0.1:$SIM_PORT
+  文档     http://127.0.0.1:$PORT/docs
+EOF
+  printf '  状态     '; printf 'http://127.0.0.1:%s/healthz\n' "$PORT"
+  cat <<EOF
+
+  端口     $PORT（后端）  $SIM_PORT（仿真）  $WEB_PORT（前端）
+  进程     后端 $(pid_from_file API) · 仿真 $(pid_from_file SIM) · 前端 $(pid_from_file WEB)
 
   后台跑着，关掉这个终端不影响。
-  停：bash tools/dev.sh stop      状态：bash tools/dev.sh status
+  停：.\\dev.bat stop      状态：.\\dev.bat status
   日志：.dev-logs/{api,sim,web}.log
-  Windows 上也可以直接用 dev.bat（同一个脚本的入口，不用敲 bash）
 
   想看后端那条完整链路（候选→调查→报告），先灌一条演示日志：
     bash tools/ingest_demo.sh       # 96°C 过温，应产出 critical 候选

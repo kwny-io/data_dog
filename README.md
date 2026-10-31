@@ -73,15 +73,19 @@ make dev-logs     # 跟日志（Ctrl-C 只退出日志）
 make dev-stop     # 只停脚本自己起的进程
 ```
 
-Windows 没装 `make` 时，用根目录的 `dev.bat`，一条命令等价：
+Windows 没装 `make` 时，用根目录的 `dev.bat`，一条命令等价。
+**PowerShell 里必须带 `.\` 前缀**（它默认不从当前目录加载命令），cmd 里可以不带：
 
 ```bat
-dev.bat           :: 启动（双击或终端里敲都行）
-dev.bat status
-dev.bat logs
-dev.bat stop
-dev.bat restart
+.\dev.bat           :: 启动，就绪后自动打开控制台
+.\dev.bat status    :: 端口 + pid 一览
+.\dev.bat logs
+.\dev.bat stop
+.\dev.bat restart
 ```
+
+启动完会直接打印四个可点链接（控制台 / 仿真 / 文档 / 健康检查）和端口、pid，
+并把控制台在浏览器里打开。打不开浏览器（无图形界面）时只提示一行，不影响服务。
 
 `dev.bat` 只做一件事：找到 Git for Windows 自带的 `bash.exe`。cmd / PowerShell 里的
 `bash` 会解析到 WSL，而 WSL 看不到 `D:\`。逻辑仍全在 `tools/dev.sh` 里，两边不分叉。
