@@ -26,6 +26,10 @@
 运行
 ----
     python -m data_dog.go2_sim.server --port 8099
+
+要候选**落库进控制台**（而不只是显示在本页面），加 `--api-url`：
+
+    python -m data_dog.go2_sim.server --port 8099 --api-url http://127.0.0.1:8000
 """
 from __future__ import annotations
 
@@ -41,6 +45,7 @@ from pydantic import BaseModel
 
 from .dds_bridge import DdsTelemetryPublisher
 from .faults import FAULT_LIBRARY, fault_by_key
+from .http_pub import HttpTelemetryPublisher
 from .mqtt_pub import MqttTelemetryPublisher
 from .postures import POSTURES
 from .rig import _JOINT_TO_COMPONENT, SimConfig
@@ -53,7 +58,20 @@ from .semantic import (
 from .session import SPEEDS, SimEvent, SimSession
 
 # 演示身份。与 MQTT 侧一致：身份来自信道配置，不来自报文。
-DEMO_TENANT = "tenant-go2-demo"
+#
+# **必须是 `tenant-demo`，不是自造的名字。** 控制台默认读 `DD_WEB_TENANT`，
+# 而那个值由 `compose.yaml` / `tools/dev.sh` 定为 `tenant-demo`（与 Makefile
+# 的 `TENANT ?=` 同一个值，由 `tests/test_demo_tenant_consistency.py` 钉住）。
+# 早先这里是 `tenant-go2-demo`：仿真器自己检测出的候选能显示在自己的页面上，
+# 但一旦接上 `--api-url`，数据就落进了一个控制台永远不会查的租户——
+# 表现为"后端显示有数据、控制台永远是空"，而多租户隔离本身是对的，
+# 排查时极易误判成接口坏了。默认值对齐是最便宜的一处防御。
+#
+# ⚠ 这条不变式早先**没有守卫**：`test_demo_tenant_consistency.py` 当时只比对
+# Makefile ↔ compose.yaml，仿真器与 dev.sh 都不在它的射程内，所以这里漂成
+# `tenant-go2-demo` 一直没有测试变红。那两条断言是后补的——改这个常量之前，
+# 先确认它们为什么存在。
+DEMO_TENANT = "tenant-demo"
 DEMO_DEVICE = "device-go2-sim-01"
 
 # 窗口样本数。**不能用 `DataPlane` 的默认值 30**，那在 10Hz 投递下只有 3 秒，
@@ -289,17 +307,26 @@ def create_app(*, config: SimConfig | None = None,
                mqtt_qos: int = 1,
                dds: bool = False, dds_domain: int = 0,
                dds_interface: str | None = None,
+               api_url: str | None = None, api_key: str | None = None,
+               tenant_id: str = DEMO_TENANT, device_sn: str = DEMO_DEVICE,
                frame_hz: float = 5.0) -> FastAPI:
     app = FastAPI(title="Go2 仿真控制台", version="0.1.0")
-    sink = _PlaneSink()
+    sink = _PlaneSink(tenant_id=tenant_id, device_sn=device_sn)
     # MQTT 是可选的第二条出口：不配 host 就只走进程内数据面。
     # 两者**同时**投递而不是二选一——演示时页面上看候选、同时能用另一个
     # 订阅端证明数据真的上了总线。
     mqtt = MqttTelemetryPublisher(
-        host=mqtt_host, port=mqtt_port, tenant_id=DEMO_TENANT,
-        device_sn=DEMO_DEVICE, qos=mqtt_qos,
+        host=mqtt_host, port=mqtt_port, tenant_id=tenant_id,
+        device_sn=device_sn, qos=mqtt_qos,
         enabled=bool(mqtt_host)) if mqtt_host else None
-    # DDS 是第三条出口：**真机协议**，把语义数据组装成一整个 `LowState_`
+    # HTTP 也是可选出口，但与 MQTT 的用途不同：它是**唯一让候选落库**的一条。
+    # 进程内数据面的候选只活在内存（退出即失），MQTT 那条要靠后端另起流式
+    # 消费者才有人收；走 `/v1/telemetry` 才是真正进入 `ServiceState` → DB
+    # → 控制台的路。不给 `--api-url` 时是空实现，演示形态与之前完全一致。
+    http_pub = HttpTelemetryPublisher(
+        base_url=api_url, tenant_id=tenant_id, device_sn=device_sn,
+        api_key=api_key, enabled=bool(api_url)) if api_url else None
+    # DDS 是第四条出口：**真机协议**，把语义数据组装成一整个 `LowState_`
     # 走 `rt/lowstate`。它与 MQTT 不是一回事——MQTT 发的是本项目自己的
     # raw-log 信封，DDS 发的是厂商 IDL 定义、真机控制器认的帧。
     #
@@ -342,11 +369,14 @@ def create_app(*, config: SimConfig | None = None,
         sink.push(ev)
         if mqtt is not None:
             mqtt.publish(ev.env)
+        if http_pub is not None:
+            http_pub.publish(ev.env)
 
     session._on_event = _deliver
     app.state.session = session
     app.state.sink = sink
     app.state.mqtt = mqtt
+    app.state.http = http_pub
     app.state.dds = dds_pub
 
     @app.on_event("startup")
@@ -358,6 +388,8 @@ def create_app(*, config: SimConfig | None = None,
         session.stop()
         if mqtt is not None:
             mqtt.close()
+        if http_pub is not None:
+            http_pub.close()
         if dds_pub is not None:
             dds_pub.close()
 
@@ -372,6 +404,8 @@ def create_app(*, config: SimConfig | None = None,
         snap["data_plane"] = sink.stats()
         snap["frame"] = session.frame_state()
         snap["mqtt"] = mqtt.state() if mqtt is not None else {"enabled": False}
+        snap["http"] = (http_pub.state() if http_pub is not None
+                        else {"enabled": False})
         snap["dds"] = (dds_pub.state() if dds_pub is not None
                        else {"enabled": False})
         snap["server_time"] = datetime.now(timezone.utc).isoformat()
@@ -485,6 +519,16 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--dds-domain", type=int, default=0)
     ap.add_argument("--dds-interface", default=None,
                     help="DDS 网卡名（多网卡时指定，避免走错）")
+    ap.add_argument("--api-url", default=None,
+                    help="data_dog 服务地址（如 http://127.0.0.1:8000）；"
+                         "给了就把遥测推进 /v1/telemetry，候选落库、进控制台")
+    ap.add_argument("--api-key", default=None,
+                    help="X-API-Key；后端设了 DD_API_KEY 时必须给")
+    ap.add_argument("--tenant", default=DEMO_TENANT,
+                    help=f"写入租户（默认 {DEMO_TENANT}）；必须与控制台的 "
+                         "DD_WEB_TENANT 一致，否则控制台看不到候选")
+    ap.add_argument("--device-sn", default=DEMO_DEVICE,
+                    help=f"设备号（默认 {DEMO_DEVICE}）")
     args = ap.parse_args(argv)
 
     cfg = SimConfig(posture=args.posture, fault=args.fault,
@@ -494,7 +538,9 @@ def main(argv: list[str] | None = None) -> int:
                      mqtt_host=args.mqtt_host, mqtt_port=args.mqtt_port,
                      mqtt_qos=args.mqtt_qos,
                      dds=args.dds, dds_domain=args.dds_domain,
-                     dds_interface=args.dds_interface)
+                     dds_interface=args.dds_interface,
+                     api_url=args.api_url, api_key=args.api_key,
+                     tenant_id=args.tenant, device_sn=args.device_sn)
     app.state.session.set_speed(args.speed)
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
     return 0

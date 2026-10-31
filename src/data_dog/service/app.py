@@ -57,6 +57,7 @@ from .runtime import (
     _stop_escalation,
     _stop_job_runner,
     _stream_handle,
+    reset_ingest_plane,
 )
 from .write_behind import start_writer_if_enabled, stop_writer
 
@@ -363,6 +364,10 @@ def create_app() -> FastAPI:
         description="P2 在线数据面 HTTP 入口：原始日志 → 候选异常（确定性、失败关闭）。",
         lifespan=_lifespan,
     )
+
+    # 摄入数据面是**一次服务生命周期内唯一**的（见 `runtime.get_ingest_plane`）。
+    # 每次装配都清空，否则上一个 app 攒的窗口和限流令牌会漏进来。
+    reset_ingest_plane()
 
     # -------------------------------------------------- CORS（可选）
     # 仅当 DD_CORS_ORIGINS 显式给出来源时才挂载；未设 = 同源（浏览器默认拦跨源）。

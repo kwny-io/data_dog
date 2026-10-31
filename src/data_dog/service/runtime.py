@@ -95,8 +95,76 @@ class ServiceState:
         builder = SharedCandidateBuilder(state_store=get_state_store(),
                                          watermark=self.watermark)
         return DataPlane(self.resolver, gateway=self.gateway, builder=builder,
-                         watermark=self.watermark)
+                         watermark=self.watermark,
+                         window_size=settings.data_plane_window_size())
 _state = ServiceState()
+
+# ------------------------------------------------------------ 摄入用的长驻数据面
+#
+# **为什么不能每个请求新建一个 `DataPlane`（这里曾经是那样）**
+#
+# `DataPlane` 里的 `WindowBuffer` 是**有状态**的：所有"持续性 / 斜率 / 包级丢包"
+# 类规则都要在窗口里攒够样本才有意义。而 `POST /v1/telemetry` 原先每来一个请求
+# 就 `_state.new_plane()` 造一个新的——窗口从空开始，一批约 10 条事件（10Hz 投递
+# / 每批 200ms），**跨请求不累积**。
+#
+# 后果不是"精度差一点"，而是**规则恒假**：
+#   - `MOTOR_STALL_SUSTAINED` 的前置是 `window.span() >= 5.0`；
+#   - 一批 10 条 @10Hz = 1 秒跨度，永远够不到 5 秒；
+#   - 于是"堵转"——最典型的故障——在后端链路上**一条候选都报不出来**。
+#     实测：同一次 F1 注入，仿真器进程内报出 `MOTOR_STALL_SUSTAINED`，
+#     同一批数据推到后端后什么都没报。
+#
+# 调 `DD_DATA_PLANE_WINDOW` 没用，因为窗口根本没活过请求边界。这是同一个
+# 缺陷的两个面：窗口要**既够大、又活得够久**。
+#
+# 流式路径（`stream/runner.py`）一直是对的——`StreamRunner` 持有一个长驻 plane。
+# 这里把 HTTP 摄入拉齐到同一模型。
+#
+# **为什么配一把锁**：同步端点在线程池里跑，两个并发请求会同时进 `process_batch`，
+# 而 `WindowBuffer` / `stats` 都没有内部同步。仿真器侧（`_PlaneSink`）早就有锁，
+# 这里同样必须有——否则"攒窗口"会变成"两个请求各写一半、谁也攒不满"。
+
+# 保护"槽位"本身，不保护数据面内部状态（那是调用方持锁在做的事）。
+_ingest_slot_lock = threading.Lock()
+
+
+def reset_ingest_plane() -> None:
+    """清空长驻摄入数据面，下次接入请求重建。由 `create_app()` 调用。
+
+    ⚠ 用 `getattr` 读、直接赋值写：测试会把 `_state` 换成一个只有
+    `new_plane` / `build_error` 的替身，替身上没有 `ingest_plane` 这个字段，
+    直接读会 AttributeError。写则没问题——替身是可写对象。
+    """
+    with _ingest_slot_lock:
+        _state.ingest_plane = None        # type: ignore[attr-defined]
+
+
+def get_ingest_plane() -> tuple[Any, threading.Lock] | None:
+    """返回**当前服务生命周期内唯一**的摄入数据面与它的锁。建不起来返回 None。
+
+    ⚠ 为什么作用域是"一次服务生命周期"，而不是另外两种更省事的写法：
+
+    - **每请求新建**（原先如此）→ `WindowBuffer` 跨请求不累积，持续性规则
+      恒假（见上）。这是要修的缺陷本身。
+    - **永不重置的全局** → 状态跨 `create_app()` 泄漏。测试每个用例都建新 app，
+      上一条用例攒的窗口和限流令牌会带进来，表现为"单独跑绿、全量跑红"；
+      生产里热重载也会带上旧窗口。所以 `create_app()` 每次都 `reset_ingest_plane()`。
+
+    **懒建**：第一次接入请求时才问 `_state.new_plane()`。`_state` 上的网关/
+    绑定可能被替换（测试打桩、运维换绑），早建会把替换前的旧对象钉死，
+    打桩就成了空操作——表现为"桩打了、请求还是走旧网关"。
+
+    建不起来时**不缓存坏对象**，如实传 None 让路由回 503。
+    """
+    with _ingest_slot_lock:
+        plane = getattr(_state, "ingest_plane", None)
+        if plane is None:
+            plane = _state.new_plane()
+            _state.ingest_plane = plane    # type: ignore[attr-defined]
+    return None if plane is None else (plane, _ingest_slot_lock)
+
+
 _stream_lock = threading.Lock()
 _stream: tuple[Any, Any, threading.Thread, threading.Event] | None = None
 # ---------------------------------------------------------------- 启动期诊断

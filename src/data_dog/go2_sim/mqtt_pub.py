@@ -50,7 +50,7 @@ class MqttTelemetryPublisher:
     """
 
     def __init__(self, *, host: str = "127.0.0.1", port: int = 1883,
-                 tenant_id: str = "tenant-go2-demo",
+                 tenant_id: str = "tenant-demo",
                  device_sn: str = "device-go2-sim-01",
                  qos: int = 1, keepalive: int = 30,
                  client_id: str | None = None,

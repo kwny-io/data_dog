@@ -14,7 +14,7 @@ from ...core.redact import redact
 from ...storage import repository as repo
 from ...storage.db import session_scope
 from ..deps import require_tenant_and_device
-from ..runtime import _log, _state, _stats_dict
+from ..runtime import _log, _state, _stats_dict, get_ingest_plane
 from ..write_behind import get_writer
 
 router = APIRouter()
@@ -38,18 +38,22 @@ def ingest_telemetry(
     if len(events) > 1000:
         raise HTTPException(status_code=422, detail="单批 events 上限 1000 条")
 
-    plane = _state.new_plane()
-    if plane is None:
+    # **长驻数据面**（带锁），不是每请求新建。理由见 `runtime.get_ingest_plane`
+    # 的 docstring：窗口必须跨请求累积，否则 5 秒门槛的持续性规则恒假。
+    got = get_ingest_plane()
+    if got is None:
         _state.rejected_requests += 1
         raise HTTPException(status_code=503,
                             detail=f"算子绑定不可用：{_state.build_error}")
+    plane, lock = got
 
     _state.request_count += 1
     _log.info("接入请求", extra={
         "tenant_id": auth["tenant_id"], "device_sn": auth["device_sn"],
         "events": len(events),
     })
-    result = plane.process_batch(events, auth)
+    with lock:
+        result = plane.process_batch(events, auth)
     metrics.observe_data_plane(result.stats)
     metrics.candidates_created_total.inc(len(result.candidates))
     _log.info("接入完成", extra={

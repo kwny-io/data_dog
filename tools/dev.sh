@@ -16,9 +16,11 @@
 #   :8099  data_dog.go2_sim  仿真控制台：MuJoCo 跑起来、电机数据灌进数据面
 #   :3000  web/              Next.js 控制台，服务端代理转发 /api/dd/* 到 :8000
 #
-# **仿真器和后端是两个独立进程**：仿真器自己跑数据面（`subsystem_operator`），
-# 故障一条链路在 :8099 页面就能看到；后端那条链路（候选→Agent→报告）走 :3000。
-# 两者都要开，调试才完整。
+# **仿真器和后端是两个独立进程**，但数据是**连着**的：
+#   MuJoCo → 仿真器 → `POST /v1/telemetry` → 后端数据面 → 候选落库 → :3000 控制台
+# 仿真器**另外**在自己进程里也跑一份数据面，所以 :8099 页面上能当场看到
+# 检测结果，不必等后端。两条都是真的，不是二选一：
+# 进程内那份用于"注入故障、立刻看规则命不命中"，落库那份用于"走完整链路"。
 #
 # 为什么要有守护进程
 # ------------------
@@ -331,8 +333,13 @@ supervise() {
     exit 1
   }
 
+  # 窗口 60 个样本 @10Hz = 6 秒。默认 30 只有 3 秒，够不到
+  # `MOTOR_STALL_SUSTAINED` 的 `span() >= 5.0` 门槛——堵转在后端永远报不出来
+  # （详见 settings.data_plane_window_size 的说明）。仿真器侧一直是 60，
+  # 这里把后端拉齐，否则会出现"仿真页面报了、控制台不报"的同一条规则两种结果。
   echo "→ 起后端 :$PORT（日志 $API_LOG）" >>"$DEV_LOG"
-  "$PY" -m data_dog.service >"$API_LOG" 2>&1 &
+  DD_DATA_PLANE_WINDOW="${DD_DATA_PLANE_WINDOW:-60}" \
+    "$PY" -m data_dog.service >"$API_LOG" 2>&1 &
   API_PID=$!
   echo "API=$(to_winpid "$API_PID")" >>"$PIDS_FILE"
   wait_for "后端" api_is_ours "$API_LOG" 90 "$API_PID" >>"$DEV_LOG" 2>&1 \
@@ -341,8 +348,25 @@ supervise() {
 
   # `--publish-hz` 默认 10Hz：控制台页面够用。要压真链路再往上调，
   # 并同步调高下游限流（见 server.py 里的频率说明）。
+  #
+  # `--api-url` 是**链路接通的关键参数**，不是可选项：不给它，仿真器只在自己
+  # 进程里跑检测，候选活在内存里、控制台一条都看不到。给了它，遥测经
+  # `POST /v1/telemetry` 进真实服务，候选落库、进控制台。
+  #
+  # `--tenant` 必须与下面前端的 `DD_WEB_TENANT` 是**同一个值**。两者不一致时
+  # 数据确实落了库，但控制台查的是另一个租户 → 永远显示空列表，
+  # 而多租户隔离本身完全正常，这种"看起来像接口坏了"的形态最难查。
+  # 用数组拼可选参数，不用 `${VAR:+--flag "$VAR"}`：那种写法在密钥值含空格时
+  # 会被分词拆坏（引号在参数展开里不是语法），而且读起来像在猜 shell 规则。
+  local -a api_key_arg=()
+  [ -n "${DD_API_KEY:-}" ] && api_key_arg=(--api-key "$DD_API_KEY")
+
   echo "→ 起仿真控制台 :$SIM_PORT（日志 $SIM_LOG）" >>"$DEV_LOG"
-  "$PY" -m data_dog.go2_sim.server --port "$SIM_PORT" >"$SIM_LOG" 2>&1 &
+  "$PY" -m data_dog.go2_sim.server --port "$SIM_PORT" \
+    --api-url "http://127.0.0.1:$PORT" \
+    --tenant "${DD_WEB_TENANT:-tenant-demo}" \
+    --device-sn "device-go2-sim-01" \
+    "${api_key_arg[@]}" >"$SIM_LOG" 2>&1 &
   SIM_PID=$!
   echo "SIM=$(to_winpid "$SIM_PID")" >>"$PIDS_FILE"
   wait_for "仿真控制台" sim_is_ours "$SIM_LOG" 90 "$SIM_PID" >>"$DEV_LOG" 2>&1 \

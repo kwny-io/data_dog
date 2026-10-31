@@ -188,13 +188,47 @@ class DataPlane:
     # ---- 批量 ----
     def process_batch(self, raws: list[dict[str, Any]],
                       auth: dict[str, Any] | None) -> DataPlaneResult:
+        """跑一批事件，返回的 `stats` 是**本批增量**，不是 plane 的累计值。
+
+        这两个词在长驻 plane 下不是同一件事。`self.stats` 活在整个服务生命周期里，
+        而调用方用它做什么决定了必须返回哪个：
+
+        - `metrics.observe_data_plane()` 是 `.inc(...)`（计数器累加），传累计值
+          会让指标按请求数平方增长；
+        - 接入接口回执里的 `stats` 是给调用方看"这一批处理得怎样"的，累计值
+          会让每个请求都报"整个进程至今拒了多少"。
+
+        所以这里做差：调用前后各取一份快照，返回差值。短生命周期 plane（每批
+        新建，测试与 CLI 常见）差值恰好等于累计值，行为与从前一致。
+        """
+        def _snapshot() -> DataPlaneStats:
+            st = self.stats
+            return DataPlaneStats(
+                ingested=st.ingested, resolved=st.resolved,
+                rejected=st.rejected,
+                rejected_by_reason=dict(st.rejected_by_reason))
+
+        before = _snapshot()
         normalized: list[NormalizedTelemetryEvent] = []
         for raw in raws:
             norm, _err = self.process_one(raw, auth)
             if norm is not None:
                 normalized.append(norm)
+        after = self.stats
+        delta = DataPlaneStats(
+            ingested=after.ingested - before.ingested,
+            resolved=after.resolved - before.resolved,
+            rejected=after.rejected - before.rejected,
+            # 只在**本批真的出现过**的原因上留键：累计字典里留着的历史原因
+            # 差值为 0，原样带出来会让回执出现 `{'resolve': 0}` 这种噪音。
+            rejected_by_reason={
+                k: after.rejected_by_reason[k] - before.rejected_by_reason.get(k, 0)
+                for k in after.rejected_by_reason
+                if after.rejected_by_reason[k] - before.rejected_by_reason.get(k, 0) > 0
+            },
+        )
         return DataPlaneResult(
-            normalized=normalized, candidates=self.builder.build(), stats=self.stats,
+            normalized=normalized, candidates=self.builder.build(), stats=delta,
         )
 
 
