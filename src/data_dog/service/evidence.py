@@ -74,6 +74,68 @@ def _detector_for(bridge: RepoEvidenceBridge) -> GeneratedRuleDetector:
 _DETECTOR_CACHE: dict[str, GeneratedRuleDetector] = {}
 
 
+def _sort_key(row: dict[str, Any]) -> tuple[int, float]:
+    """排序键：解析不了时间的行整体沉到最前（`(0, 0.0)`），其余按真实时刻排。
+
+    为什么不用字符串：见 `RepoEvidenceBridge.__init__` 的注释——整秒时刻不带
+    小数位，字典序会把它们排到同秒的其它样本之后。
+    """
+    t = _epoch_s(row.get("occurred_at", ""))
+    return (0, 0.0) if t is None else (1, t)
+
+
+def _row_before(rows: list[dict[str, Any]],
+                first: dict[str, Any]) -> dict[str, Any] | None:
+    """同部件中**早于窗口首行**的最近一条；窗口从设备第一条数据开始时返回 None。"""
+    idx = rows.index(first)
+    return rows[idx - 1] if idx > 0 else None
+
+
+def _peak_row(rows: list[dict[str, Any]],
+              ref: dict[str, float] | None) -> dict[str, Any]:
+    """窗口内**偏离参照最大**的一行，用作"这个窗口实际发生了什么"的代表值。
+
+    判据是各指标相对参照的**归一化偏离**之和（`|v - ref| / (|ref| + 1e-9)`），
+    取最大者。没有参照（窗口从数据开头起）时退回窗口末行——此时没有基线可比，
+    末行至少是"当前状态"。
+
+    为什么不用"最后一个样本"：持续性故障的窗口末尾常常是解除瞬间。仿真器
+    F1 堵转实跑时，5 分钟窗口 17710 行里有 10956 行是 14.98A，最后 3 行却是
+    恢复后的 0.29A；取末行会让 Agent 得出"候选声称 14.5A、实测 0.29A → 误报"
+    的反向结论，而真堵转就此被否掉。
+    """
+    if ref is None:
+        return rows[-1]
+
+    def deviation(row: dict[str, Any]) -> float:
+        std = _standardize(row.get("metrics"))
+        total = 0.0
+        for k, base in ref.items():
+            v = std.get(k)
+            if v is None:
+                continue
+            total += abs(v - base) / (abs(base) + 1e-9)
+        return total
+
+    return max(rows, key=deviation)
+
+
+def _window_stats(rows: list[dict[str, Any]]) -> dict[str, dict[str, float]]:
+    """窗口内每个指标的 min/max/mean。
+
+    Agent 要看的是"这 5 分钟里有没有过半时间在 14.5A 以上"，单点代表值答不了
+    这个问题；均值/min/max 让它能在不读全量原始日志的前提下自行判断持续性。
+    """
+    acc: dict[str, list[float]] = {}
+    for row in rows:
+        for k, v in _standardize(row.get("metrics")).items():
+            acc.setdefault(k, []).append(v)
+    return {
+        k: {"min": min(vs), "max": max(vs), "mean": sum(vs) / len(vs)}
+        for k, vs in acc.items() if vs
+    }
+
+
 def _standardize(metrics: dict[str, Any] | None) -> dict[str, float]:
     """把 P2 原始字段名转成 Agent 证据侧的标准名（temperature → temperature_c）。"""
     if not metrics:
@@ -111,20 +173,26 @@ class RepoEvidenceBridge:
         for r in telemetry_rows:
             comp = r.get("component_ref", "")
             self._by_component.setdefault(comp, []).append(r)
-        # occurred_at 是 ISO8601 字符串 → 字典序即时间序（同格式下成立）
+        # ⚠ 必须按**解析后的时间**排序，不能按字符串。
+        # `_iso()` 在整秒时刻不写小数位（`...:49Z`），而 `.`(0x2E) < `Z`(0x5A)，
+        # 字典序会把 `...:49Z` 排到 `...:49.970000Z` **之后**。同一秒内几十条样本
+        # 的顺序因此是错的，"取最后一条"就取到了恢复后的那条。
         for rows in self._by_component.values():
-            rows.sort(key=lambda x: x.get("occurred_at", ""))
+            rows.sort(key=_sort_key)
 
     def _window_rows(self, component: str, window_start: str, window_end: str
                      ) -> list[dict[str, Any]]:
         rows = self._by_component.get(component, [])
         if not rows:
             return []
-        # 窗口用 ISO8601 字符串比较（字典序=时间序）。候选窗即事件时间，故通常
-        # 恰好命中；若窗口是 "09:55" 之类的纯时刻（旧测试形态）则比较不成立，
-        # 此时退化为"取该部件全部行"，保证仍能给出证据而不是误报 not_found。
+        lo, hi = _epoch_s(window_start), _epoch_s(window_end)
+        # 窗口按**事件时间**比较。解析不了（如旧测试的 "09:55" 纯时刻）就退化为
+        # "取该部件全部行"，保证仍能给出证据而不是误报 not_found。
+        if lo is None or hi is None:
+            return rows
         hit = [r for r in rows
-               if window_start <= r.get("occurred_at", "") <= window_end]
+               if (t := _epoch_s(r.get("occurred_at", ""))) is not None
+               and lo <= t <= hi]
         return hit or rows
 
     def query_telemetry(self, device_sn, component, window_start, window_end):
@@ -135,16 +203,26 @@ class RepoEvidenceBridge:
         rows = self._window_rows(component, window_start, window_end)
         if not rows:
             return None
-        main = rows[-1]
-        # 参照窗：同部件更早一行（若有）。让 Agent 能看出"窗口内指标相对参照的抬升"。
-        idx = self._by_component[component].index(main)
-        ref = self._by_component[component][idx - 1] if idx > 0 else None
+
+        # 参照窗 = 窗口**开始之前**的最后一条，而不是"代表行的上一条"。
+        # 后者是窗口内部的相邻样本（同样处于故障中），拿它当基线等于把故障
+        # 自己的值当参照，抬升被稀释成 0。
+        ref = _row_before(self._by_component[component], rows[0])
+        ref_metrics = _standardize(ref.get("metrics")) if ref else None
+
+        # 代表值取窗口内**偏离参照最大**的那条，而不是最后一条。
+        # 持续性故障（如堵转 5 分钟）的窗口末尾恰好是解除瞬间——末行读到的是
+        # 恢复后的正常值，Agent 据此会判定"候选声称 14.5A，实测 0.29A，误报"。
+        # 这正是 2026-10-31 实跑时把真堵转判成假警报的那条路径。
+        main = _peak_row(rows, ref_metrics)
         return {
             "device_sn": self.device_sn,
             "component": component,
             "window": f"{window_start}-{window_end}",
             "metrics": _standardize(main.get("metrics")),
-            "reference_window_metrics": _standardize(ref.get("metrics")) if ref else None,
+            "reference_window_metrics": ref_metrics,
+            "sample_count": len(rows),
+            "window_metrics": _window_stats(rows),
         }
 
     def query_vendor_knowledge(self, component_type, question=None):

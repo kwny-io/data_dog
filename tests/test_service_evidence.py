@@ -39,6 +39,70 @@ def test_reference_window_is_previous_row():
                                                "current_a": 6.0}
 
 
+def test_sustained_fault_uses_peak_not_last_sample():
+    """持续故障的窗口末行是"解除瞬间"——代表值必须取窗口内异常样本。
+
+    2026-10-31 实跑 F1 堵转时正是这条路径把真故障判成了误报：5 分钟窗口里
+    10956 行是 14.98A，最后 3 行是恢复后的 0.29A，`rows[-1]` 取到后者，
+    Agent 据此写下"候选声称电流≥14.5A，但实测 0.295A → 误报"，告警因此不产生。
+    """
+    rows = [
+        # 故障前：正常电流
+        {"device_sn": "dev-1", "occurred_at": "2026-08-13T10:00:00Z",
+         "component_ref": "joint_motor.front_left_hip",
+         "metrics": {"current": 0.8, "temperature": 25}},
+        # 窗口内：持续堵转
+        {"device_sn": "dev-1", "occurred_at": "2026-08-13T10:01:00Z",
+         "component_ref": "joint_motor.front_left_hip",
+         "metrics": {"current": 14.97, "temperature": 38}},
+        {"device_sn": "dev-1", "occurred_at": "2026-08-13T10:02:00Z",
+         "component_ref": "joint_motor.front_left_hip",
+         "metrics": {"current": 14.98, "temperature": 38}},
+        # 窗口末：故障解除
+        {"device_sn": "dev-1", "occurred_at": "2026-08-13T10:03:00Z",
+         "component_ref": "joint_motor.front_left_hip",
+         "metrics": {"current": 0.29, "temperature": 38}},
+    ]
+    b = RepoEvidenceBridge(rows, device_sn="dev-1")
+    res = b.query_telemetry("dev-1", "joint_motor.front_left_hip",
+                            "2026-08-13T10:01:00Z", "2026-08-13T10:03:00Z")
+    assert res["metrics"]["current_a"] == 14.98, (
+        f"代表值取到了 {res['metrics']['current_a']}A；末行是解除瞬间的 0.29A，"
+        "取它会把这个真堵转判成误报"
+    )
+    # 参照必须是窗口**之前**的正常值，不能是窗口内部的相邻故障样本
+    assert res["reference_window_metrics"]["current_a"] == 0.8
+    # 窗口统计让 Agent 能判断"过半时间在阈值之上"
+    assert res["window_metrics"]["current_a"]["max"] == 14.98
+    assert res["window_metrics"]["current_a"]["min"] == 0.29
+    assert res["sample_count"] == 3
+
+
+def test_timestamps_compare_by_time_not_string():
+    """整秒时间戳不带小数位，字典序会把它排到同秒其它样本之后。
+
+    `...:03Z` vs `...:03.970000Z`：`.`(0x2E) < `Z`(0x5A)，字符串比较认为前者
+    更大。仿真器投递的样本里 2545 行是这种整秒形态，末行取样因此屡屡取错。
+    """
+    rows = [
+        {"device_sn": "dev-1", "occurred_at": "2026-08-13T10:01:00Z",
+         "component_ref": "joint_motor.front_left_hip", "metrics": {"current": 1.0}},
+        {"device_sn": "dev-1", "occurred_at": "2026-08-13T10:01:00.970000Z",
+         "component_ref": "joint_motor.front_left_hip", "metrics": {"current": 9.0}},
+        {"device_sn": "dev-1", "occurred_at": "2026-08-13T10:01:02Z",
+         "component_ref": "joint_motor.front_left_hip", "metrics": {"current": 2.0}},
+    ]
+    b = RepoEvidenceBridge(rows, device_sn="dev-1")
+    # 窗口只含前两条：按真实时间，10:01:00.97 是窗口内最后一条
+    res = b.query_telemetry("dev-1", "joint_motor.front_left_hip",
+                            "2026-08-13T10:01:00Z", "2026-08-13T10:01:01Z")
+    assert res["sample_count"] == 2, (
+        f"窗口内样本数 {res['sample_count']}，第三条（10:01:02）不该被纳入"
+    )
+    # 参照窗是窗口之前的一条——这里窗口从第一条开始，故无参照
+    assert res["reference_window_metrics"] is None
+
+
 def test_unknown_component_denied():
     b = RepoEvidenceBridge(_rows(), device_sn="dev-1")
     res = b.query_telemetry("dev-1", "not_in_allowlist", "a", "b")
